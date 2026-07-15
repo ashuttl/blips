@@ -29,6 +29,13 @@ def blips_parser():
                    help="scope centre as 'lat,lng' or a place name")
     p.add_argument("--zoom", type=float, default=3.0,
                    help="degrees of latitude shown top-to-bottom (default 3)")
+    p.add_argument("--weather", action=argparse.BooleanOptionalAction,
+                   default=True,
+                   help="weather-radar underlay, on by default "
+                        "(--no-weather to disable; toggle live with 'w')")
+    p.add_argument("--wx-theme", default=None, metavar="NAME",
+                   help="weather colour scheme (e.g. dark-sky, nexrad, "
+                        "rainbow); see LibreWXR themes")
     p.add_argument("--print", dest="print_mode", action="store_true",
                    help="single static snapshot (no live mode)")
     p.add_argument("--live", action="store_true",

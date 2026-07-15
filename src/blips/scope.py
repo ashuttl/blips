@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """blips — live air traffic on a braille basemap.
 
-An ambient terminal scope: geography (sea stipple, coastlines, borders) is
-drawn in braille, and live aircraft from community ADS-B aggregators are
-painted over it — a directional blip with an ATC-style data block
+An ambient terminal scope: geography (a block-colour sea, with coastlines and
+borders in braille) is drawn first, and live aircraft from community ADS-B
+aggregators are painted over it — a directional blip with an ATC-style data block
 (callsign + flight level), a velocity leader showing the next minute of
 travel, and a fading braille trail of recent positions.  Between feed polls
 the blips glide on dead reckoning, so the scope moves the way the sky does.
@@ -13,8 +13,8 @@ Layer priority per terminal cell, top to bottom:
   1. aircraft blip           → arrow glyph in altitude colour
   2. data block / city label → text glyph
   3. leaders, trails, rings  → braille strokes
-  4. braille geography       → sea stipple / coast / border dots
-  5. bare land               → background
+  4. coast / border          → braille dots
+  5. sea / bare land         → block-colour background
 
 Usage: blips [--location LAT,LNG | PLACE] [--zoom DEG] [--print]
 """
@@ -28,13 +28,14 @@ import time
 
 from blips._adsb import fetch_point
 from blips._basemap import (
-    Basemap, DotLayer, marine_region, nearest_city, _project,
+    Basemap, DotLayer, SEA_FILL, marine_region, nearest_city, _project,
 )
 from blips._color import BG_PRIMARY, BOLD, RESET, bg, fg, interp_stops, lerp
 from blips._framebuffer import get_terminal_size, visible_len
 from blips._geo import haversine_nm
 from blips._live import live_loop
 from blips._location import geocode_place, get_location
+from blips._radar_sources import get_source
 from blips._runtime import blips_parser, resolve_live
 
 MUTED = (150, 155, 170)
@@ -54,6 +55,8 @@ ALT_STOPS = (
 )
 
 REFRESH_S = 5.0       # feed poll cadence (aggregators ask ≤1 req/s; we're 5x under)
+WEATHER_REFRESH_S = 120.0  # radar composites update ~every 5 min; poll gently
+WX_DIM = 0.6          # weather is an ambient underlay; keep traffic readable on top
 MAX_EXTRAP_S = 20.0   # cap dead reckoning so a stale fix doesn't fly away
 TRAIL_MAX_AGE = 480.0
 TRAIL_MAX_FIXES = 120
@@ -216,6 +219,108 @@ class Feed:
             self._wake.clear()
 
 
+def _view_key(bbox, gw, hc):
+    return (tuple(round(v, 3) for v in bbox), gw, hc)
+
+
+class WeatherFeed:
+    """Background poller for the latest weather-radar frame over the view.
+
+    Mirrors ``Feed``: a daemon thread fetches the newest radar composite for
+    the currently-rendered window and the renderer picks it up on the next
+    repaint.  It only touches the network while weather is toggled on, and a
+    frame is only rendered when it was fetched for the exact view on screen
+    (radar is a raster tied to a bbox, so a stale frame from a different pan/
+    zoom would be misaligned — better to show nothing until the new one lands).
+    """
+
+    def __init__(self, lat, lon, theme=None, nudge=False):
+        self._home = (lat, lon)
+        self._theme = theme
+        self._source = None
+        self.rgba = None
+        self.pw = self.ph = 0
+        self.frame_view = None   # _view_key the current frame was fetched for
+        self.label = ""
+        self.attribution = ""
+        self.updated = None
+        self.error = None
+        self._view = None        # (bbox, gw, hc) requested by the renderer
+        self._view_key = None
+        self._enabled = False
+        self._wake = threading.Event()
+        self._lock = threading.Lock()
+        self._nudge = nudge
+
+    def set_enabled(self, on):
+        with self._lock:
+            if on == self._enabled:
+                return
+            self._enabled = on
+            if not on:  # drop the frame so a re-enable can't flash stale data
+                self.rgba = None
+                self.frame_view = None
+        self._wake.set()
+
+    def set_view(self, bbox, gw, hc):
+        key = _view_key(bbox, gw, hc)
+        with self._lock:
+            if key == self._view_key:
+                return
+            self._view_key = key
+            self._view = (bbox, gw, hc)
+            wake = self._enabled
+        if wake:
+            self._wake.set()
+
+    def start(self):
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def poll_once(self):
+        with self._lock:
+            if not self._enabled or self._view is None:
+                return
+            bbox, gw, hc = self._view
+            key = self._view_key
+        if self._source is None:
+            self._source = get_source(self._home[0], self._home[1], self._theme)
+        result = self._source.latest_rgba(bbox, gw, hc)
+        with self._lock:
+            if result is None:
+                self.rgba = None
+                self.frame_view = None
+            else:
+                self.pw, self.ph, self.rgba = result
+                self.frame_view = key
+            self.label = self._source.label
+            self.attribution = self._source.attribution
+            self.updated = time.time()
+            self.error = None
+
+    def snapshot(self):
+        with self._lock:
+            return (self.rgba, self.pw, self.ph, self.frame_view,
+                    self.label, self.attribution, self.updated, self.error)
+
+    def _run(self):
+        while True:
+            if self._enabled:
+                try:
+                    self.poll_once()
+                except Exception as exc:
+                    with self._lock:
+                        self.error = str(exc)
+                if self._nudge:
+                    try:
+                        os.kill(os.getpid(), signal.SIGWINCH)
+                    except Exception:
+                        pass
+                self._wake.wait(WEATHER_REFRESH_S)
+            else:
+                self._wake.wait()  # idle until toggled on
+            self._wake.clear()
+
+
 _place_cache = {}
 
 
@@ -284,39 +389,103 @@ def _draw_rings(fx, home_lat, home_lon, zoom):
             fx._set_dot(int(x), int(y), RING)
 
 
-def _draw_trail(fx, trail, color, now):
+def _fade_bg(basemap, dx, dy):
+    """Background a braille dot at dot-coords (dx, dy) will sit on.
+
+    Trails and leaders fade toward whatever they're drawn over, so an old
+    trail dissolves into the sea fill instead of leaving a dark speckle.
+    """
+    col, row = dx // 2, dy // 4
+    if (0 <= row < basemap.height_cells and 0 <= col < basemap.graph_w
+            and basemap.sea[row][col]):
+        return SEA_FILL
+    return BG_PRIMARY
+
+
+def _draw_trail(fx, basemap, trail, color, now):
     for tlat, tlon, tt in trail:
         age = now - tt
         if age > TRAIL_MAX_AGE:
             continue
         weight = max(0.15, 0.55 * (1.0 - age / TRAIL_MAX_AGE))
         x, y = _project(tlon, tlat, fx.bbox, fx.dw, fx.dh)
-        fx._set_dot(int(x), int(y), lerp(BG_PRIMARY, color, weight))
+        dx, dy = int(x), int(y)
+        fx._set_dot(dx, dy, lerp(_fade_bg(basemap, dx, dy), color, weight))
 
 
-def _draw_leader(fx, ac, lat, lon, color):
+def _draw_leader(fx, basemap, ac, lat, lon, color):
     """Velocity leader: where the aircraft will be in one minute."""
     if ac["ground"] or not ac["gs"] or ac["track"] is None:
         return
     tip_lat, tip_lon = advance(lat, lon, ac["track"], ac["gs"] / 60.0)
     x0, y0 = _project(lon, lat, fx.bbox, fx.dw, fx.dh)
     x1, y1 = _project(tip_lon, tip_lat, fx.bbox, fx.dw, fx.dh)
-    fx._dot_line(x0, y0, x1, y1, lerp(BG_PRIMARY, color, 0.55))
+    fx._dot_line(x0, y0, x1, y1,
+                 lerp(_fade_bg(basemap, int(x0), int(y0)), color, 0.55))
 
 
-def compose(basemap, fx, overlays, graph_w, height_cells):
-    """Composite geography + braille fx + text overlays into ANSI lines."""
+def _build_echo(rgba, pw, ph, graph_w, height_cells):
+    """Reduce a sub-pixel radar frame to a per-cell (r, g, b, weight) grid.
+
+    Each cell spans two sub-pixel rows; their echo colours are alpha-blended
+    and the coverage is scaled by WX_DIM so the weather reads as a dim underlay
+    the traffic sits on top of.  Cells with no echo stay None.
+    """
+    echo = [[None] * graph_w for _ in range(height_cells)]
+    cols = min(pw, graph_w)
+    for cy in range(height_cells):
+        y0 = cy * 2
+        if y0 >= ph:
+            break
+        r0 = y0 * pw
+        has_bot = (y0 + 1) < ph
+        r1 = (y0 + 1) * pw if has_bot else r0
+        erow = echo[cy]
+        for cx in range(cols):
+            i0 = (r0 + cx) * 4
+            a0 = rgba[i0 + 3]
+            if has_bot:
+                i1 = (r1 + cx) * 4
+                a1 = rgba[i1 + 3]
+            else:
+                i1, a1 = i0, 0
+            tw = a0 + a1
+            if not tw:
+                continue
+            r = (rgba[i0] * a0 + rgba[i1] * a1) // tw
+            g = (rgba[i0 + 1] * a0 + rgba[i1 + 1] * a1) // tw
+            b = (rgba[i0 + 2] * a0 + rgba[i1 + 2] * a1) // tw
+            erow[cx] = (r, g, b, (max(a0, a1) / 255.0) * WX_DIM)
+    return echo
+
+
+def compose(basemap, fx, overlays, graph_w, height_cells, echo=None):
+    """Composite geography + weather + braille fx + text overlays into ANSI lines.
+
+    The sea, land and (when present) weather echo all resolve to a per-cell
+    background colour; braille strokes and text glyphs are drawn on top of it.
+    """
     base_bg = bg(*BG_PRIMARY)
+    sea_bg = bg(*SEA_FILL)
+    sea = basemap.sea
     lines = []
     for cy in range(height_cells):
         parts = []
+        srow = sea[cy]
+        erow = echo[cy] if echo is not None else None
         for cx in range(graph_w):
+            e = erow[cx] if erow is not None else None
+            if e is not None:
+                base_rgb = SEA_FILL if srow[cx] else BG_PRIMARY
+                cell_bg = bg(*lerp(base_rgb, (e[0], e[1], e[2]), e[3]))
+            else:
+                cell_bg = sea_bg if srow[cx] else base_bg
             ov = overlays.get((cx, cy))
             if ov is not None:
                 ch, color = ov
                 if ch == "":
                     continue  # trailing column of a double-width glyph
-                parts.append(f"{base_bg}{fg(*color)}{ch}")
+                parts.append(f"{cell_bg}{fg(*color)}{ch}")
                 continue
             mask = fx.dots[cy][cx]
             layer = fx if mask else basemap
@@ -324,9 +493,9 @@ def compose(basemap, fx, overlays, graph_w, height_cells):
                 mask = basemap.dots[cy][cx]
             if mask:
                 color = layer.color[cy][cx] or DIM
-                parts.append(f"{base_bg}{fg(*color)}{chr(0x2800 + mask)}")
+                parts.append(f"{cell_bg}{fg(*color)}{chr(0x2800 + mask)}")
             else:
-                parts.append(f"{base_bg} ")
+                parts.append(f"{cell_bg} ")
         parts.append(RESET)
         lines.append("".join(parts))
     return lines
@@ -358,7 +527,8 @@ def _focused_line(ac, home):
 
 
 def render_scope(center, zoom, feed, home, playing=True, mouse_pos=None,
-                 show_trails=True, show_rings=True, show_ground=True, **_):
+                 show_trails=True, show_rings=True, show_ground=True,
+                 weather=None, show_weather=False, **_):
     now = time.time()
     cols, rows = get_terminal_size()
     graph_w = max(20, cols)
@@ -370,6 +540,18 @@ def render_scope(center, zoom, feed, home, playing=True, mouse_pos=None,
     aircraft, trails, updated, source, error = feed.snapshot()
     if not show_ground:
         aircraft = [ac for ac in aircraft if not ac["ground"]]
+
+    # weather underlay: keep the poller aimed at the live view, but only paint
+    # a frame that was fetched for exactly this window (else it'd be misaligned)
+    echo = None
+    wx_label = wx_error = None
+    if show_weather and weather is not None:
+        weather.set_view(bbox, graph_w, height_cells)
+        rgba, pw, ph, frame_view, wx_label, _attr, _wxup, wx_error = \
+            weather.snapshot()
+        if rgba is not None and frame_view == _view_key(bbox, graph_w,
+                                                        height_cells):
+            echo = _build_echo(rgba, pw, ph, graph_w, height_cells)
 
     # braille fx layer: rings under trails under velocity leaders
     fx = DotLayer(bbox, graph_w, height_cells)
@@ -395,8 +577,8 @@ def render_scope(center, zoom, feed, home, playing=True, mouse_pos=None,
     for _d2, ac, alat, alon, col, row in placed:
         color = blip_color(ac)
         if show_trails:
-            _draw_trail(fx, trails.get(ac["hex"], ()), color, now)
-        _draw_leader(fx, ac, alat, alon, color)
+            _draw_trail(fx, basemap, trails.get(ac["hex"], ()), color, now)
+        _draw_leader(fx, basemap, ac, alat, alon, color)
         if ac["ground"]:
             continue  # ground targets: dim blip only, no data block
         # declutter: a data block draws only where it fits whole — try the
@@ -435,7 +617,7 @@ def render_scope(center, zoom, feed, home, playing=True, mouse_pos=None,
         if abs(best[4] - mcol) <= 4 and abs(best[5] - mrow) <= 2:
             focused = best[1]
 
-    map_lines = compose(basemap, fx, overlays, graph_w, height_cells)
+    map_lines = compose(basemap, fx, overlays, graph_w, height_cells, echo)
 
     airborne = sum(1 for ac in aircraft if not ac["ground"])
     ground = len(aircraft) - airborne
@@ -463,10 +645,18 @@ def render_scope(center, zoom, feed, home, playing=True, mouse_pos=None,
         if visible_len(foot) > cols:
             foot = f"{fg(*MUTED)}{focused['callsign']}{RESET}"
     else:
-        left = f"{fg(*DIM)}Live ADS-B by {source or 'adsb.lol'}{RESET}"
+        src_note = f"Live ADS-B by {source or 'adsb.lol'}"
+        if show_weather:
+            if echo is not None:
+                src_note += f" · wx {wx_label}"
+            elif wx_error:
+                src_note += " · wx unavailable"
+            else:
+                src_note += " · wx …"
+        left = f"{fg(*DIM)}{src_note}{RESET}"
         ring_note = f"rings {_ring_spacing_nm(zoom)} nm" if show_rings else ""
         hint = (f"{fg(*DIM)}{ring_note} · +/- zoom · drag pan · t trails "
-                f"· r rings · g ground · q quit{RESET}"
+                f"· r rings · g ground · w weather · q quit{RESET}"
                 if sys.stdout.isatty() else "")
         for foot in (f"{left}  {hint}", f"{left}", ""):
             if visible_len(foot) <= cols:
@@ -508,15 +698,29 @@ def main():
     feed.set_view(lat, lon, view_radius_nm(
         bbox_for(lat, lon, zoom[0], 80, 40), lat, lon))
 
+    from blips._radar_sources import theme_id
+    wx_theme = theme_id(args.wx_theme)
+    weather = WeatherFeed(lat, lon, theme=wx_theme, nudge=live)
+
     if not live:
         try:
             feed.poll_once()
         except Exception as exc:
             feed.error = str(exc)
-        print(render_scope(center, zoom[0], feed, home, playing=False))
+        if args.weather:
+            cols, rows = get_terminal_size()
+            gw, hc = max(20, cols), max(8, rows - 2)
+            weather.set_enabled(True)
+            weather.set_view(bbox_for(lat, lon, zoom[0], gw, hc), gw, hc)
+            try:
+                weather.poll_once()
+            except Exception as exc:
+                weather.error = str(exc)
+        print(render_scope(center, zoom[0], feed, home, playing=False,
+                           weather=weather, show_weather=bool(args.weather)))
         return
 
-    toggles = {"t": [True], "r": [True], "g": [True]}
+    toggles = {"t": [True], "r": [True], "g": [True], "w": [bool(args.weather)]}
 
     def _sync_feed():
         cols, rows = get_terminal_size()
@@ -525,6 +729,12 @@ def main():
         feed.set_view(center[0], center[1],
                       view_radius_nm(bbox, center[0], center[1]))
 
+    def _sync_weather():
+        cols, rows = get_terminal_size()
+        gw, hc = max(20, cols), max(8, rows - 2)
+        weather.set_view(bbox_for(center[0], center[1], zoom[0], gw, hc),
+                         gw, hc)
+
     def on_action(key):
         if key == "+":
             zoom[0] = max(0.4, zoom[0] / 1.5)
@@ -532,6 +742,9 @@ def main():
             zoom[0] = min(24.0, zoom[0] * 1.5)
         elif key in toggles:
             toggles[key][0] = not toggles[key][0]
+            if key == "w":
+                weather.set_enabled(toggles["w"][0])
+                _sync_weather()
             return True
         else:
             return False
@@ -556,11 +769,16 @@ def main():
         return True
 
     feed.start()
+    weather.start()
+    if toggles["w"][0]:
+        weather.set_enabled(True)
+        _sync_weather()
     live_loop(
         lambda playing=True, mouse_pos=None, **_: render_scope(
             center, zoom[0], feed, home, playing=playing,
             mouse_pos=mouse_pos, show_trails=toggles["t"][0],
-            show_rings=toggles["r"][0], show_ground=toggles["g"][0]),
+            show_rings=toggles["r"][0], show_ground=toggles["g"][0],
+            weather=weather, show_weather=toggles["w"][0]),
         interval=REFRESH_S,
         mouse=True,
         auto_play=True,
