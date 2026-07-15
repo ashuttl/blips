@@ -577,10 +577,20 @@ _last_frame = {}  # cached clean render, shifted for live drag-pan preview
 def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
                  show_trails=True, show_rings=True, show_ground=True,
                  weather=None, show_weather=False, drag_offset=None,
-                 routes=None, **_):
+                 routes=None, pins=None, lines_geo=None, game_footer=None,
+                 header_note=None, **_):
+    """Render one frame of the scope.
+
+    The last four parameters are the game's hooks, inert otherwise:
+    ``pins`` are geo-anchored glyphs with labels (sector fixes), ``lines_geo``
+    are geo-anchored braille strokes (runway, localizer), ``game_footer`` is
+    ``(n_lines, builder)`` where ``builder(focused)`` supplies the bottom
+    lines in place of the standard footer, and ``header_note`` replaces the
+    place name in the header (facility, score, shift clock).
+    """
     cols, rows = get_terminal_size()
     graph_w = max(20, cols)
-    height_cells = max(8, rows - 2)
+    height_cells = max(8, rows - 1 - (game_footer[0] if game_footer else 1))
 
     # live drag: slide the last map under the cursor now; the true re-render
     # (fresh geography, blips) lands on release. The reticle (rings+crosshair)
@@ -619,6 +629,13 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
     # braille fx layer: trails under velocity leaders (range rings are a fixed
     # reticle stamped later, so they don't ride the map during a drag)
     fx = DotLayer(bbox, graph_w, height_cells)
+
+    # game strokes: runway and localizer, drawn first so traffic covers them
+    if lines_geo:
+        for glat1, glon1, glat2, glon2, gcolor in lines_geo:
+            gx0, gy0 = _project(glon1, glat1, fx.bbox, fx.dw, fx.dh)
+            gx1, gy1 = _project(glon2, glat2, fx.bbox, fx.dw, fx.dh)
+            fx._dot_line(gx0, gy0, gx1, gy1, gcolor)
 
     # aircraft positions, centre-out so central traffic gets labels first
     minlon, minlat, maxlon, maxlat = bbox
@@ -662,6 +679,23 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
             air[(col, row)] = (blip_glyph(ac), blip_color(ac))
 
     overlays = dict(basemap.city_overlays())
+    # game pins (sector fixes): glyph + as much of the label as fits, under
+    # the traffic — a data block always outranks a fix name
+    if pins:
+        for plat, plon, glyph, pcolor, plabel in pins:
+            if not (minlon <= plon <= maxlon and minlat <= plat <= maxlat):
+                continue
+            pcol = int((plon - minlon) / (maxlon - minlon) * graph_w)
+            prow = int((maxlat - plat) / (maxlat - minlat) * height_cells)
+            if not (0 <= pcol < graph_w and 0 <= prow < height_cells):
+                continue
+            overlays[(pcol, prow)] = (glyph, pcolor)
+            for i, ch in enumerate(plabel or ""):
+                cell = (pcol + 2 + i, prow)
+                if (cell[0] >= graph_w or cell in overlays
+                        or cell in blip_cells):
+                    break
+                overlays[cell] = (ch, DIM)
     overlays.update(air)
 
     # reticle: range rings + crosshair, fixed at the view centre and stamped
@@ -700,23 +734,31 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
     counts = f"✈ {airborne}"
     if ground and show_ground:
         counts += f" · {ground} gnd"
-    age = f"↺ {now - updated:.0f}s" if updated else "…"
-    status = f"{'▶' if playing else '⏸'} {age}"
-    if error:
-        status += " · feed unavailable, retrying"
+    if game_footer is not None:
+        status = "▶" if playing else "⏸"   # no feed to be stale in the game
+    else:
+        age = f"↺ {now - updated:.0f}s" if updated else "…"
+        status = f"{'▶' if playing else '⏸'} {age}"
+        if error:
+            status += " · feed unavailable, retrying"
 
     def _header(place_str):
         return (f"{fg(*MARKER)}{BOLD}⬤ blips{RESET}  {fg(*MUTED)}{place_str}"
                 f"{RESET}  {fg(*DIM)}{counts} · {status}{RESET}")
 
-    place = _place(lat, lon)
+    place = header_note if header_note else _place(lat, lon)
     header = _header(place)
     over = visible_len(header) - cols
     if over > 0 and len(place) > over + 1:
         header = _header(place[:len(place) - over - 1] + "…")
     header += " " * max(0, cols - visible_len(header))
 
-    if focused is not None:
+    if game_footer is not None:
+        # the game supplies the bottom lines (radio log + command bar)
+        foot = "\n".join(
+            line + " " * max(0, cols - visible_len(line))
+            for line in game_footer[1](focused))
+    elif focused is not None:
         # route lookup is async: None now, filled in (with a repaint nudge)
         # once adsbdb answers — keep asking while the hover lasts
         route = routes.get(focused["callsign"]) if routes else None
@@ -742,15 +784,35 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
         for foot in (f"{left}  {hint}", f"{left}", ""):
             if visible_len(foot) <= cols:
                 break
-    foot += " " * max(0, cols - visible_len(foot))
+    if game_footer is None:
+        foot += " " * max(0, cols - visible_len(foot))
 
     # cache this clean frame so a live drag can shift the map whole and
-    # re-stamp the (fixed) reticle over it (see the drag fast-path up top)
+    # re-stamp the (fixed) reticle over it (see the drag fast-path up top);
+    # blip screen positions ride along so a click can name its aircraft
     _last_frame.clear()
     _last_frame.update(grid=grid, reticle=reticle, header=header, footer=foot,
-                       gw=graph_w, hc=height_cells)
+                       gw=graph_w, hc=height_cells,
+                       hits=[(p[4], p[5], p[1]["callsign"]) for p in placed])
 
     return "\n".join([header, *map_lines, foot])
+
+
+def hit_test(screen_col, screen_row):
+    """Callsign of the blip near a screen cell, or None (game click-to-hail).
+
+    Uses the last clean frame's blip positions; same tolerance as hover
+    focus (a couple of rows, a few columns — cells are tall).
+    """
+    hits = _last_frame.get("hits")
+    if not hits:
+        return None
+    mcol, mrow = screen_col - 1, screen_row - 2  # screen → cell coords
+    best = min(hits, key=lambda h: (h[0] - mcol) ** 2
+               + ((h[1] - mrow) * 2) ** 2)
+    if abs(best[0] - mcol) <= 4 and abs(best[1] - mrow) <= 2:
+        return best[2]
+    return None
 
 
 def main():
@@ -758,6 +820,11 @@ def main():
     if args.debug:
         from blips._runtime import set_debug
         set_debug(True)
+
+    if args.game is not None:
+        from blips._game import main as game_main
+        game_main(args)
+        return
 
     override = args.location or os.environ.get("BLIPS_LOCATION", "").strip()
     if override:

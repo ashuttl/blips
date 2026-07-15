@@ -70,12 +70,17 @@ def _normalize_wheel_cb(cb):
     return None
 
 
-def _read_key(fd):
+def _read_key(fd, raw=False):
     """Read a keypress from stdin in cbreak mode. Returns action string or None.
 
     Fully consumes CSI/SS3 escape sequences so leftover bytes don't leak.
     Uses a longer timeout (150ms) to avoid splitting mouse escape sequences
     when the system is busy (e.g. after a re-render).
+
+    With ``raw=True`` every printable character comes back as 'key:<char>'
+    (case preserved, space included) instead of the shortcut mappings —
+    for callers that own a text input, like the game's command bar.
+    Escape sequences, enter, and backspace decode the same either way.
     """
     import select as _sel
 
@@ -147,6 +152,14 @@ def _read_key(fd):
                 }.get(b3)
         return 'escape'
 
+    if b in (b'\r', b'\n'):
+        return 'key:enter'
+    if b in (b'\x7f', b'\x08'):
+        return 'key:backspace'
+    if raw:
+        if len(b) == 1 and 32 <= b[0] < 127:
+            return f"key:{b.decode('ascii')}"
+        return None
     if b in (b'q', b'Q'):
         return 'quit'
     if b in (b'o', b'O'):
@@ -159,8 +172,6 @@ def _read_key(fd):
         return 'key:-'
     if b in (b't', b'T'):
         return 'key:t'
-    if b in (b'\r', b'\n'):
-        return 'key:enter'
     if len(b) == 1 and 32 < b[0] < 127:
         # any other printable key: pass through to on_action (lowercased)
         return f"key:{b.decode('ascii').lower()}"
@@ -172,7 +183,7 @@ def _read_key(fd):
 # ---------------------------------------------------------------------------
 def live_loop(render_fn, interval=60, mouse=False, on_open=None, scroll_step=15,
               auto_play=False, play_interval=0.6, on_action=None, on_drag=None,
-              intercept=None):
+              intercept=None, raw_keys=False):
     """Run render_fn() in a loop on the alternate screen buffer.
 
     render_fn: callable(offset_minutes=0) returning (display_string, metadata)
@@ -207,6 +218,11 @@ def live_loop(render_fn, interval=60, mouse=False, on_open=None, scroll_step=15,
                action and trigger a re-render — this is how a caller-drawn
                menu takes over the arrow keys. Default None preserves
                existing behavior exactly.
+    raw_keys: if True, printable keys arrive as 'key:<char>' with case and
+              spaces preserved, bypassing the q/space/n shortcut mappings —
+              for callers that own a text input (the game's command bar).
+              The caller's intercept should handle everything; it may raise
+              SystemExit to leave the loop cleanly.
     Re-renders immediately on terminal resize (SIGWINCH) or input.
     """
     import select, signal, termios, tty
@@ -301,7 +317,7 @@ def live_loop(render_fn, interval=60, mouse=False, on_open=None, scroll_step=15,
                         pass
                     break
                 if fd in ready:
-                    action = _read_key(fd)
+                    action = _read_key(fd, raw_keys)
                     if (intercept is not None and action is not None
                             and not isinstance(action, tuple)
                             and intercept(action)):

@@ -47,6 +47,10 @@ def blips_parser():
                    help="alias for --classic-colors")
     p.add_argument("--debug", action="store_true",
                    help="show diagnostic info on stderr")
+    # the easter egg: an approach-control sim on the same scope.  Takes an
+    # airport (ICAO/IATA/name); bare --game plays wherever you are.
+    p.add_argument("--game", nargs="?", const="", default=None,
+                   metavar="AIRPORT", help=argparse.SUPPRESS)
     return p
 
 
