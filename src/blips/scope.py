@@ -539,6 +539,30 @@ def _shift_grid(grid, dcol, drow, blank):
     return out
 
 
+def _clip_ansi(s, width):
+    """Truncate a one-line ANSI string to ``width`` visible columns.
+
+    Walks the string keeping escape sequences intact; anything cut loses a
+    column to an ellipsis so the clip reads as deliberate.
+    """
+    if visible_len(s) <= width:
+        return s
+    out, seen = [], 0
+    i = 0
+    while i < len(s) and seen < width - 1:
+        if s[i] == "\033":
+            m = i + 1
+            while m < len(s) and s[m] not in "m\\":
+                m += 1
+            out.append(s[i:m + 1])
+            i = m + 1
+            continue
+        out.append(s[i])
+        seen += 1
+        i += 1
+    return "".join(out) + f"{RESET}{fg(*DIM)}…{RESET}"
+
+
 def _route_leg(leg):
     place, code = leg
     return f"{place} {code}".strip() if place else code
@@ -754,9 +778,12 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
     header += " " * max(0, cols - visible_len(header))
 
     if game_footer is not None:
-        # the game supplies the bottom lines (radio log + command bar)
+        # the game supplies the bottom lines (radio log + command bar);
+        # clip before padding — a wrapped footer line would shove the whole
+        # frame down a row on every repaint
         foot = "\n".join(
-            line + " " * max(0, cols - visible_len(line))
+            (lambda ln: ln + " " * max(0, cols - visible_len(ln)))(
+                _clip_ansi(line, cols))
             for line in game_footer[1](focused))
     elif focused is not None:
         # route lookup is async: None now, filled in (with a repaint nudge)
