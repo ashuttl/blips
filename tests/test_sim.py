@@ -337,6 +337,101 @@ def test_type_aliases_land_in_perf():
         assert alias in PERF, f"{real} → {alias} but PERF doesn't know it"
 
 
+# -- weather ------------------------------------------------------------------
+
+def _wall_east_of(lon0):
+    """Fake radar: solid heavy echo east of a longitude, clear west."""
+    return lambda lat, lon: 1.0 if lon > lon0 else 0.0
+
+
+def test_vector_into_a_cell_is_refused(sim):
+    ap = sim.airport
+    ac = _arrival(sim, lat=ap["lat"] + 0.4, lon=ap["lon"], alt=10000.0,
+                  hdg=360.0)
+    sim.wx_sample = _wall_east_of(ac["lon"] + 0.05)
+    line = sim.command("100 r 90")      # straight into the wall
+    assert "into a cell" in line
+    assert ac["tgt_hdg"] == 360.0       # instruction not applied
+    assert "turn left heading" in sim.command("100 l 270")  # away: fine
+
+
+def test_pilots_deviate_when_ignored(sim):
+    ap = sim.airport
+    ac = _arrival(sim, lat=ap["lat"] + 0.4, lon=ap["lon"], alt=10000.0,
+                  hdg=90.0)             # flying at the wall
+    sim.wx_sample = _wall_east_of(ac["lon"] + 0.03)
+    _run(sim, 10)
+    assert any("requesting 30" in line for _t, line, _k in sim.radio)
+    assert not ac.get("wx_deviating")
+    _run(sim, 30)                       # ignored: they act
+    assert ac["wx_deviating"]
+    assert any("deviating" in line for _t, line, _k in sim.radio)
+    sim.wx_sample = lambda lat, lon: 0.0    # the cell clears
+    _run(sim, 10)
+    assert not ac["wx_deviating"]
+    assert any("clear of weather" in line for _t, line, _k in sim.radio)
+
+
+def test_emergency_exempt_from_weather(sim):
+    ap = sim.airport
+    ac = _arrival(sim, lat=ap["lat"] + 0.4, lon=ap["lon"], alt=10000.0,
+                  hdg=360.0)
+    sim.wx_sample = _wall_east_of(ac["lon"] + 0.05)
+    sim._declare_emergency(ac)
+    assert "turn right heading" in sim.command("100 r 90")
+
+
+# -- the day changes ------------------------------------------------------------
+
+def test_flow_change_flips_the_runway(sim):
+    old_rwy, old_end = sim.sector["rwy"], sim.sector["end"]
+    # one arrival merely cleared, one established: only the first loses it
+    thr, course = sim.sector["thr"], sim.sector["course"]
+    lat, lon = advance(*thr, (course + 180.0) % 360.0, 12.0)
+    est = _arrival(sim, lat=lat, lon=lon, alt=3000.0, hdg=course, ias=180.0)
+    sim.command("100 i")
+    _run(sim, 45)
+    assert est["phase"] == "established"
+    far = _arrival(sim, callsign="DAL200", alt=9000.0)
+    far["phase"] = "cleared"            # pretend they were cleared far out
+    sim._next_flow = 0.0
+    _run(sim, 2)
+    assert sim.sector["end"] != old_end
+    assert sim.sector["rwy"] != old_rwy
+    assert sim.sector_rev == 1
+    assert any("ATIS update" in line for _t, line, _k in sim.radio)
+    assert far["phase"] == "cruise"     # clearance canceled
+    assert est["phase"] in ("established", "landed")   # grandfathered
+
+
+def test_emergency_priority_bonus(sim):
+    thr, course = sim.sector["thr"], sim.sector["course"]
+    lat, lon = advance(*thr, (course + 180.0) % 360.0, 10.0)
+    ac = _arrival(sim, lat=lat, lon=lon, alt=3000.0, hdg=course, ias=180.0)
+    sim._declare_emergency(ac)
+    assert ac["squawk"] == "7700"
+    assert sim.bell
+    sim.bell = False
+    sim.command("100 i")
+    _run(sim, 600)
+    assert sim.landed == 1
+    assert sim.score == 100 + 300       # landing + quick-priority bonus
+    assert any("medics" in line for _t, line, _k in sim.radio)
+
+
+def test_seeded_shifts_reproduce():
+    ap = find_airport("tpa")
+    radios = []
+    for _ in range(2):
+        s = Sim(ap, seed=4471)
+        t = s.start
+        for i in range(300):
+            t += 1.0
+            s.tick(t)
+        radios.append([line for _t, line, _k in s.radio])
+    assert radios[0] == radios[1]       # same script, same shift
+
+
 # -- terrain ------------------------------------------------------------------
 
 class _Hills:

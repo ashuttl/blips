@@ -51,6 +51,10 @@ def blips_parser():
     # airport (ICAO/IATA/name); bare --game plays wherever you are.
     p.add_argument("--game", nargs="?", const="", default=None,
                    metavar="AIRPORT", help=argparse.SUPPRESS)
+    # a seeded shift replays the same traffic script (synthetic cast, so
+    # it reproduces regardless of who's really flying today)
+    p.add_argument("--seed", type=int, default=None,
+                   help=argparse.SUPPRESS)
     return p
 
 

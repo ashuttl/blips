@@ -124,10 +124,28 @@ altitude here is seven thousand three hundred" — and a descent drifting
 into rising ground levels off with a complaint. The ILS, a surveyed path,
 is exempt. Offline the world is flat.
 
-**Weather is next.** The same live radar underlay the scope renders is
-terrain the sim's pilots should respect — refusing vectors into heavy
-echo, asking for deviations. The seam is designed in; it ships after the
-core loop settles.
+**Weather is gameplay.** The same live radar frame the scope renders is
+what the sim's pilots see out the windscreen. Vector someone into a heavy
+cell and they refuse, with a suggestion ("unable — that heading puts us
+into a cell, we could take further left"). Fly them at one and they ask
+for a deviation; ignore them for twenty seconds and they take it
+themselves, then call clear of weather and wait for your vector. The real
+storms over your real airport are the game's terrain, different every
+session. Turn weather off (`w`) and the sky is honest: nobody complains.
+
+**The day changes.** Ten-odd minutes in, the ATIS updates: the wind has
+come around, and the airport turns with it — new landing runway (the
+reciprocal end), new localizer on the map, departures rolling the other
+way. Anyone established rides their approach in; anyone merely cleared
+hears "cancel approach clearance, expect the new runway" and is yours to
+re-sequence. This is the hardest moment in real approach control, on
+purpose.
+
+**Sometimes it's not routine.** At most once a shift, an arrival declares
+a medical emergency — squawk 7700, the blip goes red and stays red, and
+they want the field *now*. Get them down inside twelve minutes for a
++300 bonus; everyone else can wait. Your terminal bell rings for maydays
+and separation losses, because you're heads-down typing when it matters.
 
 ## Under the hood
 

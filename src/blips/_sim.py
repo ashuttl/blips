@@ -192,17 +192,22 @@ def build_sector(airport):
 
     runway = airport["rwys"][0]                    # longest, by build sort
     end = rng.choice(("le", "he"))                 # today's flow
-    ident, course, thr_lat, thr_lon = runway[end]
-    if thr_lat is None:                            # no threshold coords —
-        back = runway["he" if end == "le" else "le"]  # walk back from midpoint
-        thr_lat, thr_lon = advance(
-            lat, lon, (course + 180.0) % 360.0,
-            runway["len"] / 6076.0 / 2.0)
+    ident, course, thr = _end_geometry(airport, runway, end)
     return {
         "fixes": fixes, "entries": entries, "exits": exits,
-        "rwy": ident, "course": course,
-        "thr": (thr_lat, thr_lon), "elev": airport["elev"],
+        "rwy": ident, "course": course, "thr": thr, "end": end,
+        "elev": airport["elev"],
     }
+
+
+def _end_geometry(airport, runway, end):
+    """(ident, course, (thr_lat, thr_lon)) for one end of a runway."""
+    ident, course, thr_lat, thr_lon = runway[end]
+    if thr_lat is None:                            # no threshold coords —
+        thr_lat, thr_lon = advance(                # walk back from midpoint
+            airport["lat"], airport["lon"], (course + 180.0) % 360.0,
+            runway["len"] / 6076.0 / 2.0)
+    return ident, course, (thr_lat, thr_lon)
 
 
 def _runway_end(airport, ident):
@@ -227,6 +232,11 @@ class Sim:
         self.rng = random.Random(seed)
         self.pool = pool         # live-sampled traffic, or None when offline
         self.terrain = terrain   # sector MVA grid, or None for a flat world
+        self.wx_sample = None    # callable(lat, lon) → echo 0..1, or None
+        self.sector_rev = 0      # bumps on a flow change so the UI redraws
+        self.bell = False        # ring the terminal on the next frame
+        self.go_arounds = 0
+        self.diversions = 0
         self.aircraft = []
         self.trails = {}
         self.radio = []          # [(time, line, kind)] — newest last
@@ -243,6 +253,8 @@ class Sim:
         self._next_arrival = 45.0
         self._next_departure = 30.0
         self._next_request = 150.0
+        self._next_flow = self.rng.uniform(600.0, 1080.0)
+        self._emergencies = 0
         self._elapsed = 0.0
         self._last_tick = None
         self._prepopulate()      # a shift starts mid-shift, not empty
@@ -514,6 +526,7 @@ class Sim:
             ac["tgt_alt"] = float(
                 round((self.sector["elev"] + 3000.0) / 1000.0) * 1000.0)
             self.score -= 50
+            self.go_arounds += 1
             self.say(f"{telephony(ac['callsign'])} going around — "
                      f"{'too fast' if ac['ias'] > ac['perf'][2] + 25.0 else 'too high'},"
                      " give us vectors when you can", "alert")
@@ -538,10 +551,108 @@ class Sim:
             self._fly(ac, dt)
             ac["delay"] += dt
         self._requests(dt)
+        self._weather_tick(dt)
+        self._flow_tick(dt)
+        self._emergency_tick(dt)
         self._separation()
         self._trails(now)
         self._retire()
         self.updated = now
+
+    # -- weather ------------------------------------------------------------
+    def _wx_ahead(self, ac, hdg, dist_nm=10.0, samples=5):
+        """Worst radar echo (0..1) along a heading; 0.0 when unknown."""
+        if self.wx_sample is None:
+            return 0.0
+        worst = 0.0
+        for i in range(1, samples + 1):
+            plat, plon = advance(ac["lat"], ac["lon"], hdg,
+                                 dist_nm * i / samples)
+            worst = max(worst, self.wx_sample(plat, plon) or 0.0)
+        return worst
+
+    def _weather_tick(self, dt):
+        """Pilots don't fly into cells: they ask, then they act."""
+        if self.wx_sample is None:
+            return
+        for ac in self.aircraft:
+            if (ac["phase"] not in ("cruise", "hold")
+                    or ac["squawk"] == "7700"):
+                continue
+            ahead = self._wx_ahead(ac, ac["hdg"], 6.0)
+            if ac.get("wx_deviating"):
+                if ahead < 0.3:
+                    ac["wx_deviating"] = False
+                    ac["wx_asked_t"] = None
+                    self.say(f"{telephony(ac['callsign'])} clear of weather,"
+                             " ready for a vector", "request")
+                continue
+            if ahead < 0.65:
+                ac["wx_asked_t"] = None
+                continue
+            side = ("left" if self._wx_ahead(ac, (ac["hdg"] - 30.0) % 360.0)
+                    <= self._wx_ahead(ac, (ac["hdg"] + 30.0) % 360.0)
+                    else "right")
+            if ac.get("wx_asked_t") is None:
+                ac["wx_asked_t"] = self._elapsed
+                self.say(f"{telephony(ac['callsign'])} requesting 30 "
+                         f"{side} for weather", "request")
+            elif self._elapsed - ac["wx_asked_t"] > 20.0:
+                # ignored long enough: they protect themselves
+                ac["wx_deviating"] = True
+                delta = -30.0 if side == "left" else 30.0
+                ac["tgt_hdg"] = (ac["hdg"] + delta) % 360.0
+                ac["turn_dir"] = side[0]
+                if ac["phase"] == "hold":
+                    ac["phase"] = "cruise"
+                self.say(f"{telephony(ac['callsign'])} deviating {side}, "
+                         "will advise clear", "request")
+
+    # -- the day changes ------------------------------------------------------
+    def _flow_tick(self, dt):
+        """Eventually the wind comes around, and the airport turns with it."""
+        self._next_flow -= dt
+        if self._next_flow > 0:
+            return
+        self._next_flow = self.rng.uniform(900.0, 1500.0)
+        runway = self.airport["rwys"][0]
+        new_end = "he" if self.sector["end"] == "le" else "le"
+        ident, course, thr = _end_geometry(self.airport, runway, new_end)
+        self.sector.update(rwy=ident, course=course, thr=thr, end=new_end)
+        self.sector_rev += 1
+        wind_dir = round((course + self.rng.uniform(-20.0, 20.0))
+                         % 360.0 / 10.0) * 10 or 360
+        self.say(f"ATIS update — wind {wind_dir:03d} at "
+                 f"{self.rng.randint(8, 16)}, landing and departing "
+                 f"runway {self.sector['rwy']}", "atis")
+        for ac in self.aircraft:
+            if ac["plan"] == "arrival" and ac["phase"] == "cleared":
+                # not yet established: their clearance dies with the flow
+                ac["phase"] = "cruise"
+                self.say(f"{telephony(ac['callsign'])}, cancel approach "
+                         f"clearance, fly present heading, expect runway "
+                         f"{ident}", "atc")
+
+    # -- emergencies ----------------------------------------------------------
+    def _declare_emergency(self, ac):
+        ac["squawk"] = "7700"    # the blip goes red and stays red
+        ac["mayday_t"] = self._elapsed
+        self._emergencies += 1
+        self.bell = True
+        self.say(f"MAYDAY, MAYDAY — {telephony(ac['callsign'])} declaring "
+                 "a medical emergency, request priority to the field",
+                 "alert")
+
+    def _emergency_tick(self, dt):
+        if self._emergencies >= 1 or self._elapsed < 600.0:
+            return
+        if self.rng.random() > dt / 1500.0:
+            return
+        candidates = [ac for ac in self.aircraft
+                      if ac["plan"] == "arrival" and ac["phase"] == "cruise"
+                      and ac["alt"] > 6000.0]
+        if candidates:
+            self._declare_emergency(self.rng.choice(candidates))
 
     def _requests(self, dt):
         """Now and then somebody on frequency wants something."""
@@ -572,6 +683,11 @@ class Sim:
             if ac["phase"] == "landed":
                 self.landed += 1
                 self.score += 100
+                if ac.get("mayday_t") is not None:
+                    quick = self._elapsed - ac["mayday_t"] < 720.0
+                    self.score += 300 if quick else 100
+                    self.say(f"{telephony(ac['callsign'])} — thanks for "
+                             "the help, medics are meeting us", "checkin")
                 self.trails.pop(ac["hex"], None)
                 continue
             dist = haversine_nm(ac["lat"], ac["lon"],
@@ -581,6 +697,7 @@ class Sim:
                     self.departed += 1
                 elif ac["plan"] == "arrival":
                     self.score -= 100
+                    self.diversions += 1
                     self.say(f"{ac['callsign']} diverted — flew out of "
                              "your airspace unworked", "alert")
                 else:
@@ -612,6 +729,7 @@ class Sim:
                 if pair not in self._bust_pairs:
                     self.busts += 1
                     self.score -= 500
+                    self.bell = True
                     self.say(f"LOSS OF SEPARATION — {a['callsign']} and "
                              f"{b['callsign']}", "alert")
         self._bust_pairs = current
@@ -643,6 +761,25 @@ class Sim:
         self.say(line, "readback")
         return line
 
+    def _wx_check(self, ac, new_hdg):
+        """Refuse a vector into a cell the pilot can see on their radar.
+
+        Only when the new heading is meaningfully worse than the current
+        one — if they're already in the soup, any instruction that helps
+        is welcome.  Emergencies take whatever gets them down fastest.
+        """
+        if ac["squawk"] == "7700":
+            return
+        new_wx = self._wx_ahead(ac, new_hdg)
+        if new_wx < 0.65 or new_wx <= self._wx_ahead(ac, ac["hdg"]) + 0.1:
+            return
+        me = telephony(ac["callsign"])
+        side = ("left" if self._wx_ahead(ac, (new_hdg - 40.0) % 360.0)
+                <= self._wx_ahead(ac, (new_hdg + 40.0) % 360.0)
+                else "right")
+        raise CommandError(f"unable — that heading puts {me} into a cell, "
+                           f"we could take further {side}")
+
     def _apply(self, ac, ins):
         """Apply one instruction; return its readback phrase.
 
@@ -653,8 +790,11 @@ class Sim:
         me = telephony(ac["callsign"])
         kind = ins["kind"]
         if kind == "turn":
-            ac["tgt_hdg"] = float(ins["hdg"] % 360 or 360)
+            hdg = float(ins["hdg"] % 360 or 360)
+            self._wx_check(ac, hdg)
+            ac["tgt_hdg"] = hdg
             ac["turn_dir"] = ins["dir"]
+            ac["wx_deviating"] = False
             if ac["phase"] in ("cleared", "established", "hold"):
                 ac["phase"] = "cruise"     # vectored off approach or hold
             word = "left" if ins["dir"] == "l" else "right"
@@ -702,8 +842,11 @@ class Sim:
             if spot is None:
                 raise CommandError(f"unable — {me} is unfamiliar with "
                                    f"{ins['fix']}")
-            ac["tgt_hdg"] = bearing_to(ac["lat"], ac["lon"], spot[0], spot[1])
+            hdg = bearing_to(ac["lat"], ac["lon"], spot[0], spot[1])
+            self._wx_check(ac, hdg)
+            ac["tgt_hdg"] = hdg
             ac["turn_dir"] = None
+            ac["wx_deviating"] = False
             if ac["phase"] in ("cleared", "established", "hold"):
                 ac["phase"] = "cruise"
             return f"direct {ins['fix']}"

@@ -626,7 +626,7 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
                  show_trails=True, show_rings=True, show_ground=True,
                  weather=None, show_weather=False, drag_offset=None,
                  routes=None, pins=None, lines_geo=None, game_footer=None,
-                 header_note=None, rings_at=None, **_):
+                 header_note=None, rings_at=None, ground=None, **_):
     """Render one frame of the scope.
 
     The last five parameters are the game's hooks, inert otherwise:
@@ -638,6 +638,9 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
     ``rings_at`` pins the range rings, crosshair and compass to a fixed
     point (the airport you're working) instead of the view centre — they
     then ride the map through a pan rather than following the scope head.
+    ``ground`` is a callable(bbox, graph_w, height_cells) → echo grid (or
+    None): a second underlay tint below the weather — terrain — filling
+    only the cells the weather leaves empty.
     """
     cols, rows = get_terminal_size()
     graph_w = max(20, cols)
@@ -681,6 +684,20 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
         if rgba is not None and frame_view == _view_key(bbox, graph_w,
                                                         height_cells):
             echo = _build_echo(rgba, pw, ph, graph_w, height_cells)
+
+    # terrain (or any ground tint) sits under the weather: it only fills
+    # cells the precipitation leaves empty, so storms always read on top
+    if ground is not None:
+        gecho = ground(bbox, graph_w, height_cells)
+        if gecho is not None:
+            if echo is None:
+                echo = gecho
+            else:
+                for gy in range(height_cells):
+                    erow, grow = echo[gy], gecho[gy]
+                    for gx in range(graph_w):
+                        if erow[gx] is None:
+                            erow[gx] = grow[gx]
 
     # braille fx layer: trails under velocity leaders (range rings are a fixed
     # reticle stamped later, so they don't ride the map during a drag)

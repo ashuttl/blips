@@ -11,6 +11,7 @@ unchanged, with the sector's fixes and runway pinned onto the map.
 """
 
 import math
+import random
 import sys
 import time
 
@@ -35,7 +36,9 @@ GAME_ZOOM = 1.9           # degrees of latitude: the sector ring plus margin
 RADIO_COLORS = {
     "checkin": GOOD, "readback": MUTED, "atc": DIM,
     "alert": ALERT, "error": WARN, "help": DIM, "request": WARN,
+    "atis": WARN,
 }
+TERRAIN_TINT = (126, 96, 58)   # high ground, as a dim warm wash
 
 HINT = ("callsign then:  l/r hdg · c/d alt · rs/is spd · s resume · "
         "dct FIX · hold [FIX] · i [rwy] · ho  —  ? help · pause · quit")
@@ -164,6 +167,53 @@ def _sector_pins(sim, airport):
     return pins, lines
 
 
+def _wx_sampler(rgba, pw, ph, fbbox):
+    """Point-sample a radar frame: (lat, lon) → echo 0..1, None off-frame.
+
+    Bound to the frame's own bbox, so it stays honest even if the view
+    has panned away since the frame was fetched.
+    """
+    minlon, minlat, maxlon, maxlat = fbbox
+
+    def sample(lat, lon):
+        if not (minlat <= lat <= maxlat and minlon <= lon <= maxlon):
+            return None
+        px = int((lon - minlon) / (maxlon - minlon) * (pw - 1))
+        py = int((maxlat - lat) / (maxlat - minlat) * (ph - 1))
+        return rgba[(py * pw + px) * 4 + 3] / 255.0
+
+    return sample
+
+
+def _rating(sim):
+    """A letter for the shift.  Busts are what they are."""
+    if sim._elapsed < 120.0:
+        return "—"
+    if sim.busts >= 3 or sim.score < 0:
+        return "F"
+    per_hr = sim.score / max(sim._elapsed / 3600.0, 1.0 / 60.0)
+    for grade, floor in (("A+", 6000), ("A", 4500), ("B+", 3500),
+                         ("B", 2500), ("C", 1200), ("D", 0)):
+        if per_hr >= floor:
+            return grade
+    return "F"
+
+
+def _shift_card(sim, airport, seed, live_cast):
+    minutes = int(sim._elapsed) // 60
+    code = (airport["iata"] or airport["icao"]).lower()
+    cast_note = " (synthetic cast)" if live_cast else ""
+    return "\n".join([
+        f"{BOLD}shift summary{RESET} — {airport['icao']} · {minutes} min",
+        f"  landed {sim.landed} · handed off {sim.departed} · "
+        f"go-arounds {sim.go_arounds} · diversions {sim.diversions} · "
+        f"busts {sim.busts}",
+        f"  score {sim.score:,} · rating {BOLD}{_rating(sim)}{RESET}",
+        f"  {fg(*DIM)}replay this traffic: blips --game {code} "
+        f"--seed {seed}{cast_note}{RESET}",
+    ])
+
+
 def _resolve_airport(query):
     if query:
         ap = find_airport(query)
@@ -187,19 +237,62 @@ def _resolve_airport(query):
 def main(args):
     airport = _resolve_airport((args.game or "").strip())
     live = resolve_live(args)
+    seed = args.seed if args.seed is not None else random.randint(10000,
+                                                                  99999)
     pool = terrain = None
+    from blips._terrain import Terrain
+    terrain = Terrain(airport["lat"], airport["lon"])
     if live:
-        from blips._fleet import TrafficPool
         from blips._sim import PERF
-        from blips._terrain import Terrain
-        pool = TrafficPool(airport, PERF)
-        pool.start()      # the real traffic near this airport, filling in
-        terrain = Terrain(airport["lat"], airport["lon"])
         terrain.start()   # real elevation → MVAs; flat until it lands
-    sim = Sim(airport, pool=pool, terrain=terrain)
+        if args.seed is None:
+            # live cast breaks determinism, so seeded shifts skip it
+            from blips._fleet import TrafficPool
+            pool = TrafficPool(airport, PERF)
+            pool.start()  # the real traffic near this airport, filling in
+    else:
+        terrain._fetch()  # a screenshot is worth the synchronous wait
+    sim = Sim(airport, seed=seed, pool=pool, terrain=terrain)
     center = [airport["lat"], airport["lon"]]
     zoom = [GAME_ZOOM]
-    pins, lines_geo = _sector_pins(sim, airport)
+    scenery = {"rev": -1, "pins": None, "lines": None}
+    _ground_cache = {}
+
+    def sector_scenery():
+        """Pins and strokes for the current sector, rebuilt on flow change."""
+        if scenery["rev"] != sim.sector_rev:
+            scenery["pins"], scenery["lines"] = _sector_pins(sim, airport)
+            scenery["rev"] = sim.sector_rev
+        return scenery["pins"], scenery["lines"]
+
+    def ground(bbox, gw, hc):
+        """Terrain as a per-cell underlay tint: MVA above the field glows."""
+        if terrain is None:
+            return None
+        key = (tuple(round(v, 3) for v in bbox), gw, hc)
+        if key in _ground_cache:
+            return _ground_cache[key]
+        if terrain.mva_at(airport["lat"], airport["lon"]) is None:
+            return None      # grid not in yet; try again next frame
+        base = airport["elev"] + 2500.0
+        minlon, minlat, maxlon, maxlat = bbox
+        grid = []
+        for cy in range(hc):
+            clat = maxlat - (cy + 0.5) * (maxlat - minlat) / hc
+            row = []
+            for cx in range(gw):
+                clon = minlon + (cx + 0.5) * (maxlon - minlon) / gw
+                mva = terrain.mva_at(clat, clon)
+                if mva is None or mva <= base:
+                    row.append(None)
+                else:
+                    w = min(0.30, 0.07 + (mva - base) / 9000.0 * 0.25)
+                    row.append((*TERRAIN_TINT, w))
+            grid.append(row)
+        if len(_ground_cache) > 4:
+            _ground_cache.clear()
+        _ground_cache[key] = grid
+        return grid
     weather = WeatherFeed(airport["lat"], airport["lon"],
                           theme=theme_id(args.wx_theme), nudge=live)
     state = {"paused": False, "weather": bool(args.weather)}
@@ -245,15 +338,24 @@ def main(args):
 
     def render(playing=True, mouse_pos=None, **_):
         console.last_mouse = mouse_pos
+        # the sim's pilots see whatever radar frame the scope is showing
+        rgba, pw, ph, frame_view, *_rest = weather.snapshot()
+        sim.wx_sample = (_wx_sampler(rgba, pw, ph, frame_view[0])
+                         if rgba is not None and state["weather"] else None)
         if not state["paused"]:
             sim.tick()
-        return render_scope(
+        pins, lines_geo = sector_scenery()
+        frame = render_scope(
             center, zoom[0], sim, playing=not state["paused"],
             mouse_pos=mouse_pos, show_ground=False, weather=weather,
             show_weather=state["weather"], drag_offset=drag_preview[0],
-            pins=pins, lines_geo=lines_geo,
+            pins=pins, lines_geo=lines_geo, ground=ground,
             game_footer=(2, console.footer), header_note=hud(),
             rings_at=(airport["lat"], airport["lon"]))
+        if sim.bell:
+            sim.bell = False
+            frame = "\a" + frame   # something on frequency needs you
+        return frame
 
     if not live:
         # a static frame for --print: run the shift forward so there's
@@ -310,3 +412,5 @@ def main(args):
     live_loop(render, interval=0.5, mouse=True, auto_play=True,
               play_interval=0.5, on_action=on_action, on_drag=on_drag,
               intercept=console.intercept, raw_keys=True)
+    # back on the normal screen: how the shift went
+    print(_shift_card(sim, airport, seed, live_cast=pool is not None))
