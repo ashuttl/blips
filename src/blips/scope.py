@@ -373,7 +373,7 @@ def _ring_spacing_nm(zoom):
 
 
 def _draw_rings(fx, home_lat, home_lon, zoom):
-    """Dotted range rings around the home marker, ATC-scope style."""
+    """Dotted range rings around the scope centre, ATC-scope style."""
     spacing = _ring_spacing_nm(zoom)
     for k in range(1, 8):
         r_nm = spacing * k
@@ -460,19 +460,21 @@ def _build_echo(rgba, pw, ph, graph_w, height_cells):
 
 
 def compose(basemap, fx, overlays, graph_w, height_cells, echo=None):
-    """Composite geography + weather + braille fx + text overlays into ANSI lines.
+    """Composite geography + weather + braille fx + text overlays into a grid.
 
     The sea, land and (when present) weather echo all resolve to a per-cell
     background colour; braille strokes and text glyphs are drawn on top of it.
+    Returns a per-cell grid (one self-contained ANSI snippet per cell) so a
+    live drag can shift the frame whole; ``_render_lines`` turns it into lines.
     """
     base_bg = bg(*BG_PRIMARY)
     sea_bg = bg(*SEA_FILL)
     sea = basemap.sea
-    lines = []
+    grid = []
     for cy in range(height_cells):
-        parts = []
         srow = sea[cy]
         erow = echo[cy] if echo is not None else None
+        row = []
         for cx in range(graph_w):
             e = erow[cx] if erow is not None else None
             if e is not None:
@@ -484,8 +486,9 @@ def compose(basemap, fx, overlays, graph_w, height_cells, echo=None):
             if ov is not None:
                 ch, color = ov
                 if ch == "":
-                    continue  # trailing column of a double-width glyph
-                parts.append(f"{cell_bg}{fg(*color)}{ch}")
+                    row.append("")  # trailing column of a double-width glyph
+                    continue
+                row.append(f"{cell_bg}{fg(*color)}{ch}")
                 continue
             mask = fx.dots[cy][cx]
             layer = fx if mask else basemap
@@ -493,12 +496,64 @@ def compose(basemap, fx, overlays, graph_w, height_cells, echo=None):
                 mask = basemap.dots[cy][cx]
             if mask:
                 color = layer.color[cy][cx] or DIM
-                parts.append(f"{cell_bg}{fg(*color)}{chr(0x2800 + mask)}")
+                row.append(f"{cell_bg}{fg(*color)}{chr(0x2800 + mask)}")
             else:
-                parts.append(f"{cell_bg} ")
+                row.append(f"{cell_bg} ")
+        grid.append(row)
+    return grid
+
+
+def _bg_prefix(cell):
+    """The leading background-colour SGR of a composed cell (up to its 'm').
+
+    Composed cells begin with ``\\033[48;2;r;g;bm``, so a reticle glyph can be
+    stamped onto a cell while keeping whatever background it was sitting on.
+    """
+    i = cell.find("m")
+    return cell[:i + 1] if i != -1 else ""
+
+
+def _render_lines(grid, reticle=None):
+    """Flatten a per-cell grid into ANSI lines, stamping the reticle on top.
+
+    ``reticle`` is {(cx, cy): (char, color)} for the range rings and crosshair.
+    Each glyph is drawn over its cell's existing background, so the reticle
+    stays fixed at the view centre while the map (the grid) shifts beneath it
+    during a live drag — panning slews the scope head, it doesn't drag it off.
+    """
+    lines = []
+    for cy, row in enumerate(grid):
+        parts = []
+        for cx, cell in enumerate(row):
+            rc = reticle.get((cx, cy)) if reticle else None
+            if rc is not None:
+                ch, color = rc
+                parts.append(f"{_bg_prefix(cell)}{fg(*color)}{ch}")
+            else:
+                parts.append(cell)
         parts.append(RESET)
         lines.append("".join(parts))
     return lines
+
+
+def _shift_grid(grid, dcol, drow, blank):
+    """The grid moved dcol cells right and drow cells down for a drag preview.
+
+    Cells dragged in from beyond the old frame are unknown, so they're filled
+    with ``blank`` (a neutral "not drawn yet" background) rather than guessed.
+    """
+    h = len(grid)
+    w = len(grid[0]) if h else 0
+    out = []
+    for y in range(h):
+        sy = y - drow
+        if 0 <= sy < h:
+            srow = grid[sy]
+            out.append([srow[x - dcol] if 0 <= x - dcol < w else blank
+                        for x in range(w)])
+        else:
+            out.append([blank] * w)
+    return out
 
 
 def _focused_line(ac, home):
@@ -526,14 +581,31 @@ def _focused_line(ac, home):
                     for p in pieces)
 
 
-def render_scope(center, zoom, feed, home, playing=True, mouse_pos=None,
+_last_frame = {}  # cached clean render, shifted for live drag-pan preview
+
+
+def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
                  show_trails=True, show_rings=True, show_ground=True,
-                 weather=None, show_weather=False, **_):
-    now = time.time()
+                 weather=None, show_weather=False, drag_offset=None, **_):
     cols, rows = get_terminal_size()
     graph_w = max(20, cols)
     height_cells = max(8, rows - 2)
 
+    # live drag: slide the last map under the cursor now; the true re-render
+    # (fresh geography, blips) lands on release. The reticle (rings+crosshair)
+    # is re-stamped at centre so it stays put while the map moves. Skip if the
+    # terminal resized under us — a stale grid wouldn't line up — and fall thru.
+    if (drag_offset is not None and _last_frame.get("gw") == graph_w
+            and _last_frame.get("hc") == height_cells):
+        dcol, drow = drag_offset
+        blank = f"{bg(*BG_PRIMARY)} "
+        shifted = _shift_grid(_last_frame["grid"], dcol, drow, blank)
+        return "\n".join([
+            _last_frame["header"],
+            *_render_lines(shifted, _last_frame["reticle"]),
+            _last_frame["footer"]])
+
+    now = time.time()
     lat, lon = center
     bbox = bbox_for(lat, lon, zoom, graph_w, height_cells)
     basemap = _get_basemap(bbox, graph_w, height_cells)
@@ -553,10 +625,9 @@ def render_scope(center, zoom, feed, home, playing=True, mouse_pos=None,
                                                         height_cells):
             echo = _build_echo(rgba, pw, ph, graph_w, height_cells)
 
-    # braille fx layer: rings under trails under velocity leaders
+    # braille fx layer: trails under velocity leaders (range rings are a fixed
+    # reticle stamped later, so they don't ride the map during a drag)
     fx = DotLayer(bbox, graph_w, height_cells)
-    if show_rings:
-        _draw_rings(fx, home[0], home[1], zoom)
 
     # aircraft positions, centre-out so central traffic gets labels first
     minlon, minlat, maxlon, maxlat = bbox
@@ -602,11 +673,24 @@ def render_scope(center, zoom, feed, home, playing=True, mouse_pos=None,
     overlays = dict(basemap.city_overlays())
     overlays.update(air)
 
-    # home marker, pinned geographically (panning can move it off-centre)
-    hcol = int((home[1] - minlon) / (maxlon - minlon) * graph_w)
-    hrow = int((maxlat - home[0]) / (maxlat - minlat) * height_cells)
+    # reticle: range rings + crosshair, fixed at the view centre and stamped
+    # over the map last, so a drag slews the scope head rather than dragging
+    # the rings off-screen. Rings yield to text (blips/labels); the crosshair
+    # always wins. (Centre == bbox midpoint, so this sits mid-screen.)
+    reticle = {}
+    hcol = int((lon - minlon) / (maxlon - minlon) * graph_w)
+    hrow = int((maxlat - lat) / (maxlat - minlat) * height_cells)
+    if show_rings:
+        ring_layer = DotLayer(bbox, graph_w, height_cells)
+        _draw_rings(ring_layer, lat, lon, zoom)
+        for ry in range(height_cells):
+            mrow, crow = ring_layer.dots[ry], ring_layer.color[ry]
+            for rx in range(graph_w):
+                mask = mrow[rx]
+                if mask and (rx, ry) not in overlays:
+                    reticle[(rx, ry)] = (chr(0x2800 + mask), crow[rx] or RING)
     if 0 <= hcol < graph_w and 0 <= hrow < height_cells:
-        overlays[(hcol, hrow)] = ("+", MARKER)
+        reticle[(hcol, hrow)] = ("+", MARKER)
 
     # pointer focus: nearest blip within a few cells of the mouse
     focused = None
@@ -617,7 +701,8 @@ def render_scope(center, zoom, feed, home, playing=True, mouse_pos=None,
         if abs(best[4] - mcol) <= 4 and abs(best[5] - mrow) <= 2:
             focused = best[1]
 
-    map_lines = compose(basemap, fx, overlays, graph_w, height_cells, echo)
+    grid = compose(basemap, fx, overlays, graph_w, height_cells, echo)
+    map_lines = _render_lines(grid, reticle)
 
     airborne = sum(1 for ac in aircraft if not ac["ground"])
     ground = len(aircraft) - airborne
@@ -641,7 +726,7 @@ def render_scope(center, zoom, feed, home, playing=True, mouse_pos=None,
     header += " " * max(0, cols - visible_len(header))
 
     if focused is not None:
-        foot = _focused_line(focused, home)
+        foot = _focused_line(focused, center)
         if visible_len(foot) > cols:
             foot = f"{fg(*MUTED)}{focused['callsign']}{RESET}"
     else:
@@ -662,6 +747,12 @@ def render_scope(center, zoom, feed, home, playing=True, mouse_pos=None,
             if visible_len(foot) <= cols:
                 break
     foot += " " * max(0, cols - visible_len(foot))
+
+    # cache this clean frame so a live drag can shift the map whole and
+    # re-stamp the (fixed) reticle over it (see the drag fast-path up top)
+    _last_frame.clear()
+    _last_frame.update(grid=grid, reticle=reticle, header=header, footer=foot,
+                       gw=graph_w, hc=height_cells)
 
     return "\n".join([header, *map_lines, foot])
 
@@ -691,7 +782,6 @@ def main():
             sys.exit(1)
 
     live = resolve_live(args)
-    home = (lat, lon)
     zoom = [max(0.4, min(24.0, args.zoom))]
     center = [lat, lon]
     feed = Feed(nudge=live)
@@ -716,7 +806,7 @@ def main():
                 weather.poll_once()
             except Exception as exc:
                 weather.error = str(exc)
-        print(render_scope(center, zoom[0], feed, home, playing=False,
+        print(render_scope(center, zoom[0], feed, playing=False,
                            weather=weather, show_weather=bool(args.weather)))
         return
 
@@ -751,8 +841,16 @@ def main():
         _sync_feed()
         return True
 
+    drag_preview = [None]  # (dcol, drow) while a drag is mid-flight, else None
+
     def on_drag(dcol, drow, done):
-        if not done or not (dcol or drow):
+        if not done:
+            # live feedback: shift the last frame so the map tracks the cursor
+            # immediately; the real re-render happens once the button releases
+            drag_preview[0] = (dcol, drow) if (dcol or drow) else None
+            return bool(dcol or drow)
+        drag_preview[0] = None
+        if not (dcol or drow):
             return False
         # dragging pulls the map, so the view centre moves the opposite way
         cols, rows = get_terminal_size()
@@ -775,10 +873,11 @@ def main():
         _sync_weather()
     live_loop(
         lambda playing=True, mouse_pos=None, **_: render_scope(
-            center, zoom[0], feed, home, playing=playing,
+            center, zoom[0], feed, playing=playing,
             mouse_pos=mouse_pos, show_trails=toggles["t"][0],
             show_rings=toggles["r"][0], show_ground=toggles["g"][0],
-            weather=weather, show_weather=toggles["w"][0]),
+            weather=weather, show_weather=toggles["w"][0],
+            drag_offset=drag_preview[0]),
         interval=REFRESH_S,
         mouse=True,
         auto_play=True,
