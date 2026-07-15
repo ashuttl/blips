@@ -27,6 +27,7 @@ import threading
 import time
 
 from blips._adsb import fetch_point
+from blips._routes import RouteLookup
 from blips._basemap import (
     Basemap, DotLayer, SEA_FILL, marine_region, nearest_city, _project,
 )
@@ -556,12 +557,19 @@ def _shift_grid(grid, dcol, drow, blank):
     return out
 
 
-def _focused_line(ac, home):
+def _route_leg(leg):
+    place, code = leg
+    return f"{place} {code}".strip() if place else code
+
+
+def _focused_line(ac, home, route=None):
     """Footer detail line for the aircraft nearest the pointer."""
     pieces = [f"{fg(*blip_color(ac))}{BOLD}{ac['callsign']}{RESET}"]
     ident = " ".join(p for p in (ac["actype"], ac["reg"]) if p)
     if ident:
         pieces.append(ident)
+    if route is not None:
+        pieces.append(f"{_route_leg(route[0])} → {_route_leg(route[1])}")
     if ac["ground"]:
         pieces.append("on the ground")
     elif ac["alt"] is not None:
@@ -586,7 +594,8 @@ _last_frame = {}  # cached clean render, shifted for live drag-pan preview
 
 def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
                  show_trails=True, show_rings=True, show_ground=True,
-                 weather=None, show_weather=False, drag_offset=None, **_):
+                 weather=None, show_weather=False, drag_offset=None,
+                 routes=None, **_):
     cols, rows = get_terminal_size()
     graph_w = max(20, cols)
     height_cells = max(8, rows - 2)
@@ -726,7 +735,12 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
     header += " " * max(0, cols - visible_len(header))
 
     if focused is not None:
-        foot = _focused_line(focused, center)
+        # route lookup is async: None now, filled in (with a repaint nudge)
+        # once adsbdb answers — keep asking while the hover lasts
+        route = routes.get(focused["callsign"]) if routes else None
+        foot = _focused_line(focused, center, route)
+        if route is not None and visible_len(foot) > cols:
+            foot = _focused_line(focused, center)  # narrow: drop the route
         if visible_len(foot) > cols:
             foot = f"{fg(*MUTED)}{focused['callsign']}{RESET}"
     else:
@@ -785,6 +799,7 @@ def main():
     zoom = [max(0.4, min(24.0, args.zoom))]
     center = [lat, lon]
     feed = Feed(nudge=live)
+    routes = RouteLookup(nudge=live)
     feed.set_view(lat, lon, view_radius_nm(
         bbox_for(lat, lon, zoom[0], 80, 40), lat, lon))
 
@@ -877,7 +892,7 @@ def main():
             mouse_pos=mouse_pos, show_trails=toggles["t"][0],
             show_rings=toggles["r"][0], show_ground=toggles["g"][0],
             weather=weather, show_weather=toggles["w"][0],
-            drag_offset=drag_preview[0]),
+            drag_offset=drag_preview[0], routes=routes),
         interval=REFRESH_S,
         mouse=True,
         auto_play=True,

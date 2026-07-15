@@ -25,7 +25,7 @@ blips --print              # single static frame (for scripts/screenshots)
 | --- | --- |
 | `+` / `-` | zoom in / out |
 | drag | pan the scope |
-| hover / click a blip | full data readout in the footer |
+| hover / click a blip | full data readout in the footer, with origin → destination when the route is known (via [adsbdb](https://www.adsbdb.com/)) |
 | `t` | toggle trails |
 | `r` | toggle range rings |
 | `g` | toggle ground traffic |
