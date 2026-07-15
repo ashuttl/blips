@@ -551,7 +551,7 @@ def _focused_line(ac, home, route=None):
     if ident:
         pieces.append(ident)
     if route is not None:
-        pieces.append(f"{_route_leg(route[0])} → {_route_leg(route[1])}")
+        pieces.append(" → ".join(_route_leg(leg) for leg in route))
     if ac["ground"]:
         pieces.append("on the ground")
     elif ac["alt"] is not None:
@@ -761,7 +761,8 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
     elif focused is not None:
         # route lookup is async: None now, filled in (with a repaint nudge)
         # once adsbdb answers — keep asking while the hover lasts
-        route = routes.get(focused["callsign"]) if routes else None
+        route = (routes.get(focused["callsign"], focused["lat"], focused["lon"])
+                 if routes else None)
         foot = _focused_line(focused, center, route)
         if route is not None and visible_len(foot) > cols:
             foot = _focused_line(focused, center)  # narrow: drop the route

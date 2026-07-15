@@ -1,16 +1,20 @@
 """Callsign → route (origin/destination) lookup.
 
-ADS-B broadcasts carry no flight-plan data, so routes come from adsbdb.com,
-a community database keyed by callsign:
+ADS-B broadcasts carry no flight-plan data, so routes come from the adsb.im
+route API (the same vrs-standing-data service tar1090 queries):
 
-    GET /v0/callsign/{callsign}  →  {"response": {"flightroute": {...}}}
+    POST /api/0/routeset  {"planes": [{"callsign", "lat", "lng"}]}
 
-Coverage is good for scheduled airline/cargo callsigns and empty for most GA
-(a 404 means "no route on file", not an error).  Lookups are demand-driven —
-the scope asks only for the aircraft under the pointer — so a background
-worker fetches one callsign at a time and results are cached for the session
-(routes are static per callsign).  Misses are cached too; transient network
-failures back off before retrying.
+Routes are keyed by callsign, and airlines reassign flight numbers to new
+city pairs, so a bare callsign match can be stale.  Given the aircraft's
+position the API cross-checks it against the route's track and flags the
+match ``plausible`` or not; implausible routes are dropped here — a blank
+footer beats a confidently wrong one.  Coverage is good for scheduled
+airline/cargo callsigns and empty for most GA (``"unknown"`` means "no route
+on file", not an error).  Lookups are demand-driven — the scope asks only
+for the aircraft under the pointer — so a background worker fetches one
+callsign at a time and results are cached for the session.  Misses are
+cached too; transient network failures back off before retrying.
 """
 
 import threading
@@ -20,16 +24,16 @@ from blips import USER_AGENT
 from blips._http import fetch_json
 from blips._runtime import debug_log
 
-URL = "https://api.adsbdb.com/v0/callsign/{cs}"
+URL = "https://adsb.im/api/0/routeset"
 RETRY_S = 30  # back-off before re-asking after a network failure
 
 
 def _endpoint(ap):
-    """One adsbdb airport record → (municipality, short code) or None."""
+    """One route-API airport record → (municipality, short code) or None."""
     if not isinstance(ap, dict):
         return None
-    code = ap.get("iata_code") or ap.get("icao_code") or ""
-    place = ap.get("municipality") or ap.get("name") or ""
+    code = ap.get("iata") or ap.get("icao") or ""
+    place = ap.get("location") or ap.get("name") or ""
     if not (code or place):
         return None
     return (place, code)
@@ -44,7 +48,7 @@ class RouteLookup:
     """
 
     def __init__(self, nudge=False):
-        self._cache = {}     # CALLSIGN → (origin, dest) tuple or None (miss)
+        self._cache = {}     # CALLSIGN → tuple of route legs or None (miss)
         self._failed = {}    # CALLSIGN → wall time of last network failure
         self._queue = []
         self._queued = set()
@@ -53,9 +57,11 @@ class RouteLookup:
         self._started = False
         self._nudge = nudge
 
-    def get(self, callsign):
-        """Route for a callsign: ((place, code), (place, code)) or None.
+    def get(self, callsign, lat=None, lon=None):
+        """Route for a callsign: ((place, code), (place, code), ...) or None.
 
+        Legs run origin → ... → destination (usually just the pair).  Pass
+        the aircraft's position so stale callsign matches can be rejected.
         None means unknown — either no route on file or not fetched yet;
         asking queues the fetch, so keep asking while the hover lasts.
         """
@@ -70,39 +76,48 @@ class RouteLookup:
                 return None
             if cs not in self._queued:
                 self._queued.add(cs)
-                self._queue.append(cs)
+                self._queue.append((cs, lat, lon))
                 if not self._started:
                     self._started = True
                     threading.Thread(target=self._run, daemon=True).start()
                 self._wake.set()
         return None
 
-    def _fetch(self, cs):
+    def _fetch(self, cs, lat, lon):
+        planes = [{"callsign": cs,
+                   "lat": lat if lat is not None else 0.0,
+                   "lng": lon if lon is not None else 0.0}]
         try:
-            data = fetch_json(URL.format(cs=cs),
+            data = fetch_json(URL, payload={"planes": planes},
                               headers={"User-Agent": USER_AGENT}, timeout=8)
         except Exception as exc:
-            # adsbdb answers 404 for callsigns with no route on file — that's
-            # a definitive miss, worth caching; anything else may be transient
-            if getattr(exc, "code", None) == 404:
-                return None, True
             debug_log(f"route lookup failed for {cs}: {exc}")
             return None, False
-        fr = (data.get("response") or {}).get("flightroute") or {}
-        origin = _endpoint(fr.get("origin"))
-        dest = _endpoint(fr.get("destination"))
-        route = (origin, dest) if (origin and dest) else None
+        entry = data[0] if isinstance(data, list) and data else None
+        if not isinstance(entry, dict):
+            return None, False
+        if entry.get("airport_codes", "unknown") == "unknown":
+            return None, True  # no route on file — definitive miss
+        if lat is not None and not entry.get("plausible", True):
+            # the route on file doesn't pass anywhere near the aircraft:
+            # the callsign has been reassigned to a different city pair
+            debug_log(f"route for {cs} implausible here: "
+                      f"{entry.get('airport_codes')}")
+            return None, True
+        legs = tuple(_endpoint(ap) for ap in entry.get("_airports") or [])
+        route = legs if len(legs) >= 2 and all(legs) else None
         return route, True
 
     def _run(self):
         while True:
             with self._lock:
-                cs = self._queue.pop(0) if self._queue else None
+                cs, lat, lon = (self._queue.pop(0) if self._queue
+                                else (None, None, None))
             if cs is None:
                 self._wake.wait()
                 self._wake.clear()
                 continue
-            route, definitive = self._fetch(cs)
+            route, definitive = self._fetch(cs, lat, lon)
             with self._lock:
                 self._queued.discard(cs)
                 if definitive:
