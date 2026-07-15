@@ -33,7 +33,7 @@ from blips._basemap import (
 )
 from blips._color import BG_PRIMARY, BOLD, RESET, bg, fg, interp_stops, lerp
 from blips._framebuffer import get_terminal_size, visible_len
-from blips._geo import haversine_nm
+from blips._geo import advance, bearing_to, haversine_nm
 from blips._live import live_loop
 from blips._location import geocode_place, get_location
 from blips._radar_sources import get_source
@@ -93,15 +93,6 @@ def _get_basemap(bbox, graph_w, height_cells):
         _basemap_cache.clear()  # only need the current view
         _basemap_cache[key] = bm
     return bm
-
-
-def advance(lat, lon, track_deg, dist_nm):
-    """Move a point along a bearing (equirectangular; fine at scope ranges)."""
-    rad = math.radians(track_deg)
-    dlat = dist_nm * math.cos(rad) / 60.0
-    dlon = (dist_nm * math.sin(rad)
-            / (60.0 * max(0.2, math.cos(math.radians(lat)))))
-    return lat + dlat, lon + dlon
 
 
 def extrapolate(ac, now):
@@ -356,15 +347,6 @@ def _place(lat, lon):
     return place
 
 
-def _bearing(lat1, lon1, lat2, lon2):
-    dlon = math.radians(lon2 - lon1)
-    y = math.sin(dlon) * math.cos(math.radians(lat2))
-    x = (math.cos(math.radians(lat1)) * math.sin(math.radians(lat2))
-         - math.sin(math.radians(lat1)) * math.cos(math.radians(lat2))
-         * math.cos(dlon))
-    return math.degrees(math.atan2(y, x)) % 360.0
-
-
 def _ring_spacing_nm(zoom):
     half_span = zoom * 30  # nm from centre to the top edge
     for spacing in (5, 10, 25, 50, 100, 200):
@@ -582,7 +564,7 @@ def _focused_line(ac, home, route=None):
     if ac["squawk"]:
         pieces.append(f"squawk {ac['squawk']}")
     dist = haversine_nm(home[0], home[1], ac["lat"], ac["lon"])
-    brg = _bearing(home[0], home[1], ac["lat"], ac["lon"])
+    brg = bearing_to(home[0], home[1], ac["lat"], ac["lon"])
     pieces.append(f"{dist:.0f} nm {COMPASS[round(brg / 45) % 8]}")
     sep = f"{fg(*DIM)} · {RESET}"
     return sep.join(p if "\033" in p else f"{fg(*MUTED)}{p}{RESET}"

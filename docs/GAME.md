@@ -43,12 +43,17 @@ A command is a callsign followed by one or more instructions, chained:
 | you type            | meaning                                        |
 | ------------------- | ---------------------------------------------- |
 | `l 230` / `r 230`   | turn left/right heading 230                    |
-| `h 230`             | fly heading 230 (shortest turn)                |
-| `c 110` / `d 110`   | climb/descend and maintain (hundreds of feet, like the data blocks: `110` = 11,000 ft, `240` = FL240; the wrong verb is quietly corrected) |
-| `s 210`             | speed 210 knots; bare `s` resumes normal speed |
+| `c 110` / `d 110`   | climb/descend and maintain (hundreds of feet, like the data blocks: `110` = 11,000 ft, `240` = FL240) |
+| `rs 180` / `is 250` | reduce/increase speed (knots); bare `s` resumes normal speed |
 | `dct LOOSE`         | proceed direct a fix                           |
 | `i` / `i 19L`       | cleared ILS approach (assigned runway, or say which) |
 | `ho`                | handoff — at the boundary near their exit fix, this banks the flight |
+
+Direction is always yours to give — there is no "fly heading" shortcut
+that picks the turn for you, and a climb instruction to an aircraft above
+the altitude gets a puzzled "unable climb, we're at one three thousand"
+rather than a silent fix. Speaking correctly requires holding the picture,
+which is the actual skill.
 
 Callsigns abbreviate: any unique suffix works, so `rpa5655`, `5655`, and
 `55` all reach Brickyard 5655 (ambiguity gets you "multiple aircraft match
