@@ -7,10 +7,14 @@ from blips._cache import read_cache, read_stale, write_cache
 from blips._runtime import debug_log
 
 
-def fetch_json(url, headers=None, timeout=10):
-    """Fetch and decode a JSON payload from url."""
+def fetch_json(url, headers=None, timeout=10, payload=None):
+    """Fetch and decode a JSON payload from url (POSTing payload if given)."""
     debug_log(f"fetch {url}")
-    req = urllib.request.Request(url, headers=headers or {})
+    body = None if payload is None else json.dumps(payload).encode()
+    hdrs = dict(headers or {})
+    if body is not None:
+        hdrs["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=body, headers=hdrs)
     resp = urllib.request.urlopen(req, timeout=timeout)
     return json.loads(resp.read())
 
