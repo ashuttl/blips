@@ -626,15 +626,18 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
                  show_trails=True, show_rings=True, show_ground=True,
                  weather=None, show_weather=False, drag_offset=None,
                  routes=None, pins=None, lines_geo=None, game_footer=None,
-                 header_note=None, **_):
+                 header_note=None, rings_at=None, **_):
     """Render one frame of the scope.
 
-    The last four parameters are the game's hooks, inert otherwise:
+    The last five parameters are the game's hooks, inert otherwise:
     ``pins`` are geo-anchored glyphs with labels (sector fixes), ``lines_geo``
     are geo-anchored braille strokes (runway, localizer), ``game_footer`` is
     ``(n_lines, builder)`` where ``builder(focused)`` supplies the bottom
-    lines in place of the standard footer, and ``header_note`` replaces the
-    place name in the header (facility, score, shift clock).
+    lines in place of the standard footer, ``header_note`` replaces the
+    place name in the header (facility, score, shift clock), and
+    ``rings_at`` pins the range rings, crosshair and compass to a fixed
+    point (the airport you're working) instead of the view centre — they
+    then ride the map through a pan rather than following the scope head.
     """
     cols, rows = get_terminal_size()
     graph_w = max(20, cols)
@@ -649,9 +652,14 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
         dcol, drow = drag_offset
         blank = f"{bg(*BG_PRIMARY)} "
         shifted = _shift_grid(_last_frame["grid"], dcol, drow, blank)
+        reticle_prev = _last_frame["reticle"]
+        if _last_frame.get("geo_reticle"):
+            # rings pinned to a place, not the screen: they ride the drag
+            reticle_prev = {(cx + dcol, cy + drow): v
+                            for (cx, cy), v in reticle_prev.items()}
         return "\n".join([
             _last_frame["header"],
-            *_render_lines(shifted, _last_frame["reticle"]),
+            *_render_lines(shifted, reticle_prev),
             _last_frame["footer"]])
 
     now = time.time()
@@ -726,7 +734,7 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
         if 0 <= col < graph_w and 0 <= row < height_cells:
             air[(col, row)] = (blip_glyph(ac), blip_color(ac))
 
-    overlays = dict(basemap.city_overlays())
+    overlays = dict(basemap.airport_overlays())
     # game pins (sector fixes): glyph + as much of the label as fits, under
     # the traffic — a data block always outranks a fix name
     if pins:
@@ -746,22 +754,37 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
                 overlays[cell] = (ch, DIM)
     overlays.update(air)
 
-    # reticle: range rings + crosshair, fixed at the view centre and stamped
-    # over the map last, so a drag slews the scope head rather than dragging
-    # the rings off-screen. Rings yield to text (blips/labels); the crosshair
-    # always wins. (Centre == bbox midpoint, so this sits mid-screen.)
+    # reticle: range rings + crosshair, stamped over the map last. Anchored
+    # at the view centre by default (a drag slews the scope head under them);
+    # with rings_at they anchor to that fixed point instead and ride the map.
+    # Rings yield to text (blips/labels); the crosshair always wins.
+    rlat, rlon = rings_at if rings_at is not None else (lat, lon)
     reticle = {}
-    hcol = int((lon - minlon) / (maxlon - minlon) * graph_w)
-    hrow = int((maxlat - lat) / (maxlat - minlat) * height_cells)
+    hcol = int((rlon - minlon) / (maxlon - minlon) * graph_w)
+    hrow = int((maxlat - rlat) / (maxlat - minlat) * height_cells)
     if show_rings:
         ring_layer = DotLayer(bbox, graph_w, height_cells)
-        _draw_rings(ring_layer, lat, lon, zoom)
+        _draw_rings(ring_layer, rlat, rlon, zoom)
         for ry in range(height_cells):
             mrow, crow = ring_layer.dots[ry], ring_layer.color[ry]
             for rx in range(graph_w):
                 mask = mrow[rx]
                 if mask and (rx, ry) not in overlays:
                     reticle[(rx, ry)] = (chr(0x2800 + mask), crow[rx] or RING)
+        if game_footer is not None:
+            # compass: dim two-digit headings every 30° on the second ring,
+            # so "turn left heading two three zero" has somewhere to point
+            r_nm = _ring_spacing_nm(zoom) * 2
+            for deg in range(0, 360, 30):
+                clat, clon = advance(rlat, rlon, deg, r_nm)
+                cx, cy = _project(clon, clat, bbox, graph_w, height_cells)
+                col, row = int(cx), int(cy)
+                label = f"{(deg or 360) // 10:02d}"
+                cells = [(col, row), (col + 1, row)]
+                if all(0 <= c < graph_w and 0 <= r < height_cells
+                       and (c, r) not in overlays for c, r in cells):
+                    for (c, r), ch in zip(cells, label):
+                        reticle[(c, r)] = (ch, RING)
     if 0 <= hcol < graph_w and 0 <= hrow < height_cells:
         reticle[(hcol, hrow)] = ("+", MARKER)
 
@@ -861,6 +884,7 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
     _last_frame.clear()
     _last_frame.update(grid=grid, reticle=reticle, header=header, footer=foot,
                        gw=graph_w, hc=height_cells,
+                       geo_reticle=rings_at is not None,
                        hits=[(p[4], p[5], p[1]["callsign"]) for p in placed])
 
     return "\n".join([header, *map_lines, foot])

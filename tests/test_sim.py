@@ -12,7 +12,10 @@ from blips._sim import PERF, Sim, build_sector
 def sim():
     """A quiet TPA sector: the spawner is parked so tests own the traffic."""
     s = Sim(find_airport("tpa"), seed=1)
-    s._next_arrival = s._next_departure = 1e9
+    s._next_arrival = s._next_departure = s._next_request = 1e9
+    s.aircraft.clear()          # drop the pre-populated shift traffic
+    s.trails.clear()
+    s.radio.clear()
     return s
 
 
@@ -155,6 +158,69 @@ def test_vector_off_the_approach_cancels_it(sim):
     assert ac["phase"] == "cruise"
 
 
+def test_ils_capture_from_a_thirty_degree_intercept(sim):
+    thr = sim.sector["thr"]
+    course = sim.sector["course"]
+    # abeam the localizer at 10 nm, 2 nm right of centreline, cutting
+    # across at 30° — the everyday intercept must capture without fuss
+    lat, lon = advance(*thr, (course + 180.0) % 360.0, 10.0)
+    lat, lon = advance(lat, lon, (course + 90.0) % 360.0, 2.0)
+    ac = _arrival(sim, lat=lat, lon=lon, alt=3000.0,
+                  hdg=(course - 30.0) % 360.0, ias=180.0)
+    sim.command("100 i")
+    _run(sim, 180)
+    assert ac["phase"] in ("established", "landed") or ac not in sim.aircraft
+
+
+def test_hopeless_ils_geometry_is_refused(sim):
+    thr = sim.sector["thr"]
+    course = sim.sector["course"]
+    lat, lon = advance(*thr, (course + 180.0) % 360.0, 10.0)
+    ac = _arrival(sim, lat=lat, lon=lon, alt=3000.0,
+                  hdg=(course + 180.0) % 360.0)   # flying away down final
+    assert "pointed away" in sim.command("100 i")
+    ac["lat"], ac["lon"] = advance(*thr, course, 0.2)  # past the threshold
+    ac["hdg"] = ac["tgt_hdg"] = course
+    assert "inside the marker" in sim.command("100 i")
+
+
+def test_unstable_approach_goes_around(sim):
+    thr = sim.sector["thr"]
+    course = sim.sector["course"]
+    # cleared close-in, way too high: they'll capture, then bail
+    lat, lon = advance(*thr, (course + 180.0) % 360.0, 4.0)
+    ac = _arrival(sim, lat=lat, lon=lon, alt=5000.0, hdg=course, ias=170.0)
+    sim.command("100 i")
+    _run(sim, 240)
+    assert sim.busts == 0
+    assert any("going around" in line for _t, line, _k in sim.radio)
+    assert ac in sim.aircraft           # back with you for another try
+    assert ac["phase"] == "cruise"
+
+
+def test_hold_orbits_and_vectors_cancel_it(sim):
+    ac = _arrival(sim, alt=8000.0)
+    line = sim.command("100 hold")
+    assert "hold present position, right turns" in line
+    start = (ac["lat"], ac["lon"])
+    _run(sim, 300)
+    assert ac["phase"] == "hold"
+    # still near where they started after five minutes of orbiting
+    assert haversine_nm(ac["lat"], ac["lon"], *start) < 6.0
+    sim.command("100 r 90")
+    assert ac["phase"] == "cruise"
+
+
+def test_hold_at_a_fix(sim):
+    fix = sim.sector["entries"][0]
+    spot = sim.sector["fixes"][fix]
+    ac = _arrival(sim, alt=9000.0)
+    line = sim.command(f"100 hold {fix.lower()}")
+    assert f"hold at {fix}" in line
+    _run(sim, 900)
+    assert haversine_nm(ac["lat"], ac["lon"], *spot) < 6.0
+
+
 def test_uncleaered_arrival_blows_through_final(sim):
     thr = sim.sector["thr"]
     course = sim.sector["course"]
@@ -207,7 +273,29 @@ def test_sector_is_deterministic_per_airport():
     assert len(s1["fixes"]) == 8
     for lat, lon in s1["fixes"].values():
         d = haversine_nm(lat, lon, ap["lat"], ap["lon"])
-        assert 44.0 < d < 46.0
+        assert 21.0 < d < 53.0          # the real-navaid gate band
+
+
+def test_sector_gates_are_real_navaids_where_possible():
+    # London is ringed with famous VORs; all eight gates should be real
+    s = build_sector(find_airport("egll"))
+    real = [n for n in s["fixes"] if len(n) <= 3]
+    assert len(real) == 8
+    assert "BKY" in s["fixes"]          # Barkway, the classic north gate
+    # Tampa has thinner coverage: real where possible, synthesized elsewhere
+    s = build_sector(find_airport("tpa"))
+    assert "LAL" in s["fixes"] and "SRQ" in s["fixes"]
+
+
+def test_shift_starts_populated():
+    s = Sim(find_airport("tpa"), seed=1)
+    arrivals = [a for a in s.aircraft if a["plan"] == "arrival"]
+    departures = [a for a in s.aircraft if a["plan"] == "departure"]
+    assert len(arrivals) >= 2 and len(departures) >= 1
+    dists = sorted(haversine_nm(a["lat"], a["lon"],
+                                s.airport["lat"], s.airport["lon"])
+                   for a in arrivals)
+    assert dists[0] < dists[-1] - 10    # one is already partway in
 
 
 def test_departure_handoff_rules(sim):
@@ -241,3 +329,65 @@ def test_all_fleet_types_have_performance():
     for airline, types in FLEETS.items():
         for t in types:
             assert t in PERF, f"{airline} flies {t} but PERF doesn't know it"
+
+
+def test_type_aliases_land_in_perf():
+    from blips._fleet import TYPE_ALIAS
+    for real, alias in TYPE_ALIAS.items():
+        assert alias in PERF, f"{real} → {alias} but PERF doesn't know it"
+
+
+# -- terrain ------------------------------------------------------------------
+
+class _Hills:
+    """A fake MVA grid: 7,300 ft east of the field, 2,100 ft west."""
+
+    def __init__(self, split_lon):
+        self.split = split_lon
+
+    def mva_at(self, lat, lon):
+        return 7300.0 if lon > self.split else 2100.0
+
+
+@pytest.fixture()
+def hilly(sim):
+    sim.terrain = _Hills(sim.airport["lon"])
+    return sim
+
+
+def test_descent_below_mva_is_refused(hilly):
+    ap = hilly.airport
+    _arrival(hilly, lat=ap["lat"] + 0.3, lon=ap["lon"] + 0.5, alt=12000.0)
+    line = hilly.command("100 d 40")
+    assert "minimum vectoring altitude" in line
+    assert "seven thousand three hundred" in line
+    # same descent over the flat side is fine
+    _arrival(hilly, callsign="DAL200",
+             lat=ap["lat"] + 0.3, lon=ap["lon"] - 0.5, alt=12000.0)
+    assert "descend and maintain" in hilly.command("200 d 40")
+
+
+def test_descending_into_rising_terrain_levels_off(hilly):
+    ap = hilly.airport
+    # cleared down over the flats, drifting east into the hills
+    ac = _arrival(hilly, lat=ap["lat"] + 0.3, lon=ap["lon"] - 0.05,
+                  alt=9000.0, hdg=90.0)
+    hilly.command("100 d 40")
+    _run(hilly, 600)
+    assert ac["alt"] == 7300.0          # held at the MVA, not the target
+    assert any("terrain below us" in line for _t, line, _k in hilly.radio)
+
+
+def test_ils_descends_below_mva(hilly):
+    # the approach is a surveyed path: the glideslope may go below the
+    # grid's MVA even when the field sits in a high-MVA cell
+    hilly.terrain = _Hills(hilly.airport["lon"] - 10.0)  # 7,300 everywhere
+    thr = hilly.sector["thr"]
+    course = hilly.sector["course"]
+    lat, lon = advance(*thr, (course + 180.0) % 360.0, 12.0)
+    ac = _arrival(hilly, lat=lat, lon=lon, alt=8000.0, hdg=course, ias=200.0)
+    hilly.command("100 d 30")           # refused: below MVA
+    assert ac["tgt_alt"] == 8000.0
+    hilly.command("100 i")
+    _run(hilly, 900)
+    assert hilly.landed == 1            # rode the slope down regardless

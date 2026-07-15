@@ -65,6 +65,14 @@ class CommandError(Exception):
     """Bad transmission — the message is what the pilot says back."""
 
 
+# every word the grammar claims, so a hold fix can't shadow a command
+_WORDS = frozenset((
+    "l", "r", "left", "right", "c", "d", "climb", "descend",
+    "rs", "is", "reduce", "increase", "s", "dct", "direct",
+    "i", "ils", "ho", "handoff", "co", "hold",
+))
+
+
 def say_digits(n, width=0):
     """Digit-by-digit radio numbers: 230 → 'two three zero', 9 → 'niner'."""
     s = str(int(n))
@@ -125,6 +133,12 @@ def parse(text):
     if not tokens:
         raise CommandError("say again?")
     query, tokens = tokens[0], [t.lower() for t in tokens[1:]]
+    # forgive a space inside the callsign ("ual 71" ≡ "ual71"): letters
+    # followed by a number can only be a split callsign, since every
+    # instruction starts with a command word, never a bare value
+    if (tokens and query.isalpha()
+            and tokens[0][0].isdigit() and tokens[0].isalnum()):
+        query, tokens = query + tokens[0], tokens[1:]
     if not tokens:
         raise CommandError("say again — callsign but no instruction")
 
@@ -163,6 +177,14 @@ def parse(text):
             i += 1
         elif t in ("ho", "handoff", "co"):
             out.append({"kind": "handoff"})
+            i += 1
+        elif t == "hold":
+            fix = None
+            nxt = tokens[i + 1] if i + 1 < len(tokens) else ""
+            if nxt.isalpha() and nxt not in _WORDS:
+                fix = nxt.upper()
+                i += 1
+            out.append({"kind": "hold", "fix": fix})
             i += 1
         else:
             raise CommandError(f"say again — didn't catch \"{t}\"")

@@ -18,6 +18,8 @@ import json
 import math
 import os
 
+from blips._geo import bearing_to, haversine_nm
+
 _DATA = None
 
 
@@ -54,6 +56,53 @@ def find_airport(query):
             if best is None:
                 best = ap
     return best
+
+
+_NAVAIDS = None
+
+
+def load_navaids():
+    """The vendored radio-navaid list (see tools/build_navaids.py)."""
+    global _NAVAIDS
+    if _NAVAIDS is None:
+        path = os.path.join(os.path.dirname(__file__), "data",
+                            "navaids.json.gz")
+        with gzip.open(path, "rt", encoding="utf-8") as fh:
+            _NAVAIDS = json.load(fh)["navaids"]
+    return _NAVAIDS
+
+
+def navaids_near(lat, lon, min_nm, max_nm):
+    """Navaids in a distance band around a point: (dist_nm, bearing, navaid).
+
+    Cheap equirectangular prefilter, exact haversine on the survivors.
+    """
+    out = []
+    coslat = max(0.2, math.cos(math.radians(lat)))
+    max_deg = max_nm / 60.0 + 0.5
+    for nav in load_navaids():
+        if (abs(nav["lat"] - lat) > max_deg
+                or abs(nav["lon"] - lon) * coslat > max_deg):
+            continue
+        d = haversine_nm(lat, lon, nav["lat"], nav["lon"])
+        if min_nm <= d <= max_nm:
+            out.append((d, bearing_to(lat, lon, nav["lat"], nav["lon"]), nav))
+    return out
+
+
+def airports_in_bbox(bbox, large_only=False):
+    """Airports inside a lon/lat bbox, most prominent first.
+
+    Prominence is large-airport status, then longest runway — so wide
+    views label the majors and close views fill in the fields.
+    """
+    minlon, minlat, maxlon, maxlat = bbox
+    hits = [ap for ap in _load()
+            if minlat <= ap["lat"] <= maxlat
+            and minlon <= ap["lon"] <= maxlon
+            and (ap["large"] or not large_only)]
+    hits.sort(key=lambda a: (not a["large"], -a["rwys"][0]["len"]))
+    return hits
 
 
 def nearest_airport(lat, lon, large_only=True):

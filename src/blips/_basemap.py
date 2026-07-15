@@ -266,6 +266,44 @@ class Basemap(DotLayer):
         self._draw_lines(coast, COAST)
         self._draw_lines(data["borders"], BORDER)
 
+    # -- airport labels --------------------------------------------------------
+    def airport_overlays(self, max_airports=None):
+        """{(col,row): (char, color)} for airports in view, IATA-labelled.
+
+        Same greedy biggest-first placement as ``city_overlays`` — an
+        air-traffic scope's landmarks are airports, not towns — with
+        prominence by size class then longest runway, so wide views show
+        the hubs and close views fill in the fields.
+        """
+        from blips._airports import airports_in_bbox
+        if max_airports is None:
+            max_airports = max(6, min(24,
+                (self.graph_w * self.height_cells) // 400))
+        overlays = {}
+        placed = []
+        for ap in airports_in_bbox(self.bbox):
+            if len(placed) >= max_airports:
+                break
+            x, y = _project(ap["lon"], ap["lat"], self.bbox,
+                            self.graph_w, self.height_cells)
+            col, row = int(x), int(y)
+            if not (0 <= col < self.graph_w and 0 <= row < self.height_cells):
+                continue
+            if (col, row) in overlays:
+                continue
+            if any(abs(col - pc) < 10 and abs(row - pr) < 3
+                   for pc, pr in placed):
+                continue
+            placed.append((col, row))
+            overlays[(col, row)] = ("•", CITY)
+            c = col + 1
+            for ch in ap["iata"] or ap["icao"]:
+                if c >= self.graph_w or (c, row) in overlays:
+                    break
+                overlays[(c, row)] = (ch, CITY_LABEL)
+                c += 1
+        return overlays
+
     # -- city labels ----------------------------------------------------------
     def city_overlays(self, max_cities=None, lang="en"):
         """{(col,row): (char, color)} for the biggest cities in view + labels.

@@ -34,11 +34,11 @@ GAME_ZOOM = 1.9           # degrees of latitude: the sector ring plus margin
 
 RADIO_COLORS = {
     "checkin": GOOD, "readback": MUTED, "atc": DIM,
-    "alert": ALERT, "error": WARN, "help": DIM,
+    "alert": ALERT, "error": WARN, "help": DIM, "request": WARN,
 }
 
 HINT = ("callsign then:  l/r hdg · c/d alt · rs/is spd · s resume · "
-        "dct FIX · i [rwy] · ho  —  ? help · pause · quit")
+        "dct FIX · hold [FIX] · i [rwy] · ho  —  ? help · pause · quit")
 
 
 def _strip_line(ac):
@@ -122,9 +122,9 @@ class _Console:
 
     # -- the two bottom lines ------------------------------------------------
     def footer(self, focused):
-        if focused is not None and "plan" in focused:
-            top = _strip_line(focused)
-        elif self.sim.radio:
+        # the radio line is never covered: hovering an aircraft borrows
+        # the (idle) command bar for its strip instead
+        if self.sim.radio:
             _t, line, kind = self.sim.radio[-1]
             top = f"{fg(*RADIO_COLORS.get(kind, MUTED))}{line}{RESET}"
         else:
@@ -133,6 +133,8 @@ class _Console:
         if self.buffer:
             bar = (f"{prompt}{fg(*TEXT)}{self.buffer}{RESET}"
                    f"{fg(*MARKER)}▌{RESET}")
+        elif focused is not None and "plan" in focused:
+            bar = f"{prompt}{_strip_line(focused)}"
         else:
             bar = f"{prompt}{fg(*DIM)}{HINT}{RESET}"
         return [top, bar]
@@ -185,7 +187,16 @@ def _resolve_airport(query):
 def main(args):
     airport = _resolve_airport((args.game or "").strip())
     live = resolve_live(args)
-    sim = Sim(airport)
+    pool = terrain = None
+    if live:
+        from blips._fleet import TrafficPool
+        from blips._sim import PERF
+        from blips._terrain import Terrain
+        pool = TrafficPool(airport, PERF)
+        pool.start()      # the real traffic near this airport, filling in
+        terrain = Terrain(airport["lat"], airport["lon"])
+        terrain.start()   # real elevation → MVAs; flat until it lands
+    sim = Sim(airport, pool=pool, terrain=terrain)
     center = [airport["lat"], airport["lon"]]
     zoom = [GAME_ZOOM]
     pins, lines_geo = _sector_pins(sim, airport)
@@ -241,7 +252,8 @@ def main(args):
             mouse_pos=mouse_pos, show_ground=False, weather=weather,
             show_weather=state["weather"], drag_offset=drag_preview[0],
             pins=pins, lines_geo=lines_geo,
-            game_footer=(2, console.footer), header_note=hud())
+            game_footer=(2, console.footer), header_note=hud(),
+            rings_at=(airport["lat"], airport["lon"]))
 
     if not live:
         # a static frame for --print: run the shift forward so there's

@@ -30,7 +30,8 @@ from blips._geo import (
 )
 
 SECTOR_NM = 45.0          # boundary ring radius
-DESPAWN_NM = 52.0         # a little grace past the edge
+DESPAWN_NM = 60.0         # grace past the farthest gate (arrivals spawn
+                          # a few nm outside their fix; never despawn there)
 TURN_RATE = 3.0           # deg/s, standard rate
 ACCEL_KT_S = 1.2          # speed change rate
 GS_FT_PER_NM = 318.0      # 3° glideslope
@@ -143,35 +144,51 @@ def _fix_name(rng):
                    for c in pattern)
 
 
+GATE_BAND_NM = (22.0, 52.0)   # where sector gates live — wide enough to
+                              # catch the real close-in VORs (PIE is 15 nm
+                              # off TPA; a near gate is a fun corner)
+_NAV_RANK = {"VORTAC": 0, "VOR-DME": 0, "VOR": 0, "TACAN": 1,
+             "NDB-DME": 2, "NDB": 3, "DME": 4}
+
+
 def build_sector(airport):
     """Fixes and active runway for an airport, seeded by its ICAO code.
 
-    The corner posts never move: TPA's sector is always TPA's sector,
-    so learning it means something.  Entries take the diagonals, exits
-    the cardinals, all jittered enough to feel found rather than drawn.
+    The corner posts are real: the best radio navaid in each 45° octant
+    of the gate band, VORs first, the way TRACON gates always were.  A
+    synthesized five-letter fix fills any octant the real world left
+    empty.  Deterministic per airport either way — TPA's sector is
+    always TPA's sector, so learning it means something.
     """
+    from blips._airports import navaids_near
     rng = random.Random(airport["icao"])
     lat, lon = airport["lat"], airport["lon"]
-    fixes, entries, exits = {}, [], []
-    names = set()
+    candidates = navaids_near(lat, lon, *GATE_BAND_NM)
+    ideal = sum(GATE_BAND_NM) / 2.0
 
-    def fresh_name():
-        while True:
-            name = _fix_name(rng)
-            if name not in names:
-                names.add(name)
-                return name
-
-    for base in (45, 135, 225, 315):
-        name = fresh_name()
-        brg = base + rng.uniform(-18, 18)
-        fixes[name] = advance(lat, lon, brg, SECTOR_NM)
-        entries.append(name)
-    for base in (0, 90, 180, 270):
-        name = fresh_name()
-        brg = base + rng.uniform(-18, 18)
-        fixes[name] = advance(lat, lon, brg, SECTOR_NM)
-        exits.append(name)
+    fixes, names, entries, exits = {}, set(), [], []
+    for base in (45, 135, 225, 315, 0, 90, 180, 270):  # diagonals first
+        best = None
+        for dist, brg, nav in candidates:
+            if abs(((brg - base) + 180.0) % 360.0 - 180.0) > 22.5:
+                continue
+            if nav["id"] in names:
+                continue
+            score = (_NAV_RANK.get(nav["type"], 5), abs(dist - ideal))
+            if best is None or score < best[0]:
+                best = (score, nav)
+        if best is not None:
+            name = best[1]["id"]
+            fixes[name] = (best[1]["lat"], best[1]["lon"])
+        else:
+            while True:                      # thin coverage: invent a gate
+                name = _fix_name(rng)
+                if name not in names:
+                    break
+            brg = base + rng.uniform(-18, 18)
+            fixes[name] = advance(lat, lon, brg, SECTOR_NM)
+        names.add(name)
+        (entries if base % 90 else exits).append(name)
 
     runway = airport["rwys"][0]                    # longest, by build sort
     end = rng.choice(("le", "he"))                 # today's flow
@@ -204,10 +221,12 @@ def _runway_end(airport, ident):
 class Sim:
     """The sector, its traffic, and the frequency.  Feed-compatible."""
 
-    def __init__(self, airport, seed=None):
+    def __init__(self, airport, seed=None, pool=None, terrain=None):
         self.airport = airport
         self.sector = build_sector(airport)
         self.rng = random.Random(seed)
+        self.pool = pool         # live-sampled traffic, or None when offline
+        self.terrain = terrain   # sector MVA grid, or None for a flat world
         self.aircraft = []
         self.trails = {}
         self.radio = []          # [(time, line, kind)] — newest last
@@ -221,10 +240,28 @@ class Sim:
         self.source = f"{airport['icao']} approach"
         self._bust_pairs = set()
         self._counter = 0
-        self._next_arrival = 8.0     # first one checks in quickly
-        self._next_departure = 25.0
+        self._next_arrival = 45.0
+        self._next_departure = 30.0
+        self._next_request = 150.0
         self._elapsed = 0.0
         self._last_tick = None
+        self._prepopulate()      # a shift starts mid-shift, not empty
+
+    def _prepopulate(self):
+        """The sector you take over already has traffic in it."""
+        for _ in range(6):
+            if sum(a["plan"] == "arrival" for a in self.aircraft) >= 2:
+                break
+            self._spawn_arrival()
+        arrivals = [a for a in self.aircraft if a["plan"] == "arrival"]
+        if len(arrivals) > 1:
+            # one of them is already partway in and part-descended
+            ac = arrivals[-1]
+            ac["lat"], ac["lon"] = advance(ac["lat"], ac["lon"],
+                                           ac["hdg"], 18.0)
+            ac["alt"] = ac["tgt_alt"] = max(
+                self.airport["elev"] + 5000.0, ac["alt"] - 4000.0)
+        self._spawn_departure()
 
     # -- Feed interface -----------------------------------------------------
     def snapshot(self):
@@ -256,6 +293,22 @@ class Sim:
                 return callsign, airline
         return f"SIM{self._counter}", "SIM"
 
+    def _cast_flight(self, role):
+        """(callsign, actype, far_city|None) — live-sampled when possible.
+
+        The pool holds flights genuinely in the air near this airport
+        right now, with their real routes; the synthesized country mix
+        only plays when the pool is empty or offline.
+        """
+        if self.pool is not None:
+            pick = self.pool.draw(role)
+            if pick is not None and not any(
+                    ac["callsign"] == pick[0] for ac in self.aircraft):
+                return pick
+        callsign, airline = self._new_callsign()
+        actype = self.rng.choice(FLEETS.get(airline, ("A320",)))
+        return callsign, actype, None
+
     def _base(self, callsign, actype, lat, lon, alt, hdg, ias):
         self._counter += 1
         return {
@@ -276,8 +329,7 @@ class Sim:
         }
 
     def _spawn_arrival(self):
-        callsign, airline = self._new_callsign()
-        actype = self.rng.choice(FLEETS.get(airline, ("A320",)))
+        callsign, actype, origin = self._cast_flight("arrival")
         entry = self.rng.choice(self.sector["entries"])
         elat, elon = self.sector["fixes"][entry]
         lat, lon = advance(elat, elon,
@@ -302,13 +354,13 @@ class Sim:
         ac.update(plan="arrival", fix=entry, rwy=self.sector["rwy"],
                   thr=self.sector["thr"], course=self.sector["course"])
         self.aircraft.append(ac)
+        tail = f", from {origin}" if origin else ""
         self.say(f"{self.airport['city'] or 'Approach'} approach, "
                  f"{telephony(callsign)} with you, {say_altitude(alt)}, "
-                 f"inbound {entry}", "checkin")
+                 f"inbound {entry}{tail}", "checkin")
 
     def _spawn_departure(self):
-        callsign, airline = self._new_callsign()
-        actype = self.rng.choice(FLEETS.get(airline, ("A320",)))
+        callsign, actype, dest = self._cast_flight("departure")
         exit_fix = self.rng.choice(self.sector["exits"])
         course = self.sector["course"]
         thr = self.sector["thr"]
@@ -320,24 +372,36 @@ class Sim:
         ac.update(plan="departure", fix=exit_fix, tgt_alt=initial,
                   tgt_ias=250.0, phase="cruise")
         self.aircraft.append(ac)
+        tail = f", for {dest}" if dest else ""
         self.say(f"{telephony(callsign)} off runway "
                  f"{say_runway(self.sector['rwy'])}, "
                  f"passing {say_altitude(ac['alt'])} for "
-                 f"{say_altitude(initial)}, requesting {exit_fix}", "checkin")
+                 f"{say_altitude(initial)}, requesting {exit_fix}{tail}",
+                 "checkin")
 
     def _spawn_tick(self, dt):
         self._next_arrival -= dt
         self._next_departure -= dt
         active = sum(1 for ac in self.aircraft if ac["phase"] != "handed")
-        rate = min(30.0, 9.0 + self._elapsed / 60.0 * 0.4)   # per hour
-        if self._next_arrival <= 0 and active < 14:
+        rate = min(40.0, 18.0 + self._elapsed / 60.0)   # per hour, ramping
+        if self._next_arrival <= 0 and active < 16:
             self._spawn_arrival()
             self._next_arrival = max(
-                40.0, self.rng.expovariate(rate / 3600.0))
-        if self._next_departure <= 0 and active < 14:
-            self._spawn_departure()
-            self._next_departure = max(
-                50.0, self.rng.expovariate(rate * 0.6 / 3600.0))
+                35.0, self.rng.expovariate(rate / 3600.0))
+        if self._next_departure <= 0 and active < 16:
+            # tower meters releases: nobody rolls while the previous
+            # departure is still climbing out close-in on runway heading
+            blocked = any(
+                ac["plan"] == "departure" and ac["phase"] == "cruise"
+                and haversine_nm(ac["lat"], ac["lon"], self.airport["lat"],
+                                 self.airport["lon"]) < 7.0
+                for ac in self.aircraft)
+            if blocked:
+                self._next_departure = 20.0
+            else:
+                self._spawn_departure()
+                self._next_departure = max(
+                    45.0, self.rng.expovariate(rate * 0.7 / 3600.0))
 
     # -- flying -------------------------------------------------------------
     def _fly(self, ac, dt):
@@ -345,6 +409,15 @@ class Sim:
 
         if ac["phase"] in ("cleared", "established"):
             self._fly_ils(ac)
+        elif ac["phase"] == "hold":
+            # a lazy right-hand orbit around the holding point
+            hlat, hlon = ac["hold_at"]
+            if haversine_nm(ac["lat"], ac["lon"], hlat, hlon) > 2.5:
+                ac["tgt_hdg"] = bearing_to(ac["lat"], ac["lon"], hlat, hlon)
+                ac["turn_dir"] = None
+            else:
+                ac["tgt_hdg"] = (ac["hdg"] + 45.0) % 360.0
+                ac["turn_dir"] = "r"
 
         # heading: standard-rate toward target, honouring a forced direction
         delta = turn_delta(ac["hdg"], ac["tgt_hdg"], ac["turn_dir"])
@@ -356,12 +429,26 @@ class Sim:
             ac["hdg"] = (ac["hdg"] + math.copysign(step, delta)) % 360.0
         ac["track"] = ac["hdg"]
 
-        # altitude
-        diff = ac["tgt_alt"] - ac["alt"]
+        # altitude — descents respect the terrain under them (the ILS is a
+        # surveyed path, so a coupled approach may go below the grid's MVA)
+        tgt_alt = ac["tgt_alt"]
+        if (self.terrain is not None and tgt_alt < ac["alt"]
+                and ac["phase"] not in ("cleared", "established")):
+            floor = self.terrain.mva_at(ac["lat"], ac["lon"])
+            if floor is not None and tgt_alt < floor:
+                tgt_alt = floor
+                if ac["alt"] <= floor + 300.0 and not ac.get("terrain_stop"):
+                    ac["terrain_stop"] = True
+                    self.say(f"{telephony(ac['callsign'])} leveling at "
+                             f"{say_altitude(floor)}, terrain below us",
+                             "request")
+            elif ac.get("terrain_stop"):
+                ac["terrain_stop"] = False   # clear of the high ground
+        diff = tgt_alt - ac["alt"]
         rate = climb if diff > 0 else descend
         step_ft = rate * dt / 60.0
         if abs(diff) <= step_ft:
-            ac["alt"] = ac["tgt_alt"]
+            ac["alt"] = tgt_alt
             ac["vrate"] = 0
         else:
             ac["alt"] += math.copysign(step_ft, diff)
@@ -384,8 +471,16 @@ class Sim:
                                          ac["thr"][0], ac["thr"][1],
                                          ac["course"])
         if ac["phase"] == "cleared":
-            closing = abs(turn_delta(ac["hdg"], ac["course"])) < 100.0
-            if abs(cross) < 0.45 and along > 0.3 and closing:
+            # lead the turn: capture when starting a standard-rate turn
+            # *now* would roll out on the localizer — so a sane intercept
+            # vector (anything under ~90° across) locks on without the
+            # player having to thread a needle
+            theta = abs(turn_delta(ac["hdg"], ac["course"]))
+            turn_radius = ac["gs"] / 188.5           # nm, standard rate
+            lead = turn_radius * (1.0 - math.cos(
+                math.radians(min(theta, 90.0)))) + 0.2
+            window = lead if theta < 90.0 else 0.45
+            if abs(cross) < window and along > 0.5 and theta < 110.0:
                 ac["phase"] = "established"
                 ac["turn_dir"] = None
                 self.say(f"{telephony(ac['callsign'])} established, "
@@ -409,6 +504,20 @@ class Sim:
             ac["tower_handoff"] = True
             self.say(f"{telephony(ac['callsign'])}, contact tower. "
                      "Good day.", "atc")
+        # an unstable approach goes around: still hot or high on short
+        # final means the clearance came too late or too fast
+        if along < 1.5 and (ac["ias"] > ac["perf"][2] + 25.0
+                            or ac["alt"] > gs_alt + 500.0):
+            ac.update(phase="cruise", tower_handoff=None,
+                      tgt_hdg=ac["course"], turn_dir=None,
+                      tgt_ias=max(ac["perf"][2] + 40.0, 180.0))
+            ac["tgt_alt"] = float(
+                round((self.sector["elev"] + 3000.0) / 1000.0) * 1000.0)
+            self.score -= 50
+            self.say(f"{telephony(ac['callsign'])} going around — "
+                     f"{'too fast' if ac['ias'] > ac['perf'][2] + 25.0 else 'too high'},"
+                     " give us vectors when you can", "alert")
+            return
         if along < 0.35 or ac["alt"] <= self.sector["elev"] + 30.0:
             ac["phase"] = "landed"
 
@@ -428,10 +537,34 @@ class Sim:
         for ac in self.aircraft:
             self._fly(ac, dt)
             ac["delay"] += dt
+        self._requests(dt)
         self._separation()
         self._trails(now)
         self._retire()
         self.updated = now
+
+    def _requests(self, dt):
+        """Now and then somebody on frequency wants something."""
+        self._next_request -= dt
+        if self._next_request > 0:
+            return
+        self._next_request = 120.0 + self.rng.expovariate(1.0 / 120.0)
+        wanting = []
+        for ac in self.aircraft:
+            if ac.get("asked") or ac["phase"] != "cruise":
+                continue
+            if (ac["plan"] == "arrival" and ac["alt"] > 9000.0
+                    and ac["tgt_alt"] >= ac["alt"]):
+                wanting.append((ac, "requesting lower"))
+            elif (ac["plan"] == "departure"
+                  and ac["alt"] >= ac["tgt_alt"] - 200.0):
+                verb = self.rng.choice(
+                    ("requesting higher", f"requesting direct {ac['fix']}"))
+                wanting.append((ac, verb))
+        if wanting:
+            ac, want = self.rng.choice(wanting)
+            ac["asked"] = True
+            self.say(f"{telephony(ac['callsign'])} {want}", "request")
 
     def _retire(self):
         keep = []
@@ -522,8 +655,8 @@ class Sim:
         if kind == "turn":
             ac["tgt_hdg"] = float(ins["hdg"] % 360 or 360)
             ac["turn_dir"] = ins["dir"]
-            if ac["phase"] in ("cleared", "established"):
-                ac["phase"] = "cruise"     # vectored off the approach
+            if ac["phase"] in ("cleared", "established", "hold"):
+                ac["phase"] = "cruise"     # vectored off approach or hold
             word = "left" if ins["dir"] == "l" else "right"
             return f"turn {word} heading {say_digits(ins['hdg'], 3)}"
         if kind == "alt":
@@ -534,7 +667,14 @@ class Sim:
             if ins["verb"] == "d" and up:
                 raise CommandError(f"unable descend — {me} is at "
                                    f"{say_altitude(ac['alt'])}")
+            if not up and self.terrain is not None:
+                floor = self.terrain.mva_at(ac["lat"], ac["lon"])
+                if floor is not None and ins["alt_ft"] < floor:
+                    raise CommandError(
+                        f"unable {say_altitude(ins['alt_ft'])} — minimum "
+                        f"vectoring altitude here is {say_altitude(floor)}")
             ac["tgt_alt"] = float(ins["alt_ft"])
+            ac["terrain_stop"] = False
             verb = "climb" if up else "descend"
             return f"{verb} and maintain {say_altitude(ins['alt_ft'])}"
         if kind == "speed":
@@ -564,9 +704,22 @@ class Sim:
                                    f"{ins['fix']}")
             ac["tgt_hdg"] = bearing_to(ac["lat"], ac["lon"], spot[0], spot[1])
             ac["turn_dir"] = None
-            if ac["phase"] in ("cleared", "established"):
+            if ac["phase"] in ("cleared", "established", "hold"):
                 ac["phase"] = "cruise"
             return f"direct {ins['fix']}"
+        if kind == "hold":
+            if ins["fix"] is not None:
+                spot = self.sector["fixes"].get(ins["fix"])
+                if spot is None:
+                    raise CommandError(f"unable — {me} is unfamiliar with "
+                                       f"{ins['fix']}")
+                ac["hold_at"] = spot
+                where = f"at {ins['fix']}"
+            else:
+                ac["hold_at"] = (ac["lat"], ac["lon"])
+                where = "present position"
+            ac["phase"] = "hold"
+            return f"hold {where}, right turns"
         if kind == "ils":
             if ac["plan"] != "arrival":
                 raise CommandError(f"unable — {me} is a departure")
@@ -579,6 +732,16 @@ class Sim:
                                        f"at {self.airport['icao']}")
                 rwy, course, tlat, tlon = end
                 thr = (tlat, tlon)
+            # hopeless geometry gets a puzzled pilot, not a wasted clearance
+            cross, along = cross_along_track(ac["lat"], ac["lon"],
+                                             thr[0], thr[1], course)
+            theta = abs(turn_delta(ac["hdg"], course))
+            if along < 1.0:
+                raise CommandError(f"unable — {me} is inside the marker, "
+                                   "vector us back around")
+            if theta > 110.0:
+                raise CommandError(f"unable — {me} is pointed away from "
+                                   "the localizer, give us a vector first")
             ac.update(phase="cleared", rwy=rwy, course=course, thr=thr,
                       tower_handoff=None)
             return f"cleared ILS runway {say_runway(rwy)} approach"

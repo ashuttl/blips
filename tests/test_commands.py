@@ -44,6 +44,24 @@ def test_bare_ils_and_bare_s():
     assert ins == [{"kind": "ils", "rwy": None}, {"kind": "speed", "kt": None}]
 
 
+def test_callsign_forgives_a_space():
+    assert parse("ual 71 l 230")[0] == "ual71"
+    assert parse("ual71 l 230")[0] == "ual71"
+    # a suffix hail is digits already; nothing to merge
+    assert parse("71 l 230")[0] == "71"
+
+
+def test_hold_grammar():
+    _, ins = parse("55 hold")
+    assert ins == [{"kind": "hold", "fix": None}]
+    _, ins = parse("55 hold lal")
+    assert ins == [{"kind": "hold", "fix": "LAL"}]
+    # a following command word is a command, not a fix name
+    _, ins = parse("55 hold d 60")
+    assert ins[0] == {"kind": "hold", "fix": None}
+    assert ins[1]["kind"] == "alt"
+
+
 def test_no_directionless_shortcuts():
     # holding the picture is the game: no 'fly heading', no bare speed value
     with pytest.raises(CommandError):
