@@ -70,14 +70,18 @@ def _normalize(raw, fetched_at):
     }
 
 
-def fetch_point(lat, lon, radius_nm, timeout=8):
+def fetch_point(lat, lon, radius_nm, timeout=8, on_status=None):
     """Aircraft near a point: (list of normalized dicts, source name).
 
     Tries each aggregator in order; raises the last error if all fail.
+    ``on_status(name)`` is called before each attempt so a UI can show
+    which aggregator is being waited on.
     """
     r = max(1, min(MAX_RADIUS_NM, radius_nm))
     last_exc = None
     for name, tmpl in SOURCES:
+        if on_status is not None:
+            on_status(name)
         url = tmpl.format(lat=lat, lon=lon, r=r)
         try:
             data = fetch_json(url, headers={"User-Agent": USER_AGENT},

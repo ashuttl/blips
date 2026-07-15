@@ -63,6 +63,7 @@ TRAIL_MAX_AGE = 480.0
 TRAIL_MAX_FIXES = 120
 ARROWS = "↑↗→↘↓↙←↖"
 COMPASS = ("N", "NE", "E", "SE", "S", "SW", "W", "NW")
+SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"  # header pulse while the first fetch is in flight
 
 _basemap_cache = {}
 
@@ -145,6 +146,9 @@ class Feed:
         self.updated = None  # wall time of last successful poll
         self.source = ""
         self.error = None
+        self._fetching = False      # a poll is in flight right now
+        self._fetch_started = None  # wall time the in-flight poll began
+        self._trying = ""           # aggregator currently being waited on
         self._view = None    # (lat, lon, radius_nm)
         self._wake = threading.Event()
         self._lock = threading.Lock()
@@ -161,7 +165,21 @@ class Feed:
 
     def poll_once(self):
         lat, lon, radius = self._view
-        aircraft, source = fetch_point(lat, lon, radius)
+
+        def _trying(name):
+            with self._lock:
+                self._trying = name
+
+        with self._lock:
+            self._fetching = True
+            self._fetch_started = time.time()
+        try:
+            aircraft, source = fetch_point(lat, lon, radius,
+                                           on_status=_trying)
+        finally:
+            with self._lock:
+                self._fetching = False
+                self._trying = ""
         with self._lock:
             self.aircraft = aircraft
             self.source = source
@@ -173,6 +191,12 @@ class Feed:
         with self._lock:
             return (list(self.aircraft), dict(self.trails), self.updated,
                     self.source, self.error)
+
+    def fetch_status(self):
+        """(fetching, started, trying): is a poll in flight, since when,
+        and which aggregator it's waiting on."""
+        with self._lock:
+            return self._fetching, self._fetch_started, self._trying
 
     def _update_trails(self, aircraft):
         now = time.time()
@@ -755,16 +779,29 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
 
     airborne = sum(1 for ac in aircraft if not ac["ground"])
     ground = len(aircraft) - airborne
-    counts = f"✈ {airborne}"
-    if ground and show_ground:
+    counts = f"✈ {airborne}" if updated else "✈ …"
+    if updated and ground and show_ground:
         counts += f" · {ground} gnd"
+    fetching, fetch_started, trying = (
+        feed.fetch_status() if hasattr(feed, "fetch_status")
+        else (False, None, ""))
     if game_footer is not None:
         status = "▶" if playing else "⏸"   # no feed to be stale in the game
+    elif updated is None and not error:
+        # first fetch still in flight: show it's alive (and, once it drags
+        # on, that it's working through slow aggregators — not empty skies)
+        spin = SPINNER[int(now * 8) % len(SPINNER)]
+        status = f"{spin} fetching {trying or 'traffic'}…"
+        wait = (now - fetch_started) if fetch_started else 0.0
+        if wait > 4:
+            status += f" {wait:.0f}s"
     else:
         age = f"↺ {now - updated:.0f}s" if updated else "…"
         status = f"{'▶' if playing else '⏸'} {age}"
         if error:
             status += " · feed unavailable, retrying"
+        elif fetching and fetch_started and now - fetch_started > 5:
+            status += f" · still fetching… {now - fetch_started:.0f}s"
 
     def _header(place_str):
         return (f"{fg(*MARKER)}{BOLD}⬤ blips{RESET}  {fg(*MUTED)}{place_str}"
@@ -796,7 +833,10 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
         if visible_len(foot) > cols:
             foot = f"{fg(*MUTED)}{focused['callsign']}{RESET}"
     else:
-        src_note = f"Live ADS-B by {source or 'adsb.lol'}"
+        if updated is None:
+            src_note = f"Contacting {trying or 'adsb.lol'}…"
+        else:
+            src_note = f"Live ADS-B by {source}"
         if show_weather:
             if echo is not None:
                 src_note += f" · wx {wx_label}"
