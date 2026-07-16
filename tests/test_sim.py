@@ -439,6 +439,59 @@ def test_seeded_shifts_reproduce():
     assert radios[0] == radios[1]       # same script, same shift
 
 
+# -- delay and the rating -------------------------------------------------------
+
+def test_dawdling_landing_pays_a_delay_penalty(sim):
+    thr = sim.sector["thr"]
+    course = sim.sector["course"]
+    lat, lon = advance(*thr, (course + 180.0) % 360.0, 12.0)
+    ac = _arrival(sim, lat=lat, lon=lon, alt=3000.0, hdg=course, ias=200.0)
+    ac["par"] = 1.0                     # pretend they've been vectored ages
+    ac["delay"] = 600.0                 # ...ten minutes of laps already flown
+    sim.command("100 i")
+    _run(sim, 900)
+    assert sim.landed == 1
+    assert sim.score == 20              # 100 minus the capped penalty
+    assert sim.offered == 100
+
+
+def test_prompt_landing_keeps_the_hundred(sim):
+    thr = sim.sector["thr"]
+    course = sim.sector["course"]
+    lat, lon = advance(*thr, (course + 180.0) % 360.0, 12.0)
+    ac = _arrival(sim, lat=lat, lon=lon, alt=3000.0, hdg=course, ias=200.0)
+    ac["par"] = 3600.0                  # miles of room
+    sim.command("100 i")
+    _run(sim, 900)
+    assert sim.score == 100
+    assert sim.offered == 100
+
+
+def test_spawned_arrivals_carry_a_reachable_par(sim):
+    sim._spawn_arrival()
+    ac = sim.aircraft[-1]
+    # par ≈ 16 s/nm plus five minutes of slack: a straight-in at working
+    # speeds beats it comfortably, a couple of laps does not
+    dist = haversine_nm(ac["lat"], ac["lon"],
+                        sim.airport["lat"], sim.airport["lon"])
+    assert dist * 14.0 < ac["par"] < dist * 16.0 + 320.0
+
+
+def test_rating_is_score_against_offered(sim):
+    from blips._game import _rating
+    sim._elapsed = 900.0
+    sim.offered, sim.score = 1000, 990
+    assert _rating(sim) == "A+"
+    sim.score = 900
+    assert _rating(sim) == "A"
+    sim.score = 500                     # a bust in an otherwise fine hour
+    assert _rating(sim) == "C"
+    sim.busts = 3
+    assert _rating(sim) == "F"          # three strikes, whatever the score
+    sim.busts, sim.offered = 0, 100
+    assert _rating(sim) == "—"          # too little concluded to judge
+
+
 # -- hearback -------------------------------------------------------------------
 
 def test_misheard_readback_is_flown_until_corrected(sim):

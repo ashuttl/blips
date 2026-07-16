@@ -195,15 +195,18 @@ def _wx_sampler(rgba, pw, ph, fbbox):
 
 
 def _rating(sim):
-    """A letter for the shift.  Busts are what they are."""
-    if sim._elapsed < 120.0:
+    """A letter for the shift: what you scored against what the traffic
+    was worth.  Fair at any shift length and any hour of the ramp —
+    working everything cleanly and promptly is an A whether the sector
+    gave you six aircraft or sixty.  Busts are what they are."""
+    if sim._elapsed < 120.0 or sim.offered < 150:
         return "—"
     if sim.busts >= 3 or sim.score < 0:
         return "F"
-    per_hr = sim.score / max(sim._elapsed / 3600.0, 1.0 / 60.0)
-    for grade, floor in (("A+", 6000), ("A", 4500), ("B+", 3500),
-                         ("B", 2500), ("C", 1200), ("D", 0)):
-        if per_hr >= floor:
+    ratio = sim.score / sim.offered
+    for grade, floor in (("A+", 0.96), ("A", 0.88), ("B+", 0.78),
+                         ("B", 0.65), ("C", 0.45), ("D", 0.20)):
+        if ratio >= floor:
             return grade
     return "F"
 
@@ -221,6 +224,11 @@ def _shift_card(sim, airport, seed, live_cast):
     if sim.hearbacks:
         lines.append(f"  readbacks misheard {sim.hearbacks} · "
                      f"caught {sim.hearbacks_caught}")
+    if sim._delay_n:
+        avg = sim._delay_extra / sim._delay_n
+        m, s = divmod(int(avg), 60)
+        note = "right at par" if avg < 30.0 else f"+{m}:{s:02d} over par"
+        lines.append(f"  arrivals averaged {note}")
     return "\n".join(lines + [
         f"  score {sim.score:,} · rating {BOLD}{_rating(sim)}{RESET}",
         f"  {fg(*DIM)}replay this traffic: blips --game {code} "

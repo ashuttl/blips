@@ -241,9 +241,12 @@ class Sim:
         self.trails = {}
         self.radio = []          # [(time, line, kind)] — newest last
         self.score = 0
+        self.offered = 0         # points the concluded traffic was worth
         self.landed = 0
         self.departed = 0
         self.busts = 0
+        self._delay_extra = 0.0  # arrival seconds beyond par, summed
+        self._delay_n = 0
         self.start = time.time()
         self.updated = self.start
         self.error = None
@@ -368,8 +371,14 @@ class Sim:
         hdg = bearing_to(lat, lon, self.airport["lat"], self.airport["lon"])
         ias = float(self.rng.choice((250, 270, 280)))
         ac = self._base(callsign, actype, lat, lon, alt, hdg, ias)
+        # par: the straight-in distance at working speeds plus room for a
+        # civilised pattern — beat it and nothing happens, dawdle past it
+        # (laps, forgotten holds) and the landing pays less
+        dist = haversine_nm(lat, lon, self.airport["lat"],
+                            self.airport["lon"])
         ac.update(plan="arrival", fix=entry, rwy=self.sector["rwy"],
-                  thr=self.sector["thr"], course=self.sector["course"])
+                  thr=self.sector["thr"], course=self.sector["course"],
+                  par=dist * 16.0 + 300.0)
         self.aircraft.append(ac)
         tail = f", from {origin}" if origin else ""
         self.say(f"{self.airport['city'] or 'Approach'} approach, "
@@ -687,7 +696,16 @@ class Sim:
         for ac in self.aircraft:
             if ac["phase"] == "landed":
                 self.landed += 1
-                self.score += 100
+                # a landing is worth 100 flown at par; every six seconds
+                # spent over par shaves a point (down to 20 — a landing
+                # is never worth nothing)
+                par = ac.get("par")
+                extra = max(0.0, ac["delay"] - par) if par else 0.0
+                self.score += 100 - min(80, int(extra / 6.0))
+                if par:
+                    self.offered += 100
+                    self._delay_extra += extra
+                    self._delay_n += 1
                 if ac.get("mayday_t") is not None:
                     quick = self._elapsed - ac["mayday_t"] < 720.0
                     self.score += 300 if quick else 100
@@ -700,13 +718,16 @@ class Sim:
             if dist > DESPAWN_NM:
                 if ac["phase"] == "handed":
                     self.departed += 1
+                    self.offered += 50
                 elif ac["plan"] == "arrival":
                     self.score -= 100
+                    self.offered += 100
                     self.diversions += 1
                     self.say(f"{ac['callsign']} diverted — flew out of "
                              "your airspace unworked", "alert")
                 else:
                     self.score -= 100
+                    self.offered += 50
                     self.say(f"{ac['callsign']} left the sector "
                              "without a handoff", "alert")
                 self.trails.pop(ac["hex"], None)
