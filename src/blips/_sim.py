@@ -53,6 +53,23 @@ PERF = {
     "C56X": (270, 180, 115, 3000, 2500), "GLF5": (290, 190, 130, 3500, 2800),
 }
 
+# wake category by type — everything unlisted radar-separates at the
+# standard 3 nm.  The B757 is its own famous case: "large" on paper,
+# notorious enough on final to carry extra spacing in the real rules.
+WAKE = {"A388": "super",
+        "B77W": "heavy", "B763": "heavy", "B788": "heavy",
+        "B752": "b757"}
+WAKE_NM = {"super": 6.0, "heavy": 5.0, "b757": 4.0}   # in-trail behind one
+_WAKE_WORD = {"super": "super", "heavy": "heavy", "b757": "seven five seven"}
+
+
+def hail(ac):
+    """Telephony plus the wake suffix the R/T actually carries: a 777 is
+    'Speedbird 12 heavy' every time anyone says its name."""
+    tag = {"super": " super", "heavy": " heavy"}.get(WAKE.get(ac["actype"]))
+    return telephony(ac["callsign"]) + (tag or "")
+
+
 # airline → plausible TRACON fleet (types must exist in PERF)
 FLEETS = {
     "AAL": ("B738", "A321", "E175"), "DAL": ("B738", "A320", "A321", "B752"),
@@ -382,7 +399,7 @@ class Sim:
         self.aircraft.append(ac)
         tail = f", from {origin}" if origin else ""
         self.say(f"{self.airport['city'] or 'Approach'} approach, "
-                 f"{telephony(callsign)} with you, {say_altitude(alt)}, "
+                 f"{hail(ac)} with you, {say_altitude(alt)}, "
                  f"inbound {entry}{tail}", "checkin")
 
     def _spawn_departure(self):
@@ -399,7 +416,7 @@ class Sim:
                   tgt_ias=250.0, phase="cruise")
         self.aircraft.append(ac)
         tail = f", for {dest}" if dest else ""
-        self.say(f"{telephony(callsign)} off runway "
+        self.say(f"{hail(ac)} off runway "
                  f"{say_runway(self.sector['rwy'])}, "
                  f"passing {say_altitude(ac['alt'])} for "
                  f"{say_altitude(initial)}, requesting {exit_fix}{tail}",
@@ -465,7 +482,7 @@ class Sim:
                 tgt_alt = floor
                 if ac["alt"] <= floor + 300.0 and not ac.get("terrain_stop"):
                     ac["terrain_stop"] = True
-                    self.say(f"{telephony(ac['callsign'])} leveling at "
+                    self.say(f"{hail(ac)} leveling at "
                              f"{say_altitude(floor)}, terrain below us",
                              "request")
             elif ac.get("terrain_stop"):
@@ -509,7 +526,7 @@ class Sim:
             if abs(cross) < window and along > 0.5 and theta < 110.0:
                 ac["phase"] = "established"
                 ac["turn_dir"] = None
-                self.say(f"{telephony(ac['callsign'])} established, "
+                self.say(f"{hail(ac)} established, "
                          f"runway {ac['rwy']}", "pilot")
             else:
                 return
@@ -528,25 +545,61 @@ class Sim:
             ac["tgt_ias"] = 180.0
         if along < 5.5 and ac.get("tower_handoff") is None:
             ac["tower_handoff"] = True
-            self.say(f"{telephony(ac['callsign'])}, contact tower. "
+            self.say(f"{hail(ac)}, contact tower. "
                      "Good day.", "atc")
         # an unstable approach goes around: still hot or high on short
         # final means the clearance came too late or too fast
         if along < 1.5 and (ac["ias"] > ac["perf"][2] + 25.0
                             or ac["alt"] > gs_alt + 500.0):
-            ac.update(phase="cruise", tower_handoff=None,
-                      tgt_hdg=ac["course"], turn_dir=None,
-                      tgt_ias=max(ac["perf"][2] + 40.0, 180.0))
-            ac["tgt_alt"] = float(
-                round((self.sector["elev"] + 3000.0) / 1000.0) * 1000.0)
-            self.score -= 50
-            self.go_arounds += 1
-            self.say(f"{telephony(ac['callsign'])} going around — "
-                     f"{'too fast' if ac['ias'] > ac['perf'][2] + 25.0 else 'too high'},"
-                     " give us vectors when you can", "alert")
+            why = ("too fast" if ac["ias"] > ac["perf"][2] + 25.0
+                   else "too high")
+            self._go_around(ac, f"{why}, give us vectors when you can")
             return
         if along < 0.35 or ac["alt"] <= self.sector["elev"] + 30.0:
             ac["phase"] = "landed"
+
+    def _go_around(self, ac, reason, cost=50):
+        """Break an approach off: climb out on runway heading, yours again."""
+        ac.update(phase="cruise", tower_handoff=None,
+                  tgt_hdg=ac["course"], turn_dir=None,
+                  tgt_ias=max(ac["perf"][2] + 40.0, 180.0), wake_warned=False)
+        ac["tgt_alt"] = float(
+            round((self.sector["elev"] + 3000.0) / 1000.0) * 1000.0)
+        self.score -= cost
+        self.go_arounds += 1
+        self.say(f"{hail(ac)} going around — {reason}", "alert")
+
+    def _wake_final(self):
+        """In-trail wake minima on final: three miles is legal behind a
+        737 and dangerous behind a heavy.  The follower warns once inside
+        a mile of the minimum; below it they protect themselves."""
+        finals = {}
+        for ac in self.aircraft:
+            if ac["phase"] != "established":
+                continue
+            _cross, along = cross_along_track(ac["lat"], ac["lon"],
+                                              ac["thr"][0], ac["thr"][1],
+                                              ac["course"])
+            key = (ac["rwy"], round(ac["course"]))
+            finals.setdefault(key, []).append((along, ac))
+        for stream in finals.values():
+            stream.sort(key=lambda pair: pair[0])
+            for (lead_at, leader), (foll_at, follower) in zip(stream,
+                                                              stream[1:]):
+                cat = WAKE.get(leader["actype"])
+                need = WAKE_NM.get(cat)
+                if need is None or follower["squawk"] == "7700":
+                    continue     # standard 3 nm applies; the monitor has it
+                gap = foll_at - lead_at
+                if gap < need:
+                    self._go_around(follower,
+                                    f"we're inside {say_digits(int(need))} "
+                                    f"miles of the {_WAKE_WORD[cat]} ahead")
+                elif gap < need + 1.0 and not follower.get("wake_warned"):
+                    follower["wake_warned"] = True
+                    self.say(f"{hail(follower)}, we're closing on the "
+                             f"{_WAKE_WORD[cat]} ahead — we can take a "
+                             "little speed off", "request")
 
     # -- world tick ---------------------------------------------------------
     def tick(self, now=None):
@@ -568,6 +621,7 @@ class Sim:
         self._weather_tick(dt)
         self._flow_tick(dt)
         self._emergency_tick(dt)
+        self._wake_final()
         self._separation()
         self._trails(now)
         self._retire()
@@ -598,7 +652,7 @@ class Sim:
                 if ahead < 0.3:
                     ac["wx_deviating"] = False
                     ac["wx_asked_t"] = None
-                    self.say(f"{telephony(ac['callsign'])} clear of weather,"
+                    self.say(f"{hail(ac)} clear of weather,"
                              " ready for a vector", "request")
                 continue
             if ahead < 0.65:
@@ -609,7 +663,7 @@ class Sim:
                     else "right")
             if ac.get("wx_asked_t") is None:
                 ac["wx_asked_t"] = self._elapsed
-                self.say(f"{telephony(ac['callsign'])} requesting 30 "
+                self.say(f"{hail(ac)} requesting 30 "
                          f"{side} for weather", "request")
             elif self._elapsed - ac["wx_asked_t"] > 20.0:
                 # ignored long enough: they protect themselves
@@ -619,7 +673,7 @@ class Sim:
                 ac["turn_dir"] = side[0]
                 if ac["phase"] == "hold":
                     ac["phase"] = "cruise"
-                self.say(f"{telephony(ac['callsign'])} deviating {side}, "
+                self.say(f"{hail(ac)} deviating {side}, "
                          "will advise clear", "request")
 
     # -- the day changes ------------------------------------------------------
@@ -643,7 +697,7 @@ class Sim:
             if ac["plan"] == "arrival" and ac["phase"] == "cleared":
                 # not yet established: their clearance dies with the flow
                 ac["phase"] = "cruise"
-                self.say(f"{telephony(ac['callsign'])}, cancel approach "
+                self.say(f"{hail(ac)}, cancel approach "
                          f"clearance, fly present heading, expect runway "
                          f"{ident}", "atc")
 
@@ -653,7 +707,7 @@ class Sim:
         ac["mayday_t"] = self._elapsed
         self._emergencies += 1
         self.bell = True
-        self.say(f"MAYDAY, MAYDAY — {telephony(ac['callsign'])} declaring "
+        self.say(f"MAYDAY, MAYDAY — {hail(ac)} declaring "
                  "a medical emergency, request priority to the field",
                  "alert")
 
@@ -689,7 +743,7 @@ class Sim:
         if wanting:
             ac, want = self.rng.choice(wanting)
             ac["asked"] = True
-            self.say(f"{telephony(ac['callsign'])} {want}", "request")
+            self.say(f"{hail(ac)} {want}", "request")
 
     def _retire(self):
         keep = []
@@ -709,7 +763,7 @@ class Sim:
                 if ac.get("mayday_t") is not None:
                     quick = self._elapsed - ac["mayday_t"] < 720.0
                     self.score += 300 if quick else 100
-                    self.say(f"{telephony(ac['callsign'])} — thanks for "
+                    self.say(f"{hail(ac)} — thanks for "
                              "the help, medics are meeting us", "checkin")
                 self.trails.pop(ac["hex"], None)
                 continue
@@ -808,7 +862,7 @@ class Sim:
             line = str(exc)
             self.say(line, "error")
             return line
-        line = f"{telephony(ac['callsign'])}, {', '.join(phrases)}."
+        line = f"{hail(ac)}, {', '.join(phrases)}."
         self.say(line, "readback")
         return line
 
@@ -848,7 +902,7 @@ class Sim:
         new_wx = self._wx_ahead(ac, new_hdg)
         if new_wx < 0.65 or new_wx <= self._wx_ahead(ac, ac["hdg"]) + 0.1:
             return
-        me = telephony(ac["callsign"])
+        me = hail(ac)
         side = ("left" if self._wx_ahead(ac, (new_hdg - 40.0) % 360.0)
                 <= self._wx_ahead(ac, (new_hdg + 40.0) % 360.0)
                 else "right")
@@ -862,7 +916,7 @@ class Sim:
         game never quietly fixes a wrong one (holding the picture is the
         point), it hands the mic to a puzzled pilot instead.
         """
-        me = telephony(ac["callsign"])
+        me = hail(ac)
         kind = ins["kind"]
         if kind == "turn":
             hdg = float(ins["hdg"] % 360 or 360)
@@ -961,7 +1015,7 @@ class Sim:
                 raise CommandError(f"unable — {me} is pointed away from "
                                    "the localizer, give us a vector first")
             ac.update(phase="cleared", rwy=rwy, course=course, thr=thr,
-                      tower_handoff=None)
+                      tower_handoff=None, wake_warned=False)
             return f"cleared ILS runway {say_runway(rwy)} approach"
         if kind == "handoff":
             if ac["plan"] != "departure":

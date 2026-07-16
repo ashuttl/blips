@@ -439,6 +439,59 @@ def test_seeded_shifts_reproduce():
     assert radios[0] == radios[1]       # same script, same shift
 
 
+# -- wake turbulence --------------------------------------------------------------
+
+def _final_pair(sim, lead_type, lead_nm, foll_type, foll_nm):
+    """Two arrivals established on final, leader closer in."""
+    thr, course = sim.sector["thr"], sim.sector["course"]
+    out = []
+    for i, (actype, nm) in enumerate(((lead_type, lead_nm),
+                                      (foll_type, foll_nm))):
+        lat, lon = advance(*thr, (course + 180.0) % 360.0, nm)
+        ac = _arrival(sim, callsign=f"DAL10{i}", lat=lat, lon=lon,
+                      alt=sim.airport["elev"] + nm * 300.0, hdg=course,
+                      ias=170.0, actype=actype)
+        ac["phase"] = "established"
+        out.append(ac)
+    return out
+
+
+def test_heavies_carry_the_suffix_on_frequency(sim):
+    _arrival(sim, callsign="BAW12", actype="B77W")
+    line = sim.command("12 l 270")
+    assert line.startswith("Speedbird 12 heavy,")
+    _arrival(sim, callsign="DAL200", actype="B738")
+    assert sim.command("200 l 270").startswith("Delta 200,")
+
+
+def test_three_miles_behind_a_heavy_goes_around(sim):
+    _lead, follower = _final_pair(sim, "B77W", 6.0, "B738", 9.5)
+    _run(sim, 2)
+    assert follower["phase"] == "cruise"
+    assert sim.go_arounds == 1
+    assert any("heavy ahead" in line for _t, line, _k in sim.radio)
+
+
+def test_three_miles_behind_a_737_is_legal(sim):
+    _lead, follower = _final_pair(sim, "B738", 6.0, "B738", 9.5)
+    _run(sim, 2)
+    assert follower["phase"] == "established"
+    assert sim.go_arounds == 0
+
+
+def test_closing_on_a_heavy_warns_before_it_bites(sim):
+    _lead, follower = _final_pair(sim, "B77W", 6.0, "B738", 11.5)
+    _run(sim, 2)
+    assert follower["phase"] == "established"   # 5.5 nm: legal, but tight
+    assert any("closing on the heavy" in line
+               for _t, line, _k in sim.radio)
+    warnings = sum("closing on the heavy" in line
+                   for _t, line, _k in sim.radio)
+    _run(sim, 4)
+    assert sum("closing on the heavy" in line
+               for _t, line, _k in sim.radio) == warnings  # said once
+
+
 # -- delay and the rating -------------------------------------------------------
 
 def test_dawdling_landing_pays_a_delay_penalty(sim):
