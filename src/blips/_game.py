@@ -251,7 +251,7 @@ def main(args):
             pool = TrafficPool(airport, PERF)
             pool.start()  # the real traffic near this airport, filling in
     else:
-        terrain._fetch()  # a screenshot is worth the synchronous wait
+        terrain._fetch(retries=1)  # a screenshot is worth a short wait
     sim = Sim(airport, seed=seed, pool=pool, terrain=terrain)
     center = [airport["lat"], airport["lon"]]
     zoom = [GAME_ZOOM]
@@ -286,7 +286,7 @@ def main(args):
                 if mva is None or mva <= base:
                     row.append(None)
                 else:
-                    w = min(0.30, 0.07 + (mva - base) / 9000.0 * 0.25)
+                    w = min(0.42, 0.14 + (mva - base) / 8000.0 * 0.30)
                     row.append((*TERRAIN_TINT, w))
             grid.append(row)
         if len(_ground_cache) > 4:
@@ -338,6 +338,19 @@ def main(args):
 
     def render(playing=True, mouse_pos=None, **_):
         console.last_mouse = mouse_pos
+        # say once whether the ground is in play — nobody should have to
+        # wonder whether the sector is genuinely flat or just not loaded
+        if terrain is not None and not state.get("terrain_told"):
+            if terrain.status == "ready":
+                state["terrain_told"] = True
+                if terrain.max_mva > airport["elev"] + 3500.0:
+                    sim.say(f"high terrain in sector — MVA up to "
+                            f"{terrain.max_mva:,.0f} ft, shaded on the "
+                            "scope", "help")
+            elif terrain.status == "failed":
+                state["terrain_told"] = True
+                sim.say("terrain data unavailable this shift — "
+                        "flat-world rules", "help")
         # the sim's pilots see whatever radar frame the scope is showing
         rgba, pw, ph, frame_view, *_rest = weather.snapshot()
         sim.wx_sample = (_wx_sampler(rgba, pw, ph, frame_view[0])

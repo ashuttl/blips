@@ -35,6 +35,8 @@ class Terrain:
     def __init__(self, lat, lon):
         self._home = (lat, lon)
         self._mva = None      # GRID_N × GRID_N of ft, row 0 = north edge
+        self.status = "loading"   # → "ready" | "failed"
+        self.max_mva = 0.0
         self._lock = threading.Lock()
         # grid corners: SPAN_NM square centred on the airport
         half = SPAN_NM / 2.0
@@ -58,7 +60,18 @@ class Terrain:
                 lons.append(plon)
         return lats, lons
 
-    def _fetch(self):
+    def _fetch(self, retries=3):
+        """Fetch the grid, retrying with backoff — a transient rate-limit
+        shouldn't quietly flatten the world for a whole shift."""
+        for attempt in range(retries):
+            if attempt:
+                time.sleep(20.0 * attempt)
+            if self._try_fetch():
+                self.status = "ready"
+                return
+        self.status = "failed"
+
+    def _try_fetch(self):
         lats, lons = self._points()
         elev_m = []
         try:
@@ -74,10 +87,10 @@ class Terrain:
                 elev_m.extend(data["elevation"])
         except Exception as exc:
             debug_log(f"terrain fetch failed: {exc}")
-            return
+            return False
         if len(elev_m) != GRID_N * GRID_N:
             debug_log("terrain fetch came back short; staying flat")
-            return
+            return False
         mva = []
         for row in range(GRID_N):
             vals = elev_m[row * GRID_N:(row + 1) * GRID_N]
@@ -86,8 +99,9 @@ class Terrain:
                 for v in vals])
         with self._lock:
             self._mva = mva
-        debug_log(f"terrain grid ready: MVA up to "
-                  f"{max(max(r) for r in mva):,.0f} ft")
+            self.max_mva = max(max(r) for r in mva)
+        debug_log(f"terrain grid ready: MVA up to {self.max_mva:,.0f} ft")
+        return True
 
     def mva_at(self, lat, lon):
         """Minimum vectoring altitude (ft) here, or None while unknown.
