@@ -440,6 +440,57 @@ def test_seeded_shifts_reproduce():
     assert radios[0] == radios[1]       # same script, same shift
 
 
+# -- pushes and the closed runway ------------------------------------------------
+
+def test_the_push_is_announced_and_timed(sim):
+    sim._next_push = 0.0
+    _run(sim, 3)
+    assert any("bank of arrivals" in line for _t, line, _k in sim.radio)
+    assert sim._push_until > sim._elapsed          # a few busy minutes
+    assert sim._next_push > sim._push_until        # then a breather
+
+
+def test_emergency_landing_closes_the_runway(sim):
+    thr, course = sim.sector["thr"], sim.sector["course"]
+    lat, lon = advance(*thr, (course + 180.0) % 360.0, 10.0)
+    ac = _arrival(sim, lat=lat, lon=lon, alt=3000.0, hdg=course, ias=180.0)
+    sim._declare_emergency(ac)
+    sim.command("100 i")
+    # somebody else is merely cleared, far out: the closure strips it
+    far = _arrival(sim, callsign="DAL200", alt=9000.0)
+    far["phase"] = "cleared"
+    for _ in range(120):                           # run until they're down
+        _run(sim, 5)
+        if sim.landed:
+            break
+    assert sim.landed == 1
+    assert sim._rwy_closed()
+    assert any("closed — equipment" in line for _t, line, _k in sim.radio)
+    assert far["phase"] == "cruise"                # clearance died with it
+    assert "runway's closed" in sim.command("200 i")
+
+
+def test_short_final_waves_off_a_closed_runway_for_free(sim):
+    thr, course = sim.sector["thr"], sim.sector["course"]
+    lat, lon = advance(*thr, (course + 180.0) % 360.0, 4.0)
+    ac = _arrival(sim, lat=lat, lon=lon, alt=1300.0, hdg=course, ias=140.0)
+    ac["phase"] = "established"
+    sim._rwy_closed_until = sim._elapsed + 300.0
+    before = sim.score
+    _run(sim, 120)
+    assert ac["phase"] == "cruise"
+    assert sim.go_arounds == 1
+    assert sim.score == before                     # not your fault, no charge
+    assert any("still occupied" in line for _t, line, _k in sim.radio)
+
+
+def test_the_runway_reopens_on_the_radio(sim):
+    sim._rwy_closed_until = 5.0
+    _run(sim, 10)
+    assert not sim._rwy_closed()
+    assert any("back open" in line for _t, line, _k in sim.radio)
+
+
 # -- wind ---------------------------------------------------------------------
 
 def test_crosswind_drifts_the_track(sim):

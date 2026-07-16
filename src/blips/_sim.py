@@ -279,6 +279,9 @@ class Sim:
         self._next_departure = 30.0
         self._next_request = 150.0
         self._next_flow = self.rng.uniform(600.0, 1080.0)
+        self._next_push = self.rng.uniform(420.0, 780.0)
+        self._push_until = 0.0
+        self._rwy_closed_until = 0.0
         self._emergencies = 0
         self._elapsed = 0.0
         self._last_tick = None
@@ -445,15 +448,31 @@ class Sim:
                  f"{say_altitude(initial)}, requesting {exit_fix}{tail}",
                  "checkin")
 
+    def _rwy_closed(self):
+        return self._elapsed < self._rwy_closed_until
+
     def _spawn_tick(self, dt):
         self._next_arrival -= dt
         self._next_departure -= dt
+        # traffic breathes: quiet spells, then a bank comes off the
+        # boundary all at once — the alternation of calm and slam is
+        # what makes a shift feel like a shift
+        if (self._elapsed >= self._next_push
+                and self._push_until <= self._elapsed):
+            self._push_until = self._elapsed + self.rng.uniform(180.0, 300.0)
+            self._next_push = self._push_until + self.rng.uniform(420.0,
+                                                                  900.0)
+            self.say("centre calls the push — a bank of arrivals is "
+                     "coming off the boundary", "atc")
         active = sum(1 for ac in self.aircraft if ac["phase"] != "handed")
-        rate = min(40.0, 18.0 + self._elapsed / 60.0)   # per hour, ramping
+        base = min(34.0, 16.0 + self._elapsed / 75.0)   # per hour, ramping
+        rate = base * (2.4 if self._elapsed < self._push_until else 0.75)
         if self._next_arrival <= 0 and active < 16:
             self._spawn_arrival()
             self._next_arrival = max(
                 35.0, self.rng.expovariate(rate / 3600.0))
+        if self._rwy_closed():
+            self._next_departure = max(self._next_departure, 15.0)
         if self._next_departure <= 0 and active < 16:
             # tower meters releases: nobody rolls while the previous
             # departure is still climbing out close-in on runway heading
@@ -466,8 +485,9 @@ class Sim:
                 self._next_departure = 20.0
             else:
                 self._spawn_departure()
+                # departures follow the day, not the arrival push
                 self._next_departure = max(
-                    45.0, self.rng.expovariate(rate * 0.7 / 3600.0))
+                    45.0, self.rng.expovariate(base * 0.7 / 3600.0))
 
     # -- flying -------------------------------------------------------------
     def _fly(self, ac, dt):
@@ -579,6 +599,12 @@ class Sim:
             ac["tgt_ias"] = float(ac["perf"][2])
         elif ac["tgt_ias"] > 190.0:
             ac["tgt_ias"] = 180.0
+        # a closed runway turns short final around — through no fault of
+        # yours, so the go-around is free; the workload is the price
+        if along < 2.0 and self._rwy_closed():
+            self._go_around(ac, "the runway's still occupied, keep us in "
+                            "the pattern", cost=0)
+            return
         if along < 5.5 and ac.get("tower_handoff") is None:
             ac["tower_handoff"] = True
             self.say(f"{hail(ac)}, contact tower. "
@@ -649,6 +675,10 @@ class Sim:
             return
         self._elapsed += dt
 
+        if self._rwy_closed_until and not self._rwy_closed():
+            self._rwy_closed_until = 0.0
+            self.say(f"runway {self.sector['rwy']} back open — "
+                     "resume approaches", "atis")
         self._spawn_tick(dt)
         for ac in self.aircraft:
             self._fly(ac, dt)
@@ -799,6 +829,23 @@ class Sim:
                     self.score += 300 if quick else 100
                     self.say(f"{hail(ac)} — thanks for "
                              "the help, medics are meeting us", "checkin")
+                    # the ambulance owns the runway for a few minutes:
+                    # approaches wave off, departures wait, final backs
+                    # up, and holding suddenly earns its keep
+                    self._rwy_closed_until = (self._elapsed
+                                              + self.rng.uniform(180.0,
+                                                                 300.0))
+                    self.bell = True
+                    self.say(f"runway {self.sector['rwy']} closed — "
+                             "equipment meeting the emergency, expect "
+                             "delays", "atis")
+                    for other in self.aircraft:
+                        if other["phase"] == "cleared":
+                            other["phase"] = "cruise"
+                            self.say(f"{hail(other)}, cancel approach "
+                                     "clearance, fly present heading — "
+                                     "the runway is closed for the moment",
+                                     "atc")
                 self.trails.pop(ac["hex"], None)
                 continue
             dist = haversine_nm(ac["lat"], ac["lon"],
@@ -1029,6 +1076,10 @@ class Sim:
         if kind == "ils":
             if ac["plan"] != "arrival":
                 raise CommandError(f"unable — {me} is a departure")
+            if self._rwy_closed():
+                raise CommandError("unable — the runway's closed while "
+                                   f"they clear the emergency, {me} can "
+                                   "take a hold or vectors")
             rwy = self.sector["rwy"]
             course, thr = self.sector["course"], self.sector["thr"]
             if ins["rwy"]:
