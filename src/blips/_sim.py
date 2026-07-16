@@ -289,6 +289,7 @@ class Sim:
         self.hearback_p = 0.05   # odds per transmission of a bad readback
         self.hearbacks = 0       # instructions misheard this shift
         self.hearbacks_caught = 0  # ...and corrected before they stuck
+        self.react_s = (1.5, 3.5)  # seconds between readback and hands
         self._atis_n = 0
         self.wind = (360.0, 0.0)
         self._set_wind()
@@ -491,8 +492,31 @@ class Sim:
                     45.0, self.rng.expovariate(base * 0.7 / 3600.0))
 
     # -- flying -------------------------------------------------------------
+    def _stage(self, ac, due, **fields):
+        """Readback now, hands on the bug a beat later: target changes
+        wait out the pilot's reaction time before they start to fly."""
+        if due is None or due <= self._elapsed:
+            ac.update(fields)
+            return
+        pend = ac.get("pend") or {}
+        pend["due"] = due
+        pend.update(fields)
+        ac["pend"] = pend
+
+    def _flush_pend(self, ac):
+        """Whatever was staged happens now — a new transmission means the
+        pilot has certainly finished acting on the last one."""
+        pend = ac.pop("pend", None)
+        if pend:
+            ac.update({k: v for k, v in pend.items() if k != "due"})
+
     def _fly(self, ac, dt):
         cruise, min_clean, app_kt, climb, descend = ac["perf"]
+
+        pend = ac.get("pend")
+        if pend is not None and self._elapsed >= pend["due"]:
+            ac["pend"] = None
+            ac.update({k: v for k, v in pend.items() if k != "due"})
 
         if ac["phase"] in ("cleared", "established"):
             self._fly_ils(ac)
@@ -623,7 +647,7 @@ class Sim:
 
     def _go_around(self, ac, reason, cost=50):
         """Break an approach off: climb out on runway heading, yours again."""
-        ac.update(phase="cruise", tower_handoff=None,
+        ac.update(phase="cruise", tower_handoff=None, pend=None,
                   tgt_hdg=ac["course"], turn_dir=None,
                   tgt_ias=max(ac["perf"][2] + 40.0, 180.0), wake_warned=False)
         ac["tgt_alt"] = float(
@@ -733,8 +757,10 @@ class Sim:
                 self.say(f"{hail(ac)} requesting 30 "
                          f"{side} for weather", "request")
             elif self._elapsed - ac["wx_asked_t"] > 20.0:
-                # ignored long enough: they protect themselves
+                # ignored long enough: they protect themselves — and
+                # whatever you had staged goes out the cockpit window
                 ac["wx_deviating"] = True
+                ac["pend"] = None
                 delta = -30.0 if side == "left" else 30.0
                 ac["tgt_hdg"] = (ac["hdg"] + delta) % 360.0
                 ac["turn_dir"] = side[0]
@@ -949,6 +975,8 @@ class Sim:
             query, instructions = parse(text)
             ac = resolve_callsign(query, [a for a in self.aircraft
                                           if a["phase"] != "handed"])
+            self._flush_pend(ac)
+            due = self._elapsed + self.rng.uniform(*self.react_s)
             bad_idx = self._mishear_roll(ac, instructions)
             phrases = []
             for i, ins in enumerate(instructions):
@@ -962,14 +990,14 @@ class Sim:
                     heard = self._mishear(ins)
                     if heard is not None:
                         try:
-                            phrases.append(self._apply(ac, heard))
+                            phrases.append(self._apply(ac, heard, due))
                             self.hearbacks += 1
                             ac["misheard_kind"] = ins["kind"]
                             ac["misheard_t"] = self._elapsed
                             continue
                         except CommandError:
                             pass   # the mishearing was unflyable: heard right
-                phrases.append(self._apply(ac, ins))
+                phrases.append(self._apply(ac, ins, due))
         except CommandError as exc:
             line = str(exc)
             self.say(line, "error")
@@ -1021,20 +1049,20 @@ class Sim:
         raise CommandError(f"unable — that heading puts {me} into a cell, "
                            f"we could take further {side}")
 
-    def _apply(self, ac, ins):
+    def _apply(self, ac, ins, due=None):
         """Apply one instruction; return its readback phrase.
 
         Direction verbs are checked against the aircraft's state — the
         game never quietly fixes a wrong one (holding the picture is the
-        point), it hands the mic to a puzzled pilot instead.
+        point), it hands the mic to a puzzled pilot instead.  Validation
+        happens now; the hands move at ``due`` (see ``_stage``).
         """
         me = hail(ac)
         kind = ins["kind"]
         if kind == "turn":
             hdg = float(ins["hdg"] % 360 or 360)
             self._wx_check(ac, hdg)
-            ac["tgt_hdg"] = hdg
-            ac["turn_dir"] = ins["dir"]
+            self._stage(ac, due, tgt_hdg=hdg, turn_dir=ins["dir"])
             ac["wx_deviating"] = False
             if ac["phase"] in ("cleared", "established", "hold"):
                 ac["phase"] = "cruise"     # vectored off approach or hold
@@ -1054,13 +1082,13 @@ class Sim:
                     raise CommandError(
                         f"unable {say_altitude(ins['alt_ft'])} — minimum "
                         f"vectoring altitude here is {say_altitude(floor)}")
-            ac["tgt_alt"] = float(ins["alt_ft"])
+            self._stage(ac, due, tgt_alt=float(ins["alt_ft"]))
             ac["terrain_stop"] = False
             verb = "climb" if up else "descend"
             return f"{verb} and maintain {say_altitude(ins['alt_ft'])}"
         if kind == "speed":
             if ins["kt"] is None:
-                ac["tgt_ias"] = float(ac["perf"][0])
+                self._stage(ac, due, tgt_ias=float(ac["perf"][0]))
                 return "resume normal speed"
             lo = ac["perf"][2] if ac["phase"] in ("cleared", "established") \
                 else ac["perf"][1]
@@ -1075,7 +1103,7 @@ class Sim:
             if ins["dir"] == "increase" and ins["kt"] < ac["ias"] - 5:
                 raise CommandError(f"unable increase — {me} is doing "
                                    f"{say_digits(round(ac['ias']))} knots")
-            ac["tgt_ias"] = float(ins["kt"])
+            self._stage(ac, due, tgt_ias=float(ins["kt"]))
             return (f"{'reduce' if ins['dir'] == 'reduce' else 'increase'} "
                     f"speed {say_digits(ins['kt'])}")
         if kind == "direct":
@@ -1085,8 +1113,7 @@ class Sim:
                                    f"{ins['fix']}")
             hdg = bearing_to(ac["lat"], ac["lon"], spot[0], spot[1])
             self._wx_check(ac, hdg)
-            ac["tgt_hdg"] = hdg
-            ac["turn_dir"] = None
+            self._stage(ac, due, tgt_hdg=hdg, turn_dir=None)
             ac["wx_deviating"] = False
             if ac["phase"] in ("cleared", "established", "hold"):
                 ac["phase"] = "cruise"

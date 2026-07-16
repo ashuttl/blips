@@ -15,6 +15,7 @@ def sim():
     s._next_arrival = s._next_departure = s._next_request = 1e9
     s.hearback_p = 0.0          # pilots hear perfectly unless a test says
     s.wind = (360.0, 0.0)       # calm air unless a test brings weather
+    s.react_s = (0.0, 0.0)      # and their hands are instant
     s.aircraft.clear()          # drop the pre-populated shift traffic
     s.trails.clear()
     s.radio.clear()
@@ -438,6 +439,43 @@ def test_seeded_shifts_reproduce():
             s.tick(t)
         radios.append([line for _t, line, _k in s.radio])
     assert radios[0] == radios[1]       # same script, same shift
+
+
+# -- reaction time ----------------------------------------------------------------
+
+def test_instructions_take_a_beat_to_bite(sim):
+    sim.react_s = (3.0, 3.0)
+    ac = _arrival(sim, hdg=360.0)
+    sim.command("100 r 90")
+    assert ac["tgt_hdg"] == 360.0       # read back, not yet flown
+    _run(sim, 2)
+    assert ac["hdg"] == 360.0           # still straight and level
+    _run(sim, 8)
+    assert 12.0 < ac["hdg"] < 27.0      # ~7-8 s of turning, not 10
+
+
+def test_new_transmission_flushes_the_staged_one(sim):
+    sim.react_s = (5.0, 5.0)
+    ac = _arrival(sim, alt=12000.0)
+    sim.command("100 d 60")
+    assert ac["tgt_alt"] == 12000.0     # staged, hands not moved yet
+    sim.command("100 rs 210")           # keying again: the last one's done
+    assert ac["tgt_alt"] == 6000.0
+    assert ac["tgt_ias"] == 250.0       # the new one waits its turn
+    _run(sim, 8)
+    assert ac["tgt_ias"] == 210.0
+
+
+def test_go_around_forgets_whatever_was_staged(sim):
+    thr, course = sim.sector["thr"], sim.sector["course"]
+    lat, lon = advance(*thr, (course + 180.0) % 360.0, 4.0)
+    ac = _arrival(sim, lat=lat, lon=lon, alt=5000.0, hdg=course, ias=170.0)
+    ac["phase"] = "established"
+    sim.react_s = (30.0, 30.0)
+    sim.command("100 rs 140")           # staged far in the future
+    _run(sim, 120)                      # too high on short final: go-around
+    assert sim.go_arounds == 1
+    assert ac["pend"] is None           # the pilot's hands went elsewhere
 
 
 # -- conflict alert ---------------------------------------------------------------
