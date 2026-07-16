@@ -59,6 +59,9 @@ def _strip_line(ac):
             f"{fg(*MUTED)}{ac['actype']} · {job} · {state}{phase}{RESET}")
 
 
+TAPE_LINES = 9                # transmissions shown while paused
+
+
 class _Console:
     """The command bar and radio log: keystrokes in, transmissions out."""
 
@@ -69,6 +72,7 @@ class _Console:
         self.history = []
         self.hist_idx = None
         self.last_mouse = None
+        self.tape = False         # paused: the footer replays the frequency
 
     # -- keyboard (live_loop raw mode: every printable is ours) -------------
     def intercept(self, action):
@@ -123,7 +127,7 @@ class _Console:
             return True
         return False
 
-    # -- the two bottom lines ------------------------------------------------
+    # -- the bottom lines ----------------------------------------------------
     def footer(self, focused):
         # the radio line is never covered: hovering an aircraft borrows
         # the (idle) command bar for its strip instead
@@ -149,6 +153,13 @@ class _Console:
             bar = f"{prompt}{strip}"
         else:
             bar = f"{prompt}{fg(*DIM)}{HINT}{RESET}"
+        if self.tape:
+            # paused is reviewing the tape: the busy moment you missed,
+            # every call in order, oldest at the top
+            tape = [f"{fg(*RADIO_COLORS.get(kind, MUTED))}{line}{RESET}"
+                    for _t, line, kind in self.sim.radio[-TAPE_LINES:]]
+            tape = [""] * (TAPE_LINES - len(tape)) + tape
+            return tape + [bar]
         return [top, bar]
 
 
@@ -211,10 +222,22 @@ def _rating(sim):
     return "F"
 
 
-def _shift_card(sim, airport, seed, live_cast):
+def _shift_card(sim, airport, seed, live_cast, entry=None, prev=None):
     minutes = int(sim._elapsed) // 60
     code = (airport["iata"] or airport["icao"]).lower()
     cast_note = " (synthetic cast)" if live_cast else ""
+    rating = _rating(sim)
+    book = ""
+    if entry is not None:
+        if prev is None:
+            note = "first shift in the book here"
+        elif rating != "—" and sim.score > prev["score"]:
+            note = (f"new personal best — previous "
+                    f"{prev['score']:,} ({prev['rating']})")
+        else:
+            note = f"personal best here {prev['score']:,} ({prev['rating']})"
+        book = (f"\n  {note} · {entry['shifts']} shifts, "
+                f"{entry['landed']} landings all-time")
     lines = [
         f"{BOLD}shift summary{RESET} — {airport['icao']} · {minutes} min",
         f"  landed {sim.landed} · handed off {sim.departed} · "
@@ -230,7 +253,7 @@ def _shift_card(sim, airport, seed, live_cast):
         note = "right at par" if avg < 30.0 else f"+{m}:{s:02d} over par"
         lines.append(f"  arrivals averaged {note}")
     return "\n".join(lines + [
-        f"  score {sim.score:,} · rating {BOLD}{_rating(sim)}{RESET}",
+        f"  score {sim.score:,} · rating {BOLD}{rating}{RESET}{book}",
         f"  {fg(*DIM)}replay this traffic: blips --game {code} "
         f"--seed {seed}{cast_note}{RESET}",
     ])
@@ -381,14 +404,16 @@ def main(args):
                          if rgba is not None and state["weather"] else None)
         if not state["paused"]:
             sim.tick()
+        console.tape = state["paused"]
         pins, lines_geo = sector_scenery()
         frame = render_scope(
             center, zoom[0], sim, playing=not state["paused"],
             mouse_pos=mouse_pos, show_ground=False, weather=weather,
             show_weather=state["weather"], drag_offset=drag_preview[0],
             pins=pins, lines_geo=lines_geo, ground=ground,
-            game_footer=(2, console.footer), header_note=hud(),
-            rings_at=(airport["lat"], airport["lon"]))
+            game_footer=((TAPE_LINES + 1) if state["paused"] else 2,
+                         console.footer),
+            header_note=hud(), rings_at=(airport["lat"], airport["lon"]))
         if sim.bell:
             sim.bell = False
             frame = "\a" + frame   # something on frequency needs you
@@ -449,5 +474,11 @@ def main(args):
     live_loop(render, interval=0.5, mouse=True, auto_play=True,
               play_interval=0.5, on_action=on_action, on_drag=on_drag,
               intercept=console.intercept, raw_keys=True)
-    # back on the normal screen: how the shift went
-    print(_shift_card(sim, airport, seed, live_cast=pool is not None))
+    # back on the normal screen: how the shift went, and how it compares
+    from blips._records import record_shift
+    entry, prev = record_shift(
+        airport["icao"], score=sim.score, rating=_rating(sim),
+        minutes=int(sim._elapsed) // 60, landed=sim.landed,
+        handed=sim.departed, busts=sim.busts)
+    print(_shift_card(sim, airport, seed, live_cast=pool is not None,
+                      entry=entry, prev=prev))
