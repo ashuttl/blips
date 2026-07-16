@@ -441,6 +441,33 @@ def test_seeded_shifts_reproduce():
     assert radios[0] == radios[1]       # same script, same shift
 
 
+# -- lost comms -------------------------------------------------------------------
+
+def test_nordo_flies_the_last_clearance_and_wont_answer(sim):
+    ac = _arrival(sim, alt=12000.0, hdg=90.0)
+    sim.command("100 d 80")
+    sim._declare_nordo(ac)
+    assert ac["squawk"] == "7600"       # the blip is already alert-red
+    assert sim.bell
+    line = sim.command("100 l 360")
+    assert "NORDO" in line
+    assert ac["tgt_hdg"] == 90.0        # nobody home to turn
+    _run(sim, 60)
+    assert ac["tgt_alt"] == 8000.0      # the last clearance still flies
+    assert 9000.0 < ac["alt"] < 12000.0
+
+
+def test_radios_come_back(sim):
+    ac = _arrival(sim, alt=12000.0)
+    sim._declare_nordo(ac)
+    ac["nordo_until"] = sim._elapsed + 5.0
+    _run(sim, 10)
+    assert ac["nordo_until"] is None
+    assert ac["squawk"] != "7600"
+    assert any("back with you" in line for _t, line, _k in sim.radio)
+    assert "turn left heading" in sim.command("100 l 360")
+
+
 # -- reaction time ----------------------------------------------------------------
 
 def test_instructions_take_a_beat_to_bite(sim):

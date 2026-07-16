@@ -284,6 +284,7 @@ class Sim:
         self._push_until = 0.0
         self._rwy_closed_until = 0.0
         self._emergencies = 0
+        self._nordos = 0
         self._elapsed = 0.0
         self._last_tick = None
         self.hearback_p = 0.05   # odds per transmission of a bad readback
@@ -712,6 +713,7 @@ class Sim:
         self._weather_tick(dt)
         self._flow_tick(dt)
         self._emergency_tick(dt)
+        self._nordo_tick(dt)
         self._wake_final()
         self._separation()
         self._trails(now)
@@ -736,7 +738,8 @@ class Sim:
             return
         for ac in self.aircraft:
             if (ac["phase"] not in ("cruise", "hold")
-                    or ac["squawk"] == "7700"):
+                    or ac["squawk"] == "7700"
+                    or ac.get("nordo_until")):   # nobody to ask with
                 continue
             ahead = self._wx_ahead(ac, ac["hdg"], 6.0)
             if ac.get("wx_deviating"):
@@ -813,6 +816,38 @@ class Sim:
         if candidates:
             self._declare_emergency(self.rng.choice(candidates))
 
+    # -- lost comms -----------------------------------------------------------
+    def _declare_nordo(self, ac):
+        """Radios fail: squawk 7600, last clearance flown, nobody home."""
+        ac["squawk"] = "7600"    # the blip goes red; the frequency goes quiet
+        ac["nordo_until"] = self._elapsed + self.rng.uniform(150.0, 240.0)
+        self._nordos += 1
+        self.bell = True
+        self.say(f"{ac['callsign']} squawking seven six zero zero — "
+                 "radio failure, they'll fly their last clearance", "alert")
+
+    def _nordo_tick(self, dt):
+        for ac in self.aircraft:
+            until = ac.get("nordo_until")
+            if until is not None and self._elapsed >= until:
+                ac["nordo_until"] = None
+                ac["squawk"] = "%04d" % self.rng.choice(
+                    [n for n in range(1201, 6777)
+                     if "8" not in str(n) and "9" not in str(n)])
+                self.say(f"{hail(ac)} back with you — sorry, we had a "
+                         "radio failure. Say again anything we missed",
+                         "checkin")
+        if self._nordos >= 1 or self._elapsed < 900.0:
+            return
+        if self.rng.random() > dt / 2400.0:
+            return
+        candidates = [ac for ac in self.aircraft
+                      if ac["phase"] in ("cruise", "hold")
+                      and ac["squawk"] not in ("7600", "7700")
+                      and not ac.get("mayday_t")]
+        if len(candidates) >= 4:     # a quiet scope makes a dull failure
+            self._declare_nordo(self.rng.choice(candidates))
+
     def _requests(self, dt):
         """Now and then somebody on frequency wants something."""
         self._next_request -= dt
@@ -821,7 +856,8 @@ class Sim:
         self._next_request = 120.0 + self.rng.expovariate(1.0 / 120.0)
         wanting = []
         for ac in self.aircraft:
-            if ac.get("asked") or ac["phase"] != "cruise":
+            if (ac.get("asked") or ac["phase"] != "cruise"
+                    or ac.get("nordo_until")):
                 continue
             if (ac["plan"] == "arrival" and ac["alt"] > 9000.0
                     and ac["tgt_alt"] >= ac["alt"]):
@@ -975,6 +1011,10 @@ class Sim:
             query, instructions = parse(text)
             ac = resolve_callsign(query, [a for a in self.aircraft
                                           if a["phase"] != "handed"])
+            if ac.get("nordo_until"):
+                raise CommandError(f"nothing heard back from "
+                                   f"{ac['callsign']} — they're NORDO, "
+                                   "squawking seven six zero zero")
             self._flush_pend(ac)
             due = self._elapsed + self.rng.uniform(*self.react_s)
             bad_idx = self._mishear_roll(ac, instructions)
