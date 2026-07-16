@@ -324,7 +324,9 @@ def main(args):
         return f"{m:02d}:{s:02d}"
 
     def hud():
+        wd, wk = sim.wind
         note = (f"{airport['icao']} approach · rwy {sim.sector['rwy']} · "
+                f"wind {int(wd):03d}/{int(wk):02d} · "
                 f"score {sim.score:,} · busts {sim.busts} · {clock()}")
         if state["paused"]:
             note += " · PAUSED"

@@ -145,6 +145,11 @@ WORLD_POOL = ("BAW", "DLH", "AFR", "KLM", "UAE", "QTR", "SIA", "AAL",
 _VOWELS = "AEIOU"
 _CONSONANTS = "BCDFGHJKLMNPRSTVWZ"
 
+_NATO = ("alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf",
+         "hotel", "india", "juliett", "kilo", "lima", "mike", "november",
+         "oscar", "papa", "quebec", "romeo", "sierra", "tango", "uniform",
+         "victor", "whiskey", "xray", "yankee", "zulu")
+
 
 def say_runway(rwy):
     """'01L' → 'one left' — digits spoken, side spelled out."""
@@ -280,7 +285,25 @@ class Sim:
         self.hearback_p = 0.05   # odds per transmission of a bad readback
         self.hearbacks = 0       # instructions misheard this shift
         self.hearbacks_caught = 0  # ...and corrected before they stuck
+        self._atis_n = 0
+        self.wind = (360.0, 0.0)
+        self._set_wind()
+        self._say_atis()         # the shift opens with the numbers
         self._prepopulate()      # a shift starts mid-shift, not empty
+
+    def _set_wind(self):
+        """A wind that favours today's runway, held for the whole flow."""
+        course = self.sector["course"]
+        direction = round((course + self.rng.uniform(-40.0, 40.0))
+                          % 360.0 / 10.0) * 10 % 360
+        self.wind = (float(direction or 360), float(self.rng.randint(6, 16)))
+
+    def _say_atis(self, update=False):
+        head = ("ATIS update, information" if update else "information")
+        d, k = self.wind
+        self.say(f"{head} {_NATO[self._atis_n % len(_NATO)]} — wind "
+                 f"{int(d):03d} at {int(k)}, landing and departing runway "
+                 f"{self.sector['rwy']}", "atis")
 
     def _prepopulate(self):
         """The sector you take over already has traffic in it."""
@@ -470,7 +493,6 @@ class Sim:
             ac["turn_dir"] = None
         else:
             ac["hdg"] = (ac["hdg"] + math.copysign(step, delta)) % 360.0
-        ac["track"] = ac["hdg"]
 
         # altitude — descents respect the terrain under them (the ILS is a
         # surveyed path, so a coupled approach may go below the grid's MVA)
@@ -502,9 +524,23 @@ class Sim:
         sstep = ACCEL_KT_S * dt
         ac["ias"] = (ac["tgt_ias"] if abs(sdiff) <= sstep
                      else ac["ias"] + math.copysign(sstep, sdiff))
-        ac["gs"] = ac["ias"] * (1.0 + ac["alt"] * 2e-5)
+        tas = ac["ias"] * (1.0 + ac["alt"] * 2e-5)
 
-        ac["lat"], ac["lon"] = advance(ac["lat"], ac["lon"], ac["hdg"],
+        # the wind triangle: they point where you said, the air moves —
+        # heading and track diverge, and the scope draws the truth
+        wdir, wkt = self.wind
+        if wkt:
+            rad_h = math.radians(ac["hdg"])
+            rad_w = math.radians(wdir + 180.0)   # blowing toward
+            vx = tas * math.sin(rad_h) + wkt * math.sin(rad_w)
+            vy = tas * math.cos(rad_h) + wkt * math.cos(rad_w)
+            ac["gs"] = math.hypot(vx, vy)
+            ac["track"] = math.degrees(math.atan2(vx, vy)) % 360.0
+        else:
+            ac["gs"] = tas
+            ac["track"] = ac["hdg"]
+
+        ac["lat"], ac["lon"] = advance(ac["lat"], ac["lon"], ac["track"],
                                        ac["gs"] * dt / 3600.0)
         ac["fix_time"] = time.time()
 
@@ -688,11 +724,9 @@ class Sim:
         ident, course, thr = _end_geometry(self.airport, runway, new_end)
         self.sector.update(rwy=ident, course=course, thr=thr, end=new_end)
         self.sector_rev += 1
-        wind_dir = round((course + self.rng.uniform(-20.0, 20.0))
-                         % 360.0 / 10.0) * 10 or 360
-        self.say(f"ATIS update — wind {wind_dir:03d} at "
-                 f"{self.rng.randint(8, 16)}, landing and departing "
-                 f"runway {self.sector['rwy']}", "atis")
+        self._atis_n += 1
+        self._set_wind()         # the wind that turned the airport
+        self._say_atis(update=True)
         for ac in self.aircraft:
             if ac["plan"] == "arrival" and ac["phase"] == "cleared":
                 # not yet established: their clearance dies with the flow

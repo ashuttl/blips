@@ -14,6 +14,7 @@ def sim():
     s = Sim(find_airport("tpa"), seed=1)
     s._next_arrival = s._next_departure = s._next_request = 1e9
     s.hearback_p = 0.0          # pilots hear perfectly unless a test says
+    s.wind = (360.0, 0.0)       # calm air unless a test brings weather
     s.aircraft.clear()          # drop the pre-populated shift traffic
     s.trails.clear()
     s.radio.clear()
@@ -437,6 +438,50 @@ def test_seeded_shifts_reproduce():
             s.tick(t)
         radios.append([line for _t, line, _k in s.radio])
     assert radios[0] == radios[1]       # same script, same shift
+
+
+# -- wind ---------------------------------------------------------------------
+
+def test_crosswind_drifts_the_track(sim):
+    sim.wind = (270.0, 20.0)            # from the west
+    ac = _arrival(sim, hdg=360.0)
+    _run(sim, 10)
+    drift = turn_delta(360.0, ac["track"])
+    assert 2.0 < drift < 10.0           # pushed east of the nose
+    assert ac["hdg"] == 360.0           # the pilot never moved
+
+
+def test_headwind_costs_groundspeed(sim):
+    sim.wind = (360.0, 20.0)            # right on the nose
+    ac = _arrival(sim, hdg=360.0, alt=10000.0, ias=250.0)
+    _run(sim, 5)
+    tas = ac["ias"] * (1.0 + ac["alt"] * 2e-5)
+    assert abs(ac["gs"] - (tas - 20.0)) < 1.0
+    assert ac["track"] == 360.0         # straight into it: no drift
+
+
+def test_ils_lands_in_a_crosswind(sim):
+    course = sim.sector["course"]
+    sim.wind = ((course + 90.0) % 360.0 or 360.0, 14.0)
+    thr = sim.sector["thr"]
+    lat, lon = advance(*thr, (course + 180.0) % 360.0, 12.0)
+    _arrival(sim, lat=lat, lon=lon, alt=3000.0, hdg=course, ias=200.0)
+    sim.command("100 i")
+    _run(sim, 900)
+    assert sim.landed == 1              # crabbed down the localizer
+
+
+def test_atis_opens_the_shift_and_the_letter_advances():
+    s = Sim(find_airport("tpa"), seed=7)
+    first = s.radio[0]
+    assert first[2] == "atis"
+    assert "information alpha" in first[1]
+    assert f"runway {s.sector['rwy']}" in first[1]
+    s._next_flow = 0.0
+    t = s.start
+    s._last_tick = t
+    s.tick(t + 1.0)
+    assert any("information bravo" in line for _t, line, _k in s.radio)
 
 
 # -- wake turbulence --------------------------------------------------------------
