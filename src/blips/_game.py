@@ -17,7 +17,7 @@ import time
 
 from blips._airports import find_airport, nearest_airport
 from blips._color import BOLD, RESET, fg
-from blips._framebuffer import get_terminal_size
+from blips._framebuffer import get_terminal_size, visible_len
 from blips._geo import advance
 from blips._live import live_loop
 from blips._location import get_location
@@ -133,11 +133,20 @@ class _Console:
         else:
             top = ""
         prompt = f"{fg(*MARKER)}{BOLD}▸{RESET} "
+        strip = (_strip_line(focused)
+                 if focused is not None and "plan" in focused else None)
         if self.buffer:
             bar = (f"{prompt}{fg(*TEXT)}{self.buffer}{RESET}"
                    f"{fg(*MARKER)}▌{RESET}")
-        elif focused is not None and "plan" in focused:
-            bar = f"{prompt}{_strip_line(focused)}"
+            if strip is not None:
+                # the strip rides the right side of the bar: a controller
+                # gets to read a flight strip mid-transmission
+                cols = get_terminal_size()[0]
+                pad = cols - visible_len(bar) - visible_len(strip) - 1
+                if pad >= 4:
+                    bar += " " * pad + strip
+        elif strip is not None:
+            bar = f"{prompt}{strip}"
         else:
             bar = f"{prompt}{fg(*DIM)}{HINT}{RESET}"
         return [top, bar]
