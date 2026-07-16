@@ -13,6 +13,7 @@ def sim():
     """A quiet TPA sector: the spawner is parked so tests own the traffic."""
     s = Sim(find_airport("tpa"), seed=1)
     s._next_arrival = s._next_departure = s._next_request = 1e9
+    s.hearback_p = 0.0          # pilots hear perfectly unless a test says
     s.aircraft.clear()          # drop the pre-populated shift traffic
     s.trails.clear()
     s.radio.clear()
@@ -436,6 +437,62 @@ def test_seeded_shifts_reproduce():
             s.tick(t)
         radios.append([line for _t, line, _k in s.radio])
     assert radios[0] == radios[1]       # same script, same shift
+
+
+# -- hearback -------------------------------------------------------------------
+
+def test_misheard_readback_is_flown_until_corrected(sim):
+    ac = _arrival(sim, alt=13000.0)
+    sim.hearback_p = 1.0
+    sim._elapsed = 300.0                # past the settling-in grace
+    line = sim.command("100 d 70")
+    assert "descend and maintain" in line
+    assert ac["tgt_alt"] != 7000.0      # they heard a different number
+    assert abs(ac["tgt_alt"] - 7000.0) == 1000.0
+    assert "seven thousand" not in line  # and the readback says so
+    assert sim.hearbacks == 1
+    sim.hearback_p = 0.0                # the correction gets through
+    line = sim.command("100 d 70")
+    assert "seven thousand" in line
+    assert ac["tgt_alt"] == 7000.0
+    assert sim.hearbacks_caught == 1
+
+
+def test_misheard_heading_is_one_value_off(sim):
+    ac = _arrival(sim, hdg=360.0)
+    sim.hearback_p = 1.0
+    sim._elapsed = 300.0
+    sim.command("100 r 90")
+    assert ac["tgt_hdg"] != 90.0
+    assert abs(ac["tgt_hdg"] - 90.0) in (10.0, 20.0)
+    assert ac["turn_dir"] == "r"        # the turn direction survived
+
+
+def test_no_mishears_while_settling_in(sim):
+    ac = _arrival(sim, alt=13000.0)
+    sim.hearback_p = 1.0                # even at certainty...
+    assert sim._elapsed < 180.0         # ...the first minutes are clean
+    sim.command("100 d 70")
+    assert ac["tgt_alt"] == 7000.0
+    assert sim.hearbacks == 0
+
+
+def test_unflyable_mishearing_is_heard_right(sim):
+    # a B738's clean minimum is 210: "rs 210" misheard as 200 falls off
+    # the envelope, the pilot can't fly it, and the real instruction is
+    # what quietly sticks — the player never eats an error they didn't
+    # cause (misheard as 220 it stays flyable, hence the loop)
+    ac = _arrival(sim, ias=215.0)
+    sim.hearback_p = 1.0
+    sim._elapsed = 300.0
+    fell_back = False
+    for _ in range(12):
+        ac["tgt_ias"] = ac["ias"] = 215.0
+        line = sim.command("100 rs 210")
+        assert "unable" not in line     # the player never eats the error
+        if ac["tgt_ias"] == 210.0:
+            fell_back = True            # rs 220 was unflyable: heard right
+    assert fell_back
 
 
 # -- terrain ------------------------------------------------------------------

@@ -257,6 +257,9 @@ class Sim:
         self._emergencies = 0
         self._elapsed = 0.0
         self._last_tick = None
+        self.hearback_p = 0.05   # odds per transmission of a bad readback
+        self.hearbacks = 0       # instructions misheard this shift
+        self.hearbacks_caught = 0  # ...and corrected before they stuck
         self._prepopulate()      # a shift starts mid-shift, not empty
 
     def _prepopulate(self):
@@ -749,12 +752,37 @@ class Sim:
 
         Returns the response line for the radio log; every path speaks —
         errors come back as pilot (or facility) talk, not stack traces.
+
+        Now and then a pilot mishears a number and reads back what they
+        heard — the readback line is the only tell, and they will fly
+        what they said unless the instruction is issued again.  Catching
+        it is hearback, and it's why controllers listen to readbacks.
         """
         try:
             query, instructions = parse(text)
             ac = resolve_callsign(query, [a for a in self.aircraft
                                           if a["phase"] != "handed"])
-            phrases = [self._apply(ac, ins) for ins in instructions]
+            bad_idx = self._mishear_roll(ac, instructions)
+            phrases = []
+            for i, ins in enumerate(instructions):
+                if (ac.get("misheard_kind") == ins["kind"]
+                        and self._elapsed - ac.get("misheard_t", 0.0) < 45.0):
+                    # the same kind of instruction, again, quickly: the
+                    # controller caught the bad readback and fixed it
+                    self.hearbacks_caught += 1
+                    ac["misheard_kind"] = None
+                if i == bad_idx:
+                    heard = self._mishear(ins)
+                    if heard is not None:
+                        try:
+                            phrases.append(self._apply(ac, heard))
+                            self.hearbacks += 1
+                            ac["misheard_kind"] = ins["kind"]
+                            ac["misheard_t"] = self._elapsed
+                            continue
+                        except CommandError:
+                            pass   # the mishearing was unflyable: heard right
+                phrases.append(self._apply(ac, ins))
         except CommandError as exc:
             line = str(exc)
             self.say(line, "error")
@@ -762,6 +790,30 @@ class Sim:
         line = f"{telephony(ac['callsign'])}, {', '.join(phrases)}."
         self.say(line, "readback")
         return line
+
+    def _mishear_roll(self, ac, instructions):
+        """Index of the instruction to mishear this transmission, or None."""
+        if (self.hearback_p <= 0.0 or self._elapsed < 180.0
+                or ac["squawk"] == "7700"
+                or self.rng.random() >= self.hearback_p):
+            return None
+        idxs = [i for i, ins in enumerate(instructions)
+                if ins["kind"] in ("turn", "alt")
+                or (ins["kind"] == "speed" and ins["kt"] is not None)]
+        return self.rng.choice(idxs) if idxs else None
+
+    def _mishear(self, ins):
+        """A plausibly-wrong copy of an instruction — one value off, the
+        way numbers actually get garbled on a scratchy frequency."""
+        if ins["kind"] == "turn":
+            hdg = (ins["hdg"] + self.rng.choice((-20, -10, 10, 20))) % 360
+            return {**ins, "hdg": hdg or 360}
+        if ins["kind"] == "alt":
+            alt = ins["alt_ft"] + self.rng.choice((-1000, 1000))
+            return {**ins, "alt_ft": alt} if 2000 <= alt <= 45000 else None
+        if ins["kind"] == "speed":
+            return {**ins, "kt": ins["kt"] + self.rng.choice((-10, 10))}
+        return None
 
     def _wx_check(self, ac, new_hdg):
         """Refuse a vector into a cell the pilot can see on their radar.

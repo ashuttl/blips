@@ -212,11 +212,16 @@ def _shift_card(sim, airport, seed, live_cast):
     minutes = int(sim._elapsed) // 60
     code = (airport["iata"] or airport["icao"]).lower()
     cast_note = " (synthetic cast)" if live_cast else ""
-    return "\n".join([
+    lines = [
         f"{BOLD}shift summary{RESET} — {airport['icao']} · {minutes} min",
         f"  landed {sim.landed} · handed off {sim.departed} · "
         f"go-arounds {sim.go_arounds} · diversions {sim.diversions} · "
         f"busts {sim.busts}",
+    ]
+    if sim.hearbacks:
+        lines.append(f"  readbacks misheard {sim.hearbacks} · "
+                     f"caught {sim.hearbacks_caught}")
+    return "\n".join(lines + [
         f"  score {sim.score:,} · rating {BOLD}{_rating(sim)}{RESET}",
         f"  {fg(*DIM)}replay this traffic: blips --game {code} "
         f"--seed {seed}{cast_note}{RESET}",
