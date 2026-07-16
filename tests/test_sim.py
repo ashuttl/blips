@@ -440,6 +440,51 @@ def test_seeded_shifts_reproduce():
     assert radios[0] == radios[1]       # same script, same shift
 
 
+# -- conflict alert ---------------------------------------------------------------
+
+def test_conflict_alert_blinks_before_the_bust(sim):
+    # head-on at the same altitude, eight miles apart: legal now, a loss
+    # in well under a minute — both blips must already be talking to you
+    a = _arrival(sim, callsign="DAL100", alt=8000.0, hdg=180.0)
+    b = _arrival(sim, callsign="SWA200", alt=8000.0, hdg=360.0,
+                 lat=a["lat"] - 8.0 / 60.0, lon=a["lon"])
+    _run(sim, 2)
+    assert a["ca"] and b["ca"]
+    assert sim.busts == 0
+    assert not a["emergency"]           # an alert is not yet a loss
+
+
+def test_no_conflict_alert_when_diverging(sim):
+    a = _arrival(sim, callsign="DAL100", alt=8000.0, hdg=360.0)
+    b = _arrival(sim, callsign="SWA200", alt=8000.0, hdg=180.0,
+                 lat=a["lat"] - 8.0 / 60.0, lon=a["lon"])
+    _run(sim, 2)
+    assert not a["ca"] and not b["ca"]
+
+
+def test_level_off_clears_the_projection(sim):
+    # one descending toward the other, but assigned a thousand feet above:
+    # the projection respects the level-off and stays quiet
+    a = _arrival(sim, callsign="DAL100", alt=8000.0, hdg=90.0)
+    b = _arrival(sim, callsign="SWA200", alt=12000.0, hdg=90.0,
+                 lat=a["lat"], lon=a["lon"] + 0.02)
+    sim.command("200 d 90")             # stops 1,000 above DAL100
+    _run(sim, 30)
+    assert not a["ca"] and not b["ca"]
+
+
+def test_assigned_altitude_rides_the_data_block(sim):
+    from blips.scope import data_block
+    ac = _arrival(sim, callsign="DAL100", alt=11000.0)
+    sim.command("100 d 80")
+    _run(sim, 10)
+    assert data_block(ac) == f"DAL100 {round(ac['alt'] / 100):03d}↓080"
+    _run(sim, 300)                      # level at eight: back to plain
+    assert data_block(ac) == "DAL100 080"
+    live = {"ground": False, "alt": 31000, "callsign": "BAW42", "vrate": 0}
+    assert data_block(live) == "BAW42 310"   # the live scope is untouched
+
+
 # -- pushes and the closed runway ------------------------------------------------
 
 def test_the_push_is_announced_and_timed(sim):

@@ -37,6 +37,7 @@ ACCEL_KT_S = 1.2          # speed change rate
 GS_FT_PER_NM = 318.0      # 3° glideslope
 SEP_NM, SEP_FT = 3.0, 1000.0
 SEP_FLOOR_AGL = 900.0     # ignore pairs in the runway environment
+CA_LOOK_S = 45.0          # conflict alert looks this far down the track
 TRAIL_MAX_FIXES = 120
 TRAIL_MIN_GAP_S = 4.0
 
@@ -877,6 +878,7 @@ class Sim:
                   if ac["phase"] != "handed" and ac["alt"] > floor]
         for ac in self.aircraft:
             ac["emergency"] = False
+            ac["ca"] = False
         for i, a in enumerate(flying):
             for b in flying[i + 1:]:
                 if abs(a["alt"] - b["alt"]) >= SEP_FT:
@@ -894,6 +896,35 @@ class Sim:
                     self.say(f"LOSS OF SEPARATION — {a['callsign']} and "
                              f"{b['callsign']}", "alert")
         self._bust_pairs = current
+        # conflict alert: straight-line projection, the way the real box
+        # does it — both blips blink before the loss, while there's still
+        # a turn that saves it.  Final is the wake monitor's business.
+        for i, a in enumerate(flying):
+            for b in flying[i + 1:]:
+                if a["emergency"] and b["emergency"]:
+                    continue     # already lost; solid red says so
+                if (a["phase"] == "established"
+                        and b["phase"] == "established"):
+                    continue
+                if abs(self._proj_alt(a) - self._proj_alt(b)) >= SEP_FT:
+                    continue
+                pa = advance(a["lat"], a["lon"], a["track"],
+                             a["gs"] * CA_LOOK_S / 3600.0)
+                pb = advance(b["lat"], b["lon"], b["track"],
+                             b["gs"] * CA_LOOK_S / 3600.0)
+                if haversine_nm(pa[0], pa[1], pb[0], pb[1]) < SEP_NM:
+                    a["ca"] = b["ca"] = True
+
+    @staticmethod
+    def _proj_alt(ac):
+        """Altitude CA_LOOK_S from now: the current rate, capped at the
+        level-off — nobody blows through an assigned altitude."""
+        if not ac["vrate"]:
+            return ac["alt"]
+        delta = ac["vrate"] * CA_LOOK_S / 60.0
+        room = ac["tgt_alt"] - ac["alt"]
+        return ac["alt"] + (max(delta, room) if delta < 0
+                            else min(delta, room))
 
     def _trails(self, now):
         for ac in self.aircraft:

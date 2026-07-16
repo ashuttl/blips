@@ -108,6 +108,9 @@ def extrapolate(ac, now):
 def blip_color(ac):
     if ac["emergency"] or ac["squawk"] in ("7500", "7600", "7700"):
         return ALERT
+    # conflict alert (game): blink before the loss, solid only after
+    if ac.get("ca") and int(time.time() * 2) % 2:
+        return ALERT
     if ac["ground"]:
         return GROUND
     if ac["alt"] is None:
@@ -129,11 +132,22 @@ def trend_arrow(ac):
 
 
 def data_block(ac):
-    """ATC-style label: callsign + flight level (hundreds of feet) + trend."""
+    """ATC-style label: callsign + flight level (hundreds of feet) + trend.
+
+    Game aircraft carry an assigned altitude; while they're off it the
+    block shows both, STARS-interim style — 110↓080 is eleven thousand
+    descending to eight — because on a busy scope the assignment you
+    can't remember is the one that bites.
+    """
     if ac["ground"]:
         return ac["callsign"]
     if ac["alt"] is None:
         return ac["callsign"]
+    tgt = ac.get("tgt_alt")
+    if tgt is not None and abs(tgt - ac["alt"]) > 300.0:
+        arrow = "↑" if tgt > ac["alt"] else "↓"
+        return (f"{ac['callsign']} {round(ac['alt'] / 100):03d}"
+                f"{arrow}{round(tgt / 100):03d}")
     return f"{ac['callsign']} {round(ac['alt'] / 100):03d}{trend_arrow(ac)}"
 
 
