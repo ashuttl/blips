@@ -341,7 +341,6 @@ class Sim:
         }
 
     def _spawn_arrival(self):
-        callsign, actype, origin = self._cast_flight("arrival")
         entry = self.rng.choice(self.sector["entries"])
         elat, elon = self.sector["fixes"][entry]
         lat, lon = advance(elat, elon,
@@ -353,13 +352,16 @@ class Sim:
         base = 110 + 10 * self.sector["entries"].index(entry)
         alt = 100.0 * max(base + self.rng.choice((0, 20)),
                           (self.airport["elev"] + 6000) // 100 + 10)
-        # never spawn into an immediate conflict the player couldn't prevent
+        # never spawn into an immediate conflict the player couldn't
+        # prevent — checked before drawing a cast, so an aborted spawn
+        # doesn't burn a real flight from the pool
         for other in self.aircraft:
             if (abs(other["alt"] - alt) < SEP_FT * 1.5
                     and haversine_nm(other["lat"], other["lon"],
                                      lat, lon) < SEP_NM * 3):
                 self._next_arrival = 25.0   # try again shortly
                 return
+        callsign, actype, origin = self._cast_flight("arrival")
         hdg = bearing_to(lat, lon, self.airport["lat"], self.airport["lon"])
         ias = float(self.rng.choice((250, 270, 280)))
         ac = self._base(callsign, actype, lat, lon, alt, hdg, ias)

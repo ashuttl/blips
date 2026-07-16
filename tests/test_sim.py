@@ -292,10 +292,16 @@ def test_shift_starts_populated():
     arrivals = [a for a in s.aircraft if a["plan"] == "arrival"]
     departures = [a for a in s.aircraft if a["plan"] == "departure"]
     assert len(arrivals) >= 2 and len(departures) >= 1
-    dists = sorted(haversine_nm(a["lat"], a["lon"],
-                                s.airport["lat"], s.airport["lon"])
-                   for a in arrivals)
-    assert dists[0] < dists[-1] - 10    # one is already partway in
+    # one is already partway in: well inside its own entry gate (measured
+    # against the gate, not the other arrivals — TPA has a near corner)
+    inside = []
+    for a in arrivals:
+        gate = haversine_nm(*s.sector["fixes"][a["fix"]],
+                            s.airport["lat"], s.airport["lon"])
+        here = haversine_nm(a["lat"], a["lon"],
+                            s.airport["lat"], s.airport["lon"])
+        inside.append(gate - here)
+    assert max(inside) > 12.0
 
 
 def test_departure_handoff_rules(sim):
