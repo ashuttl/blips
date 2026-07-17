@@ -588,12 +588,12 @@ class Sim:
         what a real scope shows is scenery."""
         if sum(ac["plan"] == "overflight" for ac in self.aircraft) >= 3:
             return
-        callsign = actype = None
+        callsign = actype = legs = None
         if self.pool is not None:
             pick = self.pool.draw("overflight")
             if pick is not None and not any(
                     a["callsign"] == pick[0] for a in self.aircraft):
-                callsign, actype = pick[0], pick[1]
+                callsign, actype, legs = pick
         if callsign is None:
             callsign, airline = self._new_callsign()
             actype = self.rng.choice(FLEETS.get(airline, ("A320",)))
@@ -609,7 +609,9 @@ class Sim:
                         + (1 if hdg < 180.0 else 0))
         ac = self._base(callsign, actype, lat, lon, alt, hdg,
                         float(self.rng.randint(255, 290)))
-        ac.update(plan="overflight", dim=True)
+        # the real route rides along so the hover chip can say where this
+        # blip is going over you to (None for the synthesized country mix)
+        ac.update(plan="overflight", dim=True, route=legs)
         self.aircraft.append(ac)
 
     def _spawn_balloons(self):

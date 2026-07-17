@@ -111,13 +111,16 @@ class TrafficPool:
         return route[0], route[-1]
 
     def draw(self, role):
-        """A real (callsign, actype, other_end_place) for a spawn, or None.
+        """A real (callsign, actype, extra) for a spawn, or None.
 
         ``role`` is "arrival", "departure" or "overflight".  Entries whose
         real route involves this airport are matched to the right role and
-        carry the far city for the check-in; a flight whose known route
-        passes this airport by is exactly what belongs overhead at FL350;
-        route-unknown entries fill in for any role anonymously.
+        carry the far city for the check-in (``extra`` is its place name);
+        a flight whose known route passes this airport by is exactly what
+        belongs overhead at FL350 — for those ``extra`` is the route's
+        ``(origin_leg, dest_leg)``, each a ``(place, code)`` pair, so the
+        scope's hover chip can say where they're going over you to;
+        route-unknown entries fill in for any role anonymously (extra None).
         Wrong-direction entries never spawn.
         """
         with self._lock:
@@ -133,7 +136,7 @@ class TrafficPool:
                            for leg in (origin, dest)):
                     with self._lock:
                         self._used.add(e["cs"])
-                    return e["cs"], e["actype"], None
+                    return e["cs"], e["actype"], (origin, dest)
                 continue
             here_end = dest if role == "arrival" else origin
             far_end = origin if role == "arrival" else dest

@@ -27,6 +27,7 @@ import threading
 import time
 
 from blips._adsb import SourcePicker
+from blips._commands import airline_name
 from blips._routes import RouteLookup
 from blips._basemap import (
     Basemap, DotLayer, SEA_FILL, marine_region, nearest_city, _project,
@@ -38,6 +39,7 @@ from blips._live import live_loop
 from blips._location import geocode_place, get_location
 from blips._radar_sources import get_source
 from blips._runtime import blips_parser, resolve_live
+from blips._theme import darken, ensure_contrast, is_light_theme, surface_bg
 
 MUTED = (150, 155, 170)
 DIM = (110, 114, 130)
@@ -45,6 +47,9 @@ MARKER = (255, 240, 120)
 GROUND = (125, 129, 145)
 RING = (62, 76, 108)
 ALERT = (235, 80, 70)
+# hover chip: the floating readout beside the pointer (same recipe as the
+# linecast radar's warning tooltip, so the two scopes feel like siblings)
+CHIP_BG = darken(surface_bg(0.10), 0.45 if not is_light_theme() else 0.10)
 
 # altitude (ft) → blip colour, low-and-warm to high-and-cool
 ALT_STOPS = (
@@ -621,31 +626,61 @@ def _route_leg(leg):
     return f"{place} {code}".strip() if place else code
 
 
-def _focused_line(ac, home, route=None):
-    """Footer detail line for the aircraft nearest the pointer."""
-    pieces = [f"{fg(*blip_color(ac))}{BOLD}{ac['callsign']}{RESET}"]
-    ident = " ".join(p for p in (ac["actype"], ac["reg"]) if p)
+def _hover_card(ac, home, route=None):
+    """Chip lines for the aircraft under the pointer: identity, route, state.
+
+    Lines carry their own fg colours but never RESET — the chip's background
+    has to survive to the padded right edge (see ``_chip_overlay``).
+    """
+    mut = fg(*ensure_contrast(MUTED, CHIP_BG, 3.0))
+    sep = f"{fg(*ensure_contrast(DIM, CHIP_BG, 2.0))} · {mut}"
+    head = f"{fg(*ensure_contrast(blip_color(ac), CHIP_BG, 3.0))}{ac['callsign']}"
+    craft = " ".join(p for p in (ac["actype"], ac["reg"]) if p)
+    ident = " · ".join(p for p in (airline_name(ac["callsign"]), craft) if p)
     if ident:
-        pieces.append(ident)
+        head += f" {mut}{ident}"
+    lines = [head]
     if route is not None:
-        pieces.append(" → ".join(_route_leg(leg) for leg in route))
+        lines.append(mut + " → ".join(_route_leg(leg) for leg in route))
+    state = []
     if ac["ground"]:
-        pieces.append("on the ground")
+        state.append("on the ground")
     elif ac["alt"] is not None:
         vr = ac["vrate"] or 0
         trend = (f" {trend_arrow(ac)}{abs(vr):,.0f} fpm"
                  if abs(vr) > 400 else "")
-        pieces.append(f"{ac['alt']:,.0f} ft{trend}")
+        state.append(f"{ac['alt']:,.0f} ft{trend}")
     if ac["gs"]:
-        pieces.append(f"{ac['gs']:.0f} kt")
+        state.append(f"{ac['gs']:.0f} kt")
     if ac["squawk"]:
-        pieces.append(f"squawk {ac['squawk']}")
+        state.append(f"squawk {ac['squawk']}")
     dist = haversine_nm(home[0], home[1], ac["lat"], ac["lon"])
     brg = bearing_to(home[0], home[1], ac["lat"], ac["lon"])
-    pieces.append(f"{dist:.0f} nm {COMPASS[round(brg / 45) % 8]}")
-    sep = f"{fg(*DIM)} · {RESET}"
-    return sep.join(p if "\033" in p else f"{fg(*MUTED)}{p}{RESET}"
-                    for p in pieces)
+    state.append(f"{dist:.0f} nm {COMPASS[round(brg / 45) % 8]}")
+    lines.append(mut + sep.join(state))
+    return lines
+
+
+def _chip_overlay(lines, mouse_pos, cols, rows):
+    """Float chip lines beside the pointer, over whatever the map drew.
+
+    Returns cursor-positioned ANSI for live_loop's ``\\x00`` overlay channel:
+    anchored below-right of the pointer, pulled inward at the screen edges —
+    the same floating chip as the linecast radar's warning tooltip.
+    """
+    boxed = [f"{bg(*CHIP_BG)} {ln} " for ln in lines]
+    width = max(visible_len(ln) for ln in boxed)
+    padded = [f"{ln}{' ' * (width - visible_len(ln))}{RESET}" for ln in boxed]
+    mcol, mrow = mouse_pos
+    col, row = mcol + 1, mrow + 1
+    if col + width - 1 > cols:
+        col = mcol - width
+    if row + len(padded) - 1 > rows:
+        row = mrow - len(padded)
+    col = max(1, min(col, cols - width + 1))
+    row = max(1, row)
+    return "".join(f"\033[{row + i};{col}H{ln}"
+                   for i, ln in enumerate(padded))
 
 
 _last_frame = {}  # cached clean render, shifted for live drag-pan preview
@@ -655,10 +690,17 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
                  show_trails=True, show_rings=True, show_ground=True,
                  weather=None, show_weather=False, drag_offset=None,
                  routes=None, pins=None, lines_geo=None, game_footer=None,
-                 header_note=None, rings_at=None, ground=None, **_):
+                 header_note=None, rings_at=None, ground=None,
+                 hover_card=None, **_):
     """Render one frame of the scope.
 
-    The last five parameters are the game's hooks, inert otherwise:
+    Hovering a blip floats a chip of flight detail beside the pointer
+    (drawn over the map via live_loop's ``\\x00`` overlay channel);
+    ``hover_card`` is an optional callable(ac) → chip lines that replaces
+    the stock card — the game uses it to serve a flight strip — falling
+    back to the stock card when it returns None.
+
+    The remaining parameters are the game's hooks, inert otherwise:
     ``pins`` are geo-anchored glyphs with labels (sector fixes), ``lines_geo``
     are geo-anchored braille strokes (runway, localizer), ``game_footer`` is
     ``(n_lines, builder)`` where ``builder(focused)`` supplies the bottom
@@ -891,16 +933,6 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
             (lambda ln: ln + " " * max(0, cols - visible_len(ln)))(
                 _clip_ansi(line, cols))
             for line in game_footer[1](focused))
-    elif focused is not None:
-        # route lookup is async: None now, filled in (with a repaint nudge)
-        # once adsbdb answers — keep asking while the hover lasts
-        route = (routes.get(focused["callsign"], focused["lat"], focused["lon"])
-                 if routes else None)
-        foot = _focused_line(focused, center, route)
-        if route is not None and visible_len(foot) > cols:
-            foot = _focused_line(focused, center)  # narrow: drop the route
-        if visible_len(foot) > cols:
-            foot = f"{fg(*MUTED)}{focused['callsign']}{RESET}"
     else:
         if updated is None:
             src_note = f"Contacting {trying or 'adsb.lol'}…"
@@ -933,7 +965,19 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
                        geo_reticle=rings_at is not None,
                        hits=[(p[4], p[5], p[1]["callsign"]) for p in placed])
 
-    return "\n".join([header, *map_lines, foot])
+    out = "\n".join([header, *map_lines, foot])
+    # hover chip: flight detail floats beside the pointer instead of living
+    # in the footer, so the eye never leaves the blip it's asking about
+    if focused is not None and mouse_pos is not None:
+        card = hover_card(focused) if hover_card is not None else None
+        if card is None:
+            # route lookup is async: None now, filled in (with a repaint
+            # nudge) once adsbdb answers — keep asking while the hover lasts
+            route = (routes.get(focused["callsign"], focused["lat"],
+                                focused["lon"]) if routes else None)
+            card = _hover_card(focused, center, route)
+        out += "\x00" + _chip_overlay(card, mouse_pos, cols, rows)
+    return out
 
 
 def hit_test(screen_col, screen_row):

@@ -17,15 +17,18 @@ import time
 
 from blips._airports import find_airport, nearest_airport
 from blips._color import BOLD, RESET, fg
-from blips._framebuffer import get_terminal_size, visible_len
+from blips._framebuffer import get_terminal_size
 from blips._geo import advance
 from blips._live import live_loop
 from blips._location import get_location
 from blips._radar_sources import theme_id
 from blips._runtime import resolve_live
+from blips._commands import airline_name
 from blips._sim import SECTOR_NM, Sim
+from blips._theme import ensure_contrast
 from blips.scope import (
-    ALERT, DIM, MARKER, MUTED, RING, WeatherFeed, hit_test, render_scope,
+    ALERT, CHIP_BG, DIM, MARKER, MUTED, RING, WeatherFeed, _route_leg,
+    hit_test, render_scope,
 )
 
 TEXT = (214, 219, 233)
@@ -45,13 +48,25 @@ HINT = ("callsign then:  l/r hdg · c/d alt · rs/is spd · s resume · "
         "quit")
 
 
-def _strip_line(ac):
-    """Hover readout for a sim aircraft: who they are and what they hold."""
+def _strip_card(ac):
+    """Hover chip for a sim aircraft: who they are and what they hold.
+
+    Chip lines — identity, the job (an overflight's real route when the
+    live cast knows it), the state — coloured against the chip background;
+    None for a target the sim didn't cast (the scope's stock card covers
+    those).  Lines never RESET, so the chip bg survives.
+    """
+    if "plan" not in ac:
+        return None
     plan = ac["plan"]
+    route = None
     if plan == "vfr":
         job = "VFR — not on your frequency"
     elif plan == "overflight":
         job = "overflight · with centre"
+        if ac.get("route"):
+            origin, dest = ac["route"]
+            route = f"{_route_leg(origin)} → {_route_leg(dest)}"
     elif plan == "balloon":
         job = "hot air balloon — going where the wind goes"
     elif plan == "arrival":
@@ -69,8 +84,16 @@ def _strip_line(ac):
                  f"{ac['ias']:.0f} kt")
     phase = {"cleared": " · cleared ILS", "established": " · on the ILS",
              "handed": " · handed off"}.get(ac["phase"], "")
-    return (f"{fg(*MARKER)}{BOLD}{ac['callsign']}{RESET} "
-            f"{fg(*MUTED)}{ac['actype']} · {job} · {state}{phase}{RESET}")
+    mut = fg(*ensure_contrast(MUTED, CHIP_BG, 3.0))
+    ident = " · ".join(p for p in (airline_name(ac["callsign"]),
+                                   ac["actype"]) if p)
+    lines = [f"{fg(*ensure_contrast(MARKER, CHIP_BG, 3.0))}{ac['callsign']}"
+             f" {mut}{ident}",
+             f"{mut}{job}"]
+    if route:
+        lines.append(f"{mut}{route}")
+    lines.append(f"{mut}{state}{phase}")
+    return lines
 
 
 TAPE_LINES = 9                # transmissions shown while paused
@@ -143,28 +166,17 @@ class _Console:
 
     # -- the bottom lines ----------------------------------------------------
     def footer(self, focused):
-        # the radio line is never covered: hovering an aircraft borrows
-        # the (idle) command bar for its strip instead
+        # hover detail floats on the scope as a chip now (hover_card), so
+        # the bar keeps its own jobs: the radio line and the command line
         if self.sim.radio:
             _t, line, kind = self.sim.radio[-1]
             top = f"{fg(*RADIO_COLORS.get(kind, MUTED))}{line}{RESET}"
         else:
             top = ""
         prompt = f"{fg(*MARKER)}{BOLD}▸{RESET} "
-        strip = (_strip_line(focused)
-                 if focused is not None and "plan" in focused else None)
         if self.buffer:
             bar = (f"{prompt}{fg(*TEXT)}{self.buffer}{RESET}"
                    f"{fg(*MARKER)}▌{RESET}")
-            if strip is not None:
-                # the strip rides the right side of the bar: a controller
-                # gets to read a flight strip mid-transmission
-                cols = get_terminal_size()[0]
-                pad = cols - visible_len(bar) - visible_len(strip) - 1
-                if pad >= 4:
-                    bar += " " * pad + strip
-        elif strip is not None:
-            bar = f"{prompt}{strip}"
         else:
             bar = f"{prompt}{fg(*DIM)}{HINT}{RESET}"
         if self.tape:
@@ -451,7 +463,8 @@ def main(args):
             pins=pins, lines_geo=lines_geo, ground=ground,
             game_footer=((TAPE_LINES + 1) if state["paused"] else 2,
                          console.footer),
-            header_note=hud(), rings_at=(airport["lat"], airport["lon"]))
+            header_note=hud(), rings_at=(airport["lat"], airport["lon"]),
+            hover_card=_strip_card)
         if sim.bell:
             sim.bell = False
             frame = "\a" + frame   # something on frequency needs you

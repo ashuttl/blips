@@ -103,6 +103,13 @@ def telephony(callsign):
     return callsign
 
 
+def airline_name(callsign):
+    """'RPA5655' → 'Brickyard'; None for GA tails and unknown prefixes."""
+    if len(callsign) > 3 and callsign[3].isdigit():
+        return TELEPHONY.get(callsign[:3].upper())
+    return None
+
+
 def _int_arg(tokens, i, what, lo, hi):
     if i >= len(tokens):
         raise CommandError(f"say {what} again — no value given")
