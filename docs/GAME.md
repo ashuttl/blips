@@ -81,6 +81,14 @@ counts the ones you caught. Pilots also take a **beat between reading
 back and acting** — the readback is the mic click, not the bank — so
 lead your turns like you mean it.
 
+The bar shows only the latest transmission by default. Type `log` (or
+`r`) to hold the **tape** open while you work — the last nine calls,
+oldest at the top, the same view a pause gives you. In the tape your own
+keyed transmissions appear spelled out in full phraseology, one line
+above each pilot's readback, so a misheard number is there to be *read*
+off the two lines rather than held in your head. You never hear your own
+side; the log is where you see it.
+
 Callsigns abbreviate: any unique suffix works (`rpa5655`, `5655`, `55`),
 a space is forgiven (`ual 71` ≡ `ual71`), and clicking a blip drops its
 callsign into the bar. Ambiguity gets you "multiple aircraft match";
@@ -88,8 +96,21 @@ nonsense gets a pilot's "say again". Airline telephony comes from a
 vendored table — `RPA` reads back as Brickyard, `BAW` as Speedbird.
 
 Words the sim understands without a callsign: `pause`, `q`/`quit`,
-`w`/`weather`, `?` for help. `+`/`-` zoom while the bar is empty; Esc
-clears it; up-arrow recalls history.
+`w`/`weather`, `log`/`r` (hold the tape open), `voice` (speak the
+frequency aloud — macOS only), `?` for help. `+`/`-` zoom while the bar
+is empty; Esc clears it; up-arrow recalls history.
+
+On macOS, `voice` turns the pilots' words into speech through the system
+`say` command. It's a radio, so it stays half-duplex — one transmission
+at a time, and a call that lands while another is playing gets stepped
+on. Each flight keeps **one voice for its whole life** on your frequency,
+cast by the airline's nationality wherever the machine has the accent for
+it: Speedbird speaks in a London voice, Shamrock in a Dublin one, Air
+India in Rishi, Qantas in Karen — everyone else in a neutral US voice,
+and the ATIS in its own flat recording. Off it comes clean the way
+the log always has; you never hear your own side. (More accents means
+more voices — the range comes from whatever voices are installed under
+System Settings → Accessibility → Spoken Content.)
 
 ## The sector
 
@@ -279,6 +300,7 @@ dead-reckoning glide becomes a no-op.
 | `_fleet.py`     | live-sampled traffic pool with real routes                |
 | `_terrain.py`   | real-elevation MVA grid                                   |
 | `_records.py`   | the shift book (`~/.cache/blips/records.json`)            |
+| `_voice.py`     | macOS `say` speech: one voice per flight, accent by airline |
 | `_game.py`      | command bar, radio log, tape, HUD, `--game` wiring        |
 
 Scoring: +100 landing less a point per six seconds over par (floored at

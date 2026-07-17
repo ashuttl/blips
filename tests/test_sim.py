@@ -134,6 +134,52 @@ def test_readback_uses_telephony(sim):
     assert line.startswith("Brickyard 5655, turn right heading two seven zero")
 
 
+def test_command_echoes_your_own_transmission(sim):
+    """The log carries your keyed transmission (kind 'tx') just above the
+    pilot's readback, spelled out the same way — the readable half of the
+    exchange."""
+    _arrival(sim, callsign="DAL100")
+    sim.command("100 d 60 rs 210")
+    kinds = [k for _t, _l, k in sim.radio]
+    assert kinds[-2:] == ["tx", "readback"]
+    tx = sim.radio[-2][1]
+    assert tx == ("Delta 100, descend and maintain six thousand, "
+                  "reduce speed two one zero.")
+    # a clean copy reads identically top and bottom
+    assert tx == sim.radio[-1][1]
+
+
+def test_echo_reveals_a_mishear(sim):
+    """When the pilot mishears, your echo and their readback diverge by the
+    one garbled number — the whole point of showing your own side."""
+    _arrival(sim, callsign="DAL100")
+    sim.hearback_p = 1.0            # this transmission will be misheard
+    sim._elapsed = 300.0           # (mishears only start after the warm-up)
+    sim.command("100 l 180")
+    tx, readback = sim.radio[-2][1], sim.radio[-1][1]
+    assert "one eight zero" in tx           # what you said
+    assert "one eight zero" not in readback  # what they flew
+    assert sim.hearbacks == 1
+
+
+def test_pilot_lines_carry_a_voice(sim):
+    """Pilot transmissions hand the speaker a callsign; the controller's own
+    'tx' echo never does, so it's never spoken aloud."""
+    spoken = []
+
+    class _Spy:
+        def speak(self, line, key):
+            spoken.append((key, line))
+
+    sim.speaker = _Spy()
+    _arrival(sim, callsign="DAL100")
+    sim.command("100 r 270")
+    # exactly one call spoke — the pilot's readback, in that flight's voice.
+    # The 'tx' echo above it (radio[-2]) went to the log only.
+    assert spoken == [("DAL100", sim.radio[-1][1])]
+    assert sim.radio[-2][2] == "tx"
+
+
 # -- the approach -------------------------------------------------------------
 
 def test_ils_capture_glideslope_landing(sim):

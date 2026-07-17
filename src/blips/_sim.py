@@ -306,6 +306,7 @@ class Sim:
         self.wx_sample = None    # callable(lat, lon) → echo 0..1, or None
         self.sector_rev = 0      # bumps on a flow change so the UI redraws
         self.bell = False        # ring the terminal on the next frame
+        self.speaker = None      # a _voice.Speaker, when the player wants sound
         self.go_arounds = 0
         self.diversions = 0
         self.aircraft = []
@@ -366,7 +367,7 @@ class Sim:
         d, k = self.wind
         self.say(f"{head} {_NATO[self._atis_n % len(_NATO)]} — wind "
                  f"{int(d):03d} at {int(k)}, landing and departing runway "
-                 f"{self.sector['rwy']}", "atis")
+                 f"{self.sector['rwy']}", "atis", voice="ATIS")
 
     def _prepopulate(self):
         """The sector you take over already has traffic in it."""
@@ -408,9 +409,14 @@ class Sim:
     start_polling = start_thread
 
     # -- radio --------------------------------------------------------------
-    def say(self, line, kind="pilot"):
+    def say(self, line, kind="pilot", voice=None):
+        """Log a transmission; ``voice`` (a callsign, or "ATIS") also speaks it
+        aloud when a Speaker is attached — pilots and the recording, not the
+        controller's own side."""
         self.radio.append((time.time(), line, kind))
         del self.radio[:-30]
+        if voice is not None and self.speaker is not None:
+            self.speaker.speak(line, voice)
 
     # -- spawning -----------------------------------------------------------
     def _new_callsign(self):
@@ -512,7 +518,8 @@ class Sim:
         tail = f", from {origin}" if origin else ""
         self.say(f"{self.airport['city'] or 'Approach'} approach, "
                  f"{hail(ac)} with you, {say_altitude(alt)}, "
-                 f"inbound {entry}{where}{tail}", "checkin")
+                 f"inbound {entry}{where}{tail}", "checkin",
+                 voice=ac["callsign"])
 
     def _spawn_departure(self, sat=None):
         """A departure off the main runway — or, given ``sat``, off the
@@ -547,7 +554,7 @@ class Sim:
         self.say(f"{hail(ac)} {off}, "
                  f"passing {say_altitude(ac['alt'])} for "
                  f"{say_altitude(initial)}, requesting {exit_fix}{tail}"
-                 f"{note}", "checkin")
+                 f"{note}", "checkin", voice=ac["callsign"])
 
     # -- the sky that isn't yours --------------------------------------------
     def _spawn_vfr(self):
@@ -786,7 +793,7 @@ class Sim:
                     ac["terrain_stop"] = True
                     self.say(f"{hail(ac)} leveling at "
                              f"{say_altitude(floor)}, terrain below us",
-                             "request")
+                             "request", voice=ac["callsign"])
             elif ac.get("terrain_stop"):
                 ac["terrain_stop"] = False   # clear of the high ground
         diff = tgt_alt - ac["alt"]
@@ -843,7 +850,7 @@ class Sim:
                 ac["phase"] = "established"
                 ac["turn_dir"] = None
                 self.say(f"{hail(ac)} established, "
-                         f"runway {ac['rwy']}", "pilot")
+                         f"runway {ac['rwy']}", "pilot", voice=ac["callsign"])
             else:
                 return
         # established: track the centreline with a proportional nudge…
@@ -892,7 +899,8 @@ class Sim:
                   / 1000.0) * 1000.0)
         self.score -= cost
         self.go_arounds += 1
-        self.say(f"{hail(ac)} going around — {reason}", "alert")
+        self.say(f"{hail(ac)} going around — {reason}", "alert",
+                 voice=ac["callsign"])
 
     def _wake_final(self):
         """In-trail wake minima on final: three miles is legal behind a
@@ -924,7 +932,8 @@ class Sim:
                     follower["wake_warned"] = True
                     self.say(f"{hail(follower)}, we're closing on the "
                              f"{_WAKE_WORD[cat]} ahead — we can take a "
-                             "little speed off", "request")
+                             "little speed off", "request",
+                             voice=follower["callsign"])
 
     # -- world tick ---------------------------------------------------------
     def tick(self, now=None):
@@ -1003,7 +1012,8 @@ class Sim:
                     ac["wx_deviating"] = False
                     ac["wx_asked_t"] = None
                     self.say(f"{hail(ac)} clear of weather,"
-                             " ready for a vector", "request")
+                             " ready for a vector", "request",
+                             voice=ac["callsign"])
                 continue
             if ahead < WX_DEVIATE:
                 ac["wx_asked_t"] = None
@@ -1014,7 +1024,7 @@ class Sim:
             if ac.get("wx_asked_t") is None:
                 ac["wx_asked_t"] = self._elapsed
                 self.say(f"{hail(ac)} requesting 30 "
-                         f"{side} for weather", "request")
+                         f"{side} for weather", "request", voice=ac["callsign"])
             elif self._elapsed - ac["wx_asked_t"] > 20.0:
                 # ignored long enough: they protect themselves — and
                 # whatever you had staged goes out the cockpit window
@@ -1026,7 +1036,7 @@ class Sim:
                 if ac["phase"] == "hold":
                     ac["phase"] = "cruise"
                 self.say(f"{hail(ac)} deviating {side}, "
-                         "will advise clear", "request")
+                         "will advise clear", "request", voice=ac["callsign"])
 
     # -- the day changes ------------------------------------------------------
     def _flow_tick(self, dt):
@@ -1086,7 +1096,7 @@ class Sim:
         self.bell = True
         self.say(f"MAYDAY, MAYDAY — {hail(ac)} declaring "
                  "a medical emergency, request priority to the field",
-                 "alert")
+                 "alert", voice=ac["callsign"])
 
     def _emergency_tick(self, dt):
         if self._emergencies >= 1 or self._elapsed < 600.0:
@@ -1120,7 +1130,7 @@ class Sim:
                      if "8" not in str(n) and "9" not in str(n)])
                 self.say(f"{hail(ac)} back with you — sorry, we had a "
                          "radio failure. Say again anything we missed",
-                         "checkin")
+                         "checkin", voice=ac["callsign"])
         if self._nordos >= 1 or self._elapsed < 900.0:
             return
         if self.rng.random() > dt / 2400.0:
@@ -1155,7 +1165,7 @@ class Sim:
         if wanting:
             ac, want = self.rng.choice(wanting)
             ac["asked"] = True
-            self.say(f"{hail(ac)} {want}", "request")
+            self.say(f"{hail(ac)} {want}", "request", voice=ac["callsign"])
 
     def _retire(self):
         keep = []
@@ -1189,7 +1199,8 @@ class Sim:
                     quick = self._elapsed - ac["mayday_t"] < 720.0
                     self.score += 300 if quick else 100
                     self.say(f"{hail(ac)} — thanks for "
-                             "the help, medics are meeting us", "checkin")
+                             "the help, medics are meeting us", "checkin",
+                             voice=ac["callsign"])
                     # the ambulance owns the runway for a few minutes:
                     # approaches wave off, departures wait, final backs
                     # up, and holding suddenly earns its keep
@@ -1378,7 +1389,8 @@ class Sim:
             self._flush_pend(ac)
             due = self._elapsed + self.rng.uniform(*self.react_s)
             bad_idx = self._mishear_roll(ac, instructions)
-            phrases = []
+            phrases = []       # what the pilot reads back (possibly misheard)
+            intended = []      # what you actually said, for the log's echo
             for i, ins in enumerate(instructions):
                 if (ac.get("misheard_kind") == ins["kind"]
                         and self._elapsed - ac.get("misheard_t", 0.0) < 45.0):
@@ -1386,24 +1398,31 @@ class Sim:
                     # controller caught the bad readback and fixed it
                     self.hearbacks_caught += 1
                     ac["misheard_kind"] = None
+                said = None
                 if i == bad_idx:
                     heard = self._mishear(ins)
                     if heard is not None:
                         try:
-                            phrases.append(self._apply(ac, heard, due))
+                            said = self._apply(ac, heard, due)
                             self.hearbacks += 1
                             ac["misheard_kind"] = ins["kind"]
                             ac["misheard_t"] = self._elapsed
-                            continue
                         except CommandError:
-                            pass   # the mishearing was unflyable: heard right
-                phrases.append(self._apply(ac, ins, due))
+                            said = None   # unflyable mishearing: heard right
+                if said is None:
+                    said = self._apply(ac, ins, due)
+                phrases.append(said)
+                intended.append(self._spoken(ac, ins) or said)
         except CommandError as exc:
             line = str(exc)
             self.say(line, "error")
             return line
-        line = f"{hail(ac)}, {', '.join(phrases)}."
-        self.say(line, "readback")
+        # your own transmission, spelled out, then the pilot's readback below
+        # it — read down the two and a misheard number is there to be caught
+        me = hail(ac)
+        self.say(f"{me}, {', '.join(intended)}.", "tx")
+        line = f"{me}, {', '.join(phrases)}."
+        self.say(line, "readback", voice=ac["callsign"])
         return line
 
     def _mishear_roll(self, ac, instructions):
@@ -1450,6 +1469,28 @@ class Sim:
         raise CommandError(f"unable — that heading puts {me} into a cell, "
                            f"we could take further {side}")
 
+    def _spoken(self, ac, ins):
+        """The readback phrase for a simple numeric instruction — the kind a
+        mishear can garble one number of.  Shared by ``_apply`` (its return,
+        rendering whatever was actually heard) and the log's echo of your own
+        transmission (rendering what you meant), so the two read identically
+        when the copy was clean and differ by exactly the garbled number when
+        it wasn't.  ``None`` for kinds that never mishear — the caller uses the
+        applied phrase for those."""
+        kind = ins["kind"]
+        if kind == "turn":
+            word = "left" if ins["dir"] == "l" else "right"
+            return f"turn {word} heading {say_digits(ins['hdg'], 3)}"
+        if kind == "alt":
+            verb = "climb" if ins["alt_ft"] > ac["alt"] else "descend"
+            return f"{verb} and maintain {say_altitude(ins['alt_ft'])}"
+        if kind == "speed":
+            if ins["kt"] is None:
+                return "resume normal speed"
+            direction = "reduce" if ins["dir"] == "reduce" else "increase"
+            return f"{direction} speed {say_digits(ins['kt'])}"
+        return None
+
     def _apply(self, ac, ins, due=None):
         """Apply one instruction; return its readback phrase.
 
@@ -1467,8 +1508,7 @@ class Sim:
             ac["wx_deviating"] = False
             if ac["phase"] in ("cleared", "established", "hold"):
                 ac["phase"] = "cruise"     # vectored off approach or hold
-            word = "left" if ins["dir"] == "l" else "right"
-            return f"turn {word} heading {say_digits(ins['hdg'], 3)}"
+            return self._spoken(ac, ins)
         if kind == "alt":
             up = ins["alt_ft"] > ac["alt"]
             if ins["verb"] == "c" and not up:
@@ -1485,12 +1525,11 @@ class Sim:
                         f"vectoring altitude here is {say_altitude(floor)}")
             self._stage(ac, due, tgt_alt=float(ins["alt_ft"]))
             ac["terrain_stop"] = False
-            verb = "climb" if up else "descend"
-            return f"{verb} and maintain {say_altitude(ins['alt_ft'])}"
+            return self._spoken(ac, ins)
         if kind == "speed":
             if ins["kt"] is None:
                 self._stage(ac, due, tgt_ias=float(ac["perf"][0]))
-                return "resume normal speed"
+                return self._spoken(ac, ins)
             lo = ac["perf"][2] if ac["phase"] in ("cleared", "established") \
                 else ac["perf"][1]
             if not (lo - 5 <= ins["kt"] <= ac["perf"][0] + 10):
@@ -1505,8 +1544,7 @@ class Sim:
                 raise CommandError(f"unable increase — {me} is doing "
                                    f"{say_digits(round(ac['ias']))} knots")
             self._stage(ac, due, tgt_ias=float(ins["kt"]))
-            return (f"{'reduce' if ins['dir'] == 'reduce' else 'increase'} "
-                    f"speed {say_digits(ins['kt'])}")
+            return self._spoken(ac, ins)
         if kind == "direct":
             spot = self.sector["fixes"].get(ins["fix"])
             if spot is None:

@@ -26,6 +26,7 @@ from blips._runtime import resolve_live
 from blips._commands import airline_name
 from blips._sim import SECTOR_NM, Sim
 from blips._theme import ensure_contrast
+from blips._voice import Speaker
 from blips.scope import (
     ALERT, CHIP_BG, DIM, MARKER, MUTED, RING, WeatherFeed, _route_leg,
     hit_test, render_scope,
@@ -34,18 +35,19 @@ from blips.scope import (
 TEXT = (214, 219, 233)
 GOOD = (140, 210, 110)
 WARN = (240, 190, 80)
+TX = (120, 175, 225)      # your own key: the controller's side of the exchange
 GAME_ZOOM = 1.9           # degrees of latitude: the sector ring plus margin
 
 RADIO_COLORS = {
-    "checkin": GOOD, "readback": MUTED, "atc": DIM,
+    "checkin": GOOD, "readback": MUTED, "atc": DIM, "tx": TX,
     "alert": ALERT, "error": WARN, "help": DIM, "request": WARN,
     "atis": WARN,
 }
 TERRAIN_TINT = (126, 96, 58)   # high ground, as a dim warm wash
 
 HINT = ("callsign then:  l/r hdg · c/d alt · rs/is spd · s resume · "
-        "dct FIX · hold [FIX] · i [rwy] · tfc · ho  —  ? help · pause · "
-        "quit")
+        "dct FIX · hold [FIX] · i [rwy] · tfc · ho  —  ? help · log · "
+        "voice · pause · quit")
 
 
 def _strip_card(ac):
@@ -110,6 +112,7 @@ class _Console:
         self.hist_idx = None
         self.last_mouse = None
         self.tape = False         # paused: the footer replays the frequency
+        self.log_open = False     # `log`: keep the tape up while you work
 
     # -- keyboard (live_loop raw mode: every printable is ours) -------------
     def intercept(self, action):
@@ -179,9 +182,11 @@ class _Console:
                    f"{fg(*MARKER)}▌{RESET}")
         else:
             bar = f"{prompt}{fg(*DIM)}{HINT}{RESET}"
-        if self.tape:
-            # paused is reviewing the tape: the busy moment you missed,
-            # every call in order, oldest at the top
+        if self.tape or self.log_open:
+            # the tape: every call in order, oldest at the top — up while
+            # paused (the busy moment you missed) or held open with `log`,
+            # where your own keyed transmissions show above each readback so
+            # a misheard number is there to be read, not just remembered
             tape = [f"{fg(*RADIO_COLORS.get(kind, MUTED))}{line}{RESET}"
                     for _t, line, kind in self.sim.radio[-TAPE_LINES:]]
             tape = [""] * (TAPE_LINES - len(tape)) + tape
@@ -429,6 +434,20 @@ def main(args):
             weather.set_enabled(state["weather"])
             _sync_weather()
             return True
+        if word in ("log", "r", "radio", "tape"):
+            console.log_open = not console.log_open
+            return True
+        if word in ("voice", "voices", "tts", "sound"):
+            if sim.speaker is not None:
+                sim.speaker.close()
+                sim.speaker = None
+                sim.say("voices off", "help")
+            elif not Speaker.available():
+                sim.say("text-to-speech needs macOS 'say' — not here", "help")
+            else:
+                sim.speaker = Speaker()
+                sim.say("voices on — pilots speak, one at a time", "help")
+            return True
         return False
 
     console = _Console(sim, meta)
@@ -461,7 +480,8 @@ def main(args):
             mouse_pos=mouse_pos, show_ground=False, weather=weather,
             show_weather=state["weather"], drag_offset=drag_preview[0],
             pins=pins, lines_geo=lines_geo, ground=ground,
-            game_footer=((TAPE_LINES + 1) if state["paused"] else 2,
+            game_footer=((TAPE_LINES + 1)
+                         if (state["paused"] or console.log_open) else 2,
                          console.footer),
             header_note=hud(), rings_at=(airport["lat"], airport["lon"]),
             hover_card=_strip_card)
@@ -525,6 +545,8 @@ def main(args):
     live_loop(render, interval=0.5, mouse=True, auto_play=True,
               play_interval=0.5, on_action=on_action, on_drag=on_drag,
               intercept=console.intercept, raw_keys=True)
+    if sim.speaker is not None:
+        sim.speaker.close()
     # back on the normal screen: how the shift went, and how it compares
     from blips._records import record_shift
     entry, prev = record_shift(
