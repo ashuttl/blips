@@ -111,6 +111,8 @@ def blip_color(ac):
     # conflict alert (game): blink before the loss, solid only after
     if ac.get("ca") and int(time.time() * 2) % 2:
         return ALERT
+    if ac.get("dim"):
+        return DIM      # somebody else's traffic — centre's, not yours
     if ac["ground"]:
         return GROUND
     if ac["alt"] is None:
@@ -119,6 +121,8 @@ def blip_color(ac):
 
 
 def blip_glyph(ac):
+    if ac.get("glyph"):
+        return ac["glyph"]
     if ac["ground"]:
         return "·"
     if ac["track"] is None:
@@ -143,12 +147,22 @@ def data_block(ac):
         return ac["callsign"]
     if ac["alt"] is None:
         return ac["callsign"]
+    if ac.get("limited"):
+        # an uncorrelated 1200 target the way STARS shows one: altitude
+        # readout only — nobody's tagged them up, because they're nobody's
+        return f"{round(ac['alt'] / 100):03d}"
     tgt = ac.get("tgt_alt")
     if tgt is not None and abs(tgt - ac["alt"]) > 300.0:
         arrow = "↑" if tgt > ac["alt"] else "↓"
-        return (f"{ac['callsign']} {round(ac['alt'] / 100):03d}"
-                f"{arrow}{round(tgt / 100):03d}")
-    return f"{ac['callsign']} {round(ac['alt'] / 100):03d}{trend_arrow(ac)}"
+        block = (f"{ac['callsign']} {round(ac['alt'] / 100):03d}"
+                 f"{arrow}{round(tgt / 100):03d}")
+    else:
+        block = (f"{ac['callsign']} {round(ac['alt'] / 100):03d}"
+                 f"{trend_arrow(ac)}")
+    # the scratchpad: a satellite-field arrival wears its destination the
+    # way a real STARS track does, so the wrong airport never sneaks up
+    tag = ac.get("tag")
+    return f"{block} {tag}" if tag else block
 
 
 class Feed:

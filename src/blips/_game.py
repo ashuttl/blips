@@ -41,18 +41,32 @@ RADIO_COLORS = {
 TERRAIN_TINT = (126, 96, 58)   # high ground, as a dim warm wash
 
 HINT = ("callsign then:  l/r hdg · c/d alt · rs/is spd · s resume · "
-        "dct FIX · hold [FIX] · i [rwy] · ho  —  ? help · pause · quit")
+        "dct FIX · hold [FIX] · i [rwy] · tfc · ho  —  ? help · pause · "
+        "quit")
 
 
 def _strip_line(ac):
     """Hover readout for a sim aircraft: who they are and what they hold."""
-    if ac["plan"] == "arrival":
-        job = f"arrival via {ac['fix']} → rwy {ac['rwy']}"
+    plan = ac["plan"]
+    if plan == "vfr":
+        job = "VFR — not on your frequency"
+    elif plan == "overflight":
+        job = "overflight · with centre"
+    elif plan == "balloon":
+        job = "hot air balloon — going where the wind goes"
+    elif plan == "arrival":
+        where = f"{ac['tag']} " if ac.get("tag") else ""
+        job = f"arrival via {ac['fix']} → {where}rwy {ac['rwy']}"
     else:
-        job = f"departure → {ac['fix']}"
-    state = (f"{ac['alt']:,.0f}→{ac['tgt_alt']:,.0f} ft · "
-             f"hdg {ac['hdg']:03.0f}→{ac['tgt_hdg']:03.0f} · "
-             f"{ac['ias']:.0f} kt")
+        off = f"off {ac['tag']} " if ac.get("tag") else ""
+        cross = (f" · cross at {ac['xr']:,.0f}+ ft" if ac.get("xr") else "")
+        job = f"departure {off}→ {ac['fix']}{cross}"
+    if plan in ("vfr", "overflight", "balloon"):
+        state = f"{ac['alt']:,.0f} ft · {ac['gs']:.0f} kt"
+    else:
+        state = (f"{ac['alt']:,.0f}→{ac['tgt_alt']:,.0f} ft · "
+                 f"hdg {ac['hdg']:03.0f}→{ac['tgt_hdg']:03.0f} · "
+                 f"{ac['ias']:.0f} kt")
     phase = {"cleared": " · cleared ILS", "established": " · on the ILS",
              "handed": " · handed off"}.get(ac["phase"], "")
     return (f"{fg(*MARKER)}{BOLD}{ac['callsign']}{RESET} "
@@ -184,6 +198,17 @@ def _sector_pins(sim, airport):
         (thr[0], thr[1], far[0], far[1], MARKER),          # the runway
         (thr[0], thr[1], loc[0], loc[1], RING),            # the localizer
     ]
+    sat = sector.get("sat")
+    if sat is not None:
+        apt = sector["sat_apt"]
+        pins.append((apt["lat"], apt["lon"], "⊕", MUTED, sat["code"]))
+        sthr = sat["thr"]
+        srwy_nm = apt["rwys"][0]["len"] / 6076.0
+        sfar = advance(sthr[0], sthr[1], sat["course"], srwy_nm)
+        sloc = advance(sthr[0], sthr[1], (sat["course"] + 180.0) % 360.0,
+                       8.0)
+        lines.append((sthr[0], sthr[1], sfar[0], sfar[1], MUTED))
+        lines.append((sthr[0], sthr[1], sloc[0], sloc[1], RING))
     return pins, lines
 
 
@@ -254,7 +279,8 @@ def _shift_card(sim, airport, seed, live_cast, entry=None, prev=None):
         f"{BOLD}shift summary{RESET} — {airport['icao']} · {minutes} min",
         f"  landed {sim.landed} · handed off {sim.departed} · "
         f"go-arounds {sim.go_arounds} · diversions {sim.diversions} · "
-        f"busts {sim.busts}",
+        f"busts {sim.busts}"
+        + (f" · traffic alerts {sim.nmacs}" if sim.nmacs else ""),
     ]
     if sim.hearbacks:
         lines.append(f"  readbacks misheard {sim.hearbacks} · "

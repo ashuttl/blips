@@ -90,6 +90,23 @@ def navaids_near(lat, lon, min_nm, max_nm):
     return out
 
 
+def airports_near(lat, lon, min_nm, max_nm):
+    """Airports in a distance band around a point: (dist_nm, airport),
+    nearest first.  Same cheap prefilter as navaids_near."""
+    out = []
+    coslat = max(0.2, math.cos(math.radians(lat)))
+    max_deg = max_nm / 60.0 + 0.5
+    for ap in _load():
+        if (abs(ap["lat"] - lat) > max_deg
+                or abs(ap["lon"] - lon) * coslat > max_deg):
+            continue
+        d = haversine_nm(lat, lon, ap["lat"], ap["lon"])
+        if min_nm <= d <= max_nm:
+            out.append((d, ap))
+    out.sort(key=lambda pair: pair[0])
+    return out
+
+
 def airports_in_bbox(bbox, large_only=False):
     """Airports inside a lon/lat bbox, most prominent first.
 

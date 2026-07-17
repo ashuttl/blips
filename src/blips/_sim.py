@@ -36,6 +36,9 @@ TURN_RATE = 3.0           # deg/s, standard rate
 ACCEL_KT_S = 1.2          # speed change rate
 GS_FT_PER_NM = 318.0      # 3° glideslope
 SEP_NM, SEP_FT = 3.0, 1000.0
+# a VFR target isn't separation traffic — it's a hazard.  you owe them a
+# traffic call, not three miles; only a genuine near-miss scores
+NMAC_NM, NMAC_FT = 0.9, 500.0
 SEP_FLOOR_AGL = 900.0     # ignore pairs in the runway environment
 CA_LOOK_S = 45.0          # conflict alert looks this far down the track
 TRAIL_MAX_FIXES = 120
@@ -59,6 +62,21 @@ PERF = {
     "A388": (290, 225, 150, 1800, 1900), "B788": (290, 215, 145, 2300, 2000),
     "C56X": (270, 180, 115, 3000, 2500), "GLF5": (290, 190, 130, 3500, 2800),
 }
+
+# the sky that isn't yours: GA types that wander the sector VFR, squawking
+# 1200 and talking to nobody — same tuple shape as PERF, kept separate so
+# the live traffic pool never casts a Skyhawk as an IFR arrival
+GA_PERF = {
+    "C172": (105, 55, 65, 700, 500), "PA28": (110, 60, 70, 650, 500),
+    "C182": (135, 60, 70, 900, 600), "SR22": (155, 70, 80, 1200, 700),
+    "DA40": (125, 55, 70, 800, 550),
+    "BALN": (0, 0, 0, 200, 200),     # a balloon: the wind does the flying
+}
+
+
+def _controlled(ac):
+    """Is this target on your frequency — yours to work, yours to lose?"""
+    return ac["plan"] in ("arrival", "departure")
 
 # wake category by type — everything unlisted radar-separates at the
 # standard 3 nm.  The B757 is its own famous case: "large" on paper,
@@ -188,8 +206,12 @@ def build_sector(airport):
     synthesized five-letter fix fills any octant the real world left
     empty.  Deterministic per airport either way — TPA's sector is
     always TPA's sector, so learning it means something.
+
+    A real approach control rarely works one field: the nearest airport
+    with a jet runway inside the sector becomes the satellite, and some
+    of the traffic is theirs.
     """
-    from blips._airports import navaids_near
+    from blips._airports import airports_near, navaids_near
     rng = random.Random(airport["icao"])
     lat, lon = airport["lat"], airport["lon"]
     candidates = navaids_near(lat, lon, *GATE_BAND_NM)
@@ -222,11 +244,31 @@ def build_sector(airport):
     runway = airport["rwys"][0]                    # longest, by build sort
     end = rng.choice(("le", "he"))                 # today's flow
     ident, course, thr = _end_geometry(airport, runway, end)
+
+    sat_apt = None
+    for _dist, ap in airports_near(lat, lon, 10.0, 34.0):
+        if ap["icao"] != airport["icao"]:
+            sat_apt = ap
+            break
     return {
         "fixes": fixes, "entries": entries, "exits": exits,
         "rwy": ident, "course": course, "thr": thr, "end": end,
-        "elev": airport["elev"],
+        "elev": airport["elev"], "sat_apt": sat_apt,
+        "sat": _sat_end(sat_apt, course) if sat_apt else None,
     }
+
+
+def _sat_end(sat_apt, main_course):
+    """The satellite's runway end that flows the same way the main
+    airport's does — one wind, one direction of traffic."""
+    runway = sat_apt["rwys"][0]
+    ident, course, thr = min(
+        (_end_geometry(sat_apt, runway, e) for e in ("le", "he")),
+        key=lambda geom: abs(turn_delta(geom[1], main_course)))
+    return {"code": sat_apt["iata"] or sat_apt["icao"][-3:],
+            "name": sat_apt["city"] or sat_apt["name"],
+            "elev": sat_apt["elev"],
+            "rwy": ident, "course": course, "thr": thr}
 
 
 def _end_geometry(airport, runway, end):
@@ -281,6 +323,8 @@ class Sim:
         self.error = None
         self.source = f"{airport['icao']} approach"
         self._bust_pairs = set()
+        self._nmac_pairs = set()
+        self.nmacs = 0           # near-misses with traffic nobody controls
         self._counter = 0
         self._next_arrival = 45.0
         self._next_departure = 30.0
@@ -289,6 +333,13 @@ class Sim:
         self._next_push = self.rng.uniform(420.0, 780.0)
         self._push_until = 0.0
         self._rwy_closed_until = 0.0
+        self._next_vfr = self.rng.uniform(90.0, 240.0)
+        self._next_over = self.rng.uniform(60.0, 180.0)
+        self._next_sat_dep = (self.rng.uniform(240.0, 480.0)
+                              if self.sector["sat"] else float("inf"))
+        self._balloon_event = 0  # 0 not yet · 1 aloft · 2 done for the day
+        self._center_until = 0.0
+        self._center_events = 0
         self._emergencies = 0
         self._nordos = 0
         self._elapsed = 0.0
@@ -322,7 +373,7 @@ class Sim:
         for _ in range(6):
             if sum(a["plan"] == "arrival" for a in self.aircraft) >= 2:
                 break
-            self._spawn_arrival()
+            self._spawn_arrival(allow_sat=False)
         arrivals = [a for a in self.aircraft if a["plan"] == "arrival"]
         if len(arrivals) > 1:
             # one of them is already partway in and part-descended — but
@@ -340,6 +391,9 @@ class Sim:
             ac["alt"] = ac["tgt_alt"] = min(ac["alt"], max(
                 self.airport["elev"] + 5000.0, prof))
         self._spawn_departure()
+        # the sky you take over was never empty either
+        self._spawn_overflight()
+        self._spawn_vfr()
 
     # -- Feed interface -----------------------------------------------------
     def snapshot(self):
@@ -400,13 +454,14 @@ class Sim:
             "emergency": False, "fix_time": time.time(),
             # — and the sim's own flight state
             "ias": ias, "hdg": hdg, "tgt_hdg": hdg, "turn_dir": None,
-            "tgt_alt": alt, "tgt_ias": ias, "perf": PERF[actype],
+            "tgt_alt": alt, "tgt_ias": ias,
+            "perf": PERF.get(actype) or GA_PERF[actype],
             "phase": "cruise",   # cruise | cleared | established | handed
             "plan": "arrival", "fix": None, "rwy": None, "thr": None,
             "course": None, "delay": 0.0,
         }
 
-    def _spawn_arrival(self):
+    def _spawn_arrival(self, allow_sat=True):
         entry = self.rng.choice(self.sector["entries"])
         elat, elon = self.sector["fixes"][entry]
         lat, lon = advance(elat, elon,
@@ -440,34 +495,187 @@ class Sim:
         # par: the straight-in distance at working speeds plus room for a
         # civilised pattern — beat it and nothing happens, dawdle past it
         # (laps, forgotten holds) and the landing pays less
-        ac.update(plan="arrival", fix=entry, rwy=self.sector["rwy"],
-                  thr=self.sector["thr"], course=self.sector["course"],
-                  par=dist * 16.0 + 300.0)
+        sat = (self.sector["sat"] if allow_sat and self.sector["sat"]
+               and self.rng.random() < 0.18 else None)
+        if sat is not None:
+            sat_d = haversine_nm(lat, lon, sat["thr"][0], sat["thr"][1])
+            ac.update(plan="arrival", fix=entry, sat=True, tag=sat["code"],
+                      rwy=sat["rwy"], thr=sat["thr"], course=sat["course"],
+                      felev=float(sat["elev"]), par=sat_d * 16.0 + 300.0)
+        else:
+            ac.update(plan="arrival", fix=entry, rwy=self.sector["rwy"],
+                      thr=self.sector["thr"], course=self.sector["course"],
+                      felev=float(self.airport["elev"]),
+                      par=dist * 16.0 + 300.0)
         self.aircraft.append(ac)
+        where = f" for {sat['name']}" if sat is not None else ""
         tail = f", from {origin}" if origin else ""
         self.say(f"{self.airport['city'] or 'Approach'} approach, "
                  f"{hail(ac)} with you, {say_altitude(alt)}, "
-                 f"inbound {entry}{tail}", "checkin")
+                 f"inbound {entry}{where}{tail}", "checkin")
 
-    def _spawn_departure(self):
+    def _spawn_departure(self, sat=None):
+        """A departure off the main runway — or, given ``sat``, off the
+        satellite field, low in the middle of your airspace."""
         callsign, actype, dest = self._cast_flight("departure")
-        exit_fix = self.rng.choice(self.sector["exits"])
-        course = self.sector["course"]
-        thr = self.sector["thr"]
+        src = sat or self.sector
+        course = src["course"]
+        thr = src["thr"]
         lat, lon = advance(thr[0], thr[1], course, 1.5)  # rolling, airborne
-        elev = self.airport["elev"]
+        elev = src["elev"]
+        exit_fix = self.rng.choice(self.sector["exits"])
         initial = float(round((elev + 3000) / 1000) * 1000)
         ac = self._base(callsign, actype, lat, lon, elev + 1200.0,
                         course, 170.0)
         ac.update(plan="departure", fix=exit_fix, tgt_alt=initial,
                   tgt_ias=250.0, phase="cruise")
+        if sat is not None:
+            ac.update(sat=True, tag=sat["code"])
+        # centre's letter of agreement: some departures carry a crossing
+        # restriction, and centre won't take a handoff assigned below it
+        note = ""
+        if self.rng.random() < 0.35:
+            ac["xr"] = 1000.0 * round(
+                (self.airport["elev"]
+                 + self.rng.choice((7000.0, 9000.0, 11000.0))) / 1000.0)
+            note = f" — centre wants {say_altitude(ac['xr'])} crossing it"
         self.aircraft.append(ac)
+        off = (f"off {sat['name']}, runway {say_runway(sat['rwy'])}"
+               if sat is not None
+               else f"off runway {say_runway(self.sector['rwy'])}")
         tail = f", for {dest}" if dest else ""
-        self.say(f"{hail(ac)} off runway "
-                 f"{say_runway(self.sector['rwy'])}, "
+        self.say(f"{hail(ac)} {off}, "
                  f"passing {say_altitude(ac['alt'])} for "
-                 f"{say_altitude(initial)}, requesting {exit_fix}{tail}",
-                 "checkin")
+                 f"{say_altitude(initial)}, requesting {exit_fix}{tail}"
+                 f"{note}", "checkin")
+
+    # -- the sky that isn't yours --------------------------------------------
+    def _spawn_vfr(self):
+        """Somebody's Saturday: a 1200 code wandering the practice area,
+        talking to nobody.  Not separation traffic — a hazard you owe a
+        traffic call, and the same design move as weather-as-terrain."""
+        if sum(ac["plan"] == "vfr" for ac in self.aircraft) >= 3:
+            return
+        brg = self.rng.uniform(0.0, 360.0)
+        lat, lon = advance(self.airport["lat"], self.airport["lon"], brg,
+                           self.rng.uniform(12.0, 38.0))
+        alt = self.airport["elev"] + self.rng.choice(
+            (1700.0, 2200.0, 2700.0, 3500.0, 4500.0, 5500.0))
+        # never materialise on top of somebody — the player gets a chance
+        # to see every threat coming
+        for other in self.aircraft:
+            if (abs(other["alt"] - alt) < SEP_FT
+                    and haversine_nm(other["lat"], other["lon"],
+                                     lat, lon) < SEP_NM * 2):
+                return
+        tail = ("N" + str(self.rng.randint(1, 9))
+                + "".join(str(self.rng.randint(0, 9))
+                          for _ in range(self.rng.randint(1, 2)))
+                + "".join(self.rng.choice("ABCDEFGHJKLMNPQRSTUVWXYZ")
+                          for _ in range(2)))
+        actype = self.rng.choice(("C172", "PA28", "C182", "SR22", "DA40"))
+        ac = self._base(tail, actype, lat, lon, alt,
+                        self.rng.uniform(0.0, 360.0),
+                        float(GA_PERF[actype][0]))
+        ac.update(plan="vfr", squawk="1200", limited=True,
+                  vfr_turn=self._elapsed + self.rng.uniform(20.0, 90.0),
+                  vfr_leave=self._elapsed + self.rng.uniform(360.0, 900.0))
+        self.aircraft.append(ac)
+
+    def _spawn_overflight(self):
+        """Centre's traffic, four miles above yours: a blip sliding across
+        the top of the sector in a dim block.  Scenery — the way most of
+        what a real scope shows is scenery."""
+        if sum(ac["plan"] == "overflight" for ac in self.aircraft) >= 3:
+            return
+        callsign = actype = None
+        if self.pool is not None:
+            pick = self.pool.draw("overflight")
+            if pick is not None and not any(
+                    a["callsign"] == pick[0] for a in self.aircraft):
+                callsign, actype = pick[0], pick[1]
+        if callsign is None:
+            callsign, airline = self._new_callsign()
+            actype = self.rng.choice(FLEETS.get(airline, ("A320",)))
+        brg = self.rng.uniform(0.0, 360.0)
+        lat, lon = advance(self.airport["lat"], self.airport["lon"],
+                           brg, DESPAWN_NM - 4.0)
+        side = (brg + self.rng.choice((90.0, -90.0))) % 360.0
+        aim = advance(self.airport["lat"], self.airport["lon"], side,
+                      self.rng.uniform(0.0, 22.0))
+        hdg = bearing_to(lat, lon, aim[0], aim[1])
+        # hemispheric flight levels, because someone will check
+        alt = 1000.0 * (2 * self.rng.randint(14, 19)
+                        + (1 if hdg < 180.0 else 0))
+        ac = self._base(callsign, actype, lat, lon, alt, hdg,
+                        float(self.rng.randint(255, 290)))
+        ac.update(plan="overflight", dim=True)
+        self.aircraft.append(ac)
+
+    def _spawn_balloons(self):
+        """A calm morning's reward: hot air balloons, the one aircraft
+        that renders the wind — near-stationary targets drifting at
+        exactly the speed and direction the ATIS read out."""
+        self._balloon_event = 1
+        brg = self.rng.uniform(0.0, 360.0)
+        base_d = self.rng.uniform(7.0, 16.0)
+        top = 0.0
+        for i in range(self.rng.randint(2, 3)):
+            lat, lon = advance(self.airport["lat"], self.airport["lon"],
+                               (brg + self.rng.uniform(-12.0, 12.0)) % 360.0,
+                               base_d + self.rng.uniform(0.0, 3.0))
+            alt = self.airport["elev"] + self.rng.uniform(1400.0, 3800.0)
+            top = max(top, alt)
+            ac = self._base(f"BLN{i + 1}", "BALN", lat, lon, alt,
+                            (self.wind[0] + 180.0) % 360.0, 0.0)
+            ac.update(plan="balloon", squawk="1200", limited=True,
+                      glyph="○", balloon_down=self._elapsed
+                      + self.rng.uniform(420.0, 780.0))
+            self.aircraft.append(ac)
+        octant = ("north", "northeast", "east", "southeast", "south",
+                  "southwest", "west", "northwest")[round(brg / 45.0) % 8]
+        self.say(f"caution — hot air balloons {octant} of the field, "
+                 f"below {say_altitude(1000.0 * math.ceil(top / 1000.0))}, "
+                 "drifting with the wind", "atis")
+
+    def _ambient_tick(self, dt):
+        self._next_vfr -= dt
+        self._next_over -= dt
+        if self._next_vfr <= 0:
+            self._spawn_vfr()
+            self._next_vfr = self.rng.uniform(150.0, 420.0)
+        if self._next_over <= 0:
+            self._spawn_overflight()
+            self._next_over = self.rng.uniform(120.0, 300.0)
+        if (self._balloon_event == 0 and self._elapsed > 240.0
+                and self.wind[1] <= 10.0
+                and self.rng.random() <= dt / 1200.0):
+            self._spawn_balloons()
+        for ac in self.aircraft:
+            if ac["plan"] == "vfr":
+                if self._elapsed >= ac["vfr_leave"]:
+                    # done for the day: point away from the field, go home
+                    ac["vfr_leave"] = ac["vfr_turn"] = float("inf")
+                    ac["tgt_hdg"] = bearing_to(
+                        self.airport["lat"], self.airport["lon"],
+                        ac["lat"], ac["lon"])
+                    ac["turn_dir"] = None
+                elif self._elapsed >= ac["vfr_turn"]:
+                    ac["vfr_turn"] = (self._elapsed
+                                      + self.rng.uniform(25.0, 90.0))
+                    ac["tgt_hdg"] = (ac["hdg"]
+                                     + self.rng.uniform(-70.0, 70.0)) % 360.0
+                    if self.rng.random() < 0.25:
+                        ac["tgt_alt"] = max(
+                            self.airport["elev"] + 1200.0,
+                            min(self.airport["elev"] + 5800.0,
+                                ac["alt"] + self.rng.choice((-500.0, 500.0))))
+            elif (ac["plan"] == "balloon"
+                    and self.rng.random() < dt / 25.0):
+                ac["tgt_alt"] = max(
+                    self.airport["elev"] + 800.0,
+                    min(self.airport["elev"] + 4200.0,
+                        ac["alt"] + self.rng.uniform(-400.0, 400.0)))
 
     def _rwy_closed(self):
         return self._elapsed < self._rwy_closed_until
@@ -485,7 +693,8 @@ class Sim:
                                                                   900.0)
             self.say("centre calls the push — a bank of arrivals is "
                      "coming off the boundary", "atc")
-        active = sum(1 for ac in self.aircraft if ac["phase"] != "handed")
+        active = sum(1 for ac in self.aircraft
+                     if _controlled(ac) and ac["phase"] != "handed")
         base = min(34.0, 16.0 + self._elapsed / 75.0)   # per hour, ramping
         rate = base * (2.4 if self._elapsed < self._push_until else 0.75)
         if self._next_arrival <= 0 and active < 16:
@@ -509,6 +718,10 @@ class Sim:
                 # departures follow the day, not the arrival push
                 self._next_departure = max(
                     45.0, self.rng.expovariate(base * 0.7 / 3600.0))
+        self._next_sat_dep -= dt
+        if self._next_sat_dep <= 0 and active < 16:
+            self._spawn_departure(sat=self.sector["sat"])
+            self._next_sat_dep = self.rng.uniform(300.0, 600.0)
 
     # -- flying -------------------------------------------------------------
     def _stage(self, ac, due, **fields):
@@ -562,6 +775,7 @@ class Sim:
         # surveyed path, so a coupled approach may go below the grid's MVA)
         tgt_alt = ac["tgt_alt"]
         if (self.terrain is not None and tgt_alt < ac["alt"]
+                and _controlled(ac)
                 and ac["phase"] not in ("cleared", "established")):
             floor = self.terrain.mva_at(ac["lat"], ac["lon"])
             if floor is not None and tgt_alt < floor:
@@ -635,9 +849,10 @@ class Sim:
                          + max(-30.0, min(30.0, -cross * 40.0))) % 360.0
         ac["turn_dir"] = None
         # …descend on a 3° slope once it comes down to meet you…
-        gs_alt = self.sector["elev"] + along * GS_FT_PER_NM
+        elev = ac.get("felev", self.sector["elev"])
+        gs_alt = elev + along * GS_FT_PER_NM
         if gs_alt < ac["alt"]:
-            ac["tgt_alt"] = max(self.sector["elev"], gs_alt)
+            ac["tgt_alt"] = max(elev, gs_alt)
         # …and slow to approach speed inside six miles
         if along < 6.0:
             ac["tgt_ias"] = float(ac["perf"][2])
@@ -645,7 +860,8 @@ class Sim:
             ac["tgt_ias"] = 180.0
         # a closed runway turns short final around — through no fault of
         # yours, so the go-around is free; the workload is the price
-        if along < 2.0 and self._rwy_closed():
+        # (the satellite field keeps its own counsel)
+        if along < 2.0 and self._rwy_closed() and not ac.get("sat"):
             self._go_around(ac, "the runway's still occupied, keep us in "
                             "the pattern", cost=0)
             return
@@ -661,7 +877,7 @@ class Sim:
                    else "too high")
             self._go_around(ac, f"{why}, give us vectors when you can")
             return
-        if along < 0.35 or ac["alt"] <= self.sector["elev"] + 30.0:
+        if along < 0.35 or ac["alt"] <= elev + 30.0:
             ac["phase"] = "landed"
 
     def _go_around(self, ac, reason, cost=50):
@@ -670,7 +886,8 @@ class Sim:
                   tgt_hdg=ac["course"], turn_dir=None,
                   tgt_ias=max(ac["perf"][2] + 40.0, 180.0), wake_warned=False)
         ac["tgt_alt"] = float(
-            round((self.sector["elev"] + 3000.0) / 1000.0) * 1000.0)
+            round((ac.get("felev", self.sector["elev"]) + 3000.0)
+                  / 1000.0) * 1000.0)
         self.score -= cost
         self.go_arounds += 1
         self.say(f"{hail(ac)} going around — {reason}", "alert")
@@ -724,12 +941,14 @@ class Sim:
             self.say(f"runway {self.sector['rwy']} back open — "
                      "resume approaches", "atis")
         self._spawn_tick(dt)
+        self._ambient_tick(dt)
         for ac in self.aircraft:
             self._fly(ac, dt)
             ac["delay"] += dt
         self._requests(dt)
         self._weather_tick(dt)
         self._flow_tick(dt)
+        self._center_tick(dt)
         self._emergency_tick(dt)
         self._nordo_tick(dt)
         self._wake_final()
@@ -772,6 +991,7 @@ class Sim:
             return
         for ac in self.aircraft:
             if (ac["phase"] not in ("cruise", "hold")
+                    or not _controlled(ac)       # VFR dodges its own cells
                     or ac["squawk"] == "7700"
                     or ac.get("nordo_until")):   # nobody to ask with
                 continue
@@ -817,6 +1037,8 @@ class Sim:
         new_end = "he" if self.sector["end"] == "le" else "le"
         ident, course, thr = _end_geometry(self.airport, runway, new_end)
         self.sector.update(rwy=ident, course=course, thr=thr, end=new_end)
+        if self.sector["sat_apt"] is not None:
+            self.sector["sat"] = _sat_end(self.sector["sat_apt"], course)
         self.sector_rev += 1
         self._atis_n += 1
         self._set_wind()         # the wind that turned the airport
@@ -825,9 +1047,34 @@ class Sim:
             if ac["plan"] == "arrival" and ac["phase"] == "cleared":
                 # not yet established: their clearance dies with the flow
                 ac["phase"] = "cruise"
+                expect = (self.sector["sat"]["rwy"] if ac.get("sat")
+                          else ident)
                 self.say(f"{hail(ac)}, cancel approach "
                          f"clearance, fly present heading, expect runway "
-                         f"{ident}", "atc")
+                         f"{expect}", "atc")
+
+    # -- centre next door -------------------------------------------------------
+    def _center_closed(self):
+        return self._elapsed < self._center_until
+
+    def _center_tick(self, dt):
+        """Centre is a character too, and sometimes their sector is full:
+        for a couple of minutes nothing gets handed off, and the boundary
+        you normally throw departures over becomes a wall."""
+        if self._center_until and self._elapsed >= self._center_until:
+            self._center_until = 0.0
+            self.say("centre calls back — they'll take handoffs again",
+                     "atc")
+            return
+        if (self._center_events >= 1 or self._center_until
+                or self._elapsed < 600.0
+                or self.rng.random() > dt / 1500.0):
+            return
+        self._center_events = 1
+        self._center_until = self._elapsed + self.rng.uniform(70.0, 120.0)
+        self.say("centre calls — their sector's full, no handoffs for the "
+                 "next couple of minutes; keep your departures inside the "
+                 "boundary", "atc")
 
     # -- emergencies ----------------------------------------------------------
     def _declare_emergency(self, ac):
@@ -846,6 +1093,7 @@ class Sim:
             return
         candidates = [ac for ac in self.aircraft
                       if ac["plan"] == "arrival" and ac["phase"] == "cruise"
+                      and not ac.get("sat")     # the equipment is here
                       and ac["alt"] > 6000.0]
         if candidates:
             self._declare_emergency(self.rng.choice(candidates))
@@ -876,7 +1124,8 @@ class Sim:
         if self.rng.random() > dt / 2400.0:
             return
         candidates = [ac for ac in self.aircraft
-                      if ac["phase"] in ("cruise", "hold")
+                      if _controlled(ac)
+                      and ac["phase"] in ("cruise", "hold")
                       and ac["squawk"] not in ("7600", "7700")
                       and not ac.get("mayday_t")]
         if len(candidates) >= 4:     # a quiet scope makes a dull failure
@@ -908,7 +1157,20 @@ class Sim:
 
     def _retire(self):
         keep = []
+        had_balloons = any(ac["plan"] == "balloon" for ac in self.aircraft)
         for ac in self.aircraft:
+            if not _controlled(ac):
+                # nobody's traffic comes and goes on its own: no score,
+                # no radio, no ledger — the sky just breathes
+                down = ac.get("balloon_down")
+                gone = (down is not None and self._elapsed >= down) or (
+                    haversine_nm(ac["lat"], ac["lon"], self.airport["lat"],
+                                 self.airport["lon"]) > DESPAWN_NM)
+                if gone:
+                    self.trails.pop(ac["hex"], None)
+                else:
+                    keep.append(ac)
+                continue
             if ac["phase"] == "landed":
                 self.landed += 1
                 # a landing is worth 100 flown at par; every six seconds
@@ -965,6 +1227,10 @@ class Sim:
                 self.trails.pop(ac["hex"], None)
                 continue
             keep.append(ac)
+        if (had_balloons and self._balloon_event == 1
+                and not any(ac["plan"] == "balloon" for ac in keep)):
+            self._balloon_event = 2
+            self.say("the balloons are down — caution cancelled", "atis")
         self.aircraft = keep
 
     def _separation(self):
@@ -972,11 +1238,13 @@ class Sim:
         current = set()
         flying = [ac for ac in self.aircraft
                   if ac["phase"] != "handed" and ac["alt"] > floor]
+        yours = [ac for ac in flying if _controlled(ac)]
+        others = [ac for ac in flying if not _controlled(ac)]
         for ac in self.aircraft:
             ac["emergency"] = False
             ac["ca"] = False
-        for i, a in enumerate(flying):
-            for b in flying[i + 1:]:
+        for i, a in enumerate(yours):
+            for b in yours[i + 1:]:
                 if abs(a["alt"] - b["alt"]) >= SEP_FT:
                     continue
                 if haversine_nm(a["lat"], a["lon"],
@@ -992,11 +1260,36 @@ class Sim:
                     self.say(f"LOSS OF SEPARATION — {a['callsign']} and "
                              f"{b['callsign']}", "alert")
         self._bust_pairs = current
+        # the uncontrolled sky: no three-mile rule against a 1200 code,
+        # only the near-miss you should have called traffic on — and a
+        # pilot holding the target in sight never has one
+        nmacs = set()
+        for a in yours:
+            for t in others:
+                if t["hex"] in a.get("visual", ()):
+                    continue
+                if abs(a["alt"] - t["alt"]) >= NMAC_FT:
+                    continue
+                if haversine_nm(a["lat"], a["lon"],
+                                t["lat"], t["lon"]) >= NMAC_NM:
+                    continue
+                pair = tuple(sorted((a["hex"], t["hex"])))
+                nmacs.add(pair)
+                a["emergency"] = t["emergency"] = True
+                if pair not in self._nmac_pairs:
+                    self.nmacs += 1
+                    self.score -= 200
+                    self.bell = True
+                    what = ("the balloon" if t["plan"] == "balloon"
+                            else "the VFR traffic")
+                    self.say(f"TRAFFIC ALERT — {a['callsign']} and {what}, "
+                             f"{say_altitude(t['alt'])}", "alert")
+        self._nmac_pairs = nmacs
         # conflict alert: straight-line projection, the way the real box
         # does it — both blips blink before the loss, while there's still
         # a turn that saves it.  Final is the wake monitor's business.
-        for i, a in enumerate(flying):
-            for b in flying[i + 1:]:
+        for i, a in enumerate(yours):
+            for b in yours[i + 1:]:
                 if a["emergency"] and b["emergency"]:
                     continue     # already lost; solid red says so
                 if (a["phase"] == "established"
@@ -1010,6 +1303,22 @@ class Sim:
                              b["gs"] * CA_LOOK_S / 3600.0)
                 if haversine_nm(pa[0], pa[1], pb[0], pb[1]) < SEP_NM:
                     a["ca"] = b["ca"] = True
+        # …and the same projection against the traffic nobody controls,
+        # at hazard scale rather than separation scale
+        for a in yours:
+            for t in others:
+                if t["hex"] in a.get("visual", ()):
+                    continue
+                if a["emergency"] and t["emergency"]:
+                    continue
+                if abs(self._proj_alt(a) - self._proj_alt(t)) >= NMAC_FT:
+                    continue
+                pa = advance(a["lat"], a["lon"], a["track"],
+                             a["gs"] * CA_LOOK_S / 3600.0)
+                pt = advance(t["lat"], t["lon"], t["track"],
+                             t["gs"] * CA_LOOK_S / 3600.0)
+                if haversine_nm(pa[0], pa[1], pt[0], pt[1]) < 1.5:
+                    a["ca"] = t["ca"] = True
 
     @staticmethod
     def _proj_alt(ac):
@@ -1043,8 +1352,23 @@ class Sim:
         """
         try:
             query, instructions = parse(text)
-            ac = resolve_callsign(query, [a for a in self.aircraft
-                                          if a["phase"] != "handed"])
+            roster = [a for a in self.aircraft if a["phase"] != "handed"]
+            try:
+                ac = resolve_callsign(query,
+                                      [a for a in roster if _controlled(a)])
+            except CommandError:
+                # maybe they keyed a target that was never theirs to call
+                try:
+                    ghost = resolve_callsign(
+                        query, [a for a in roster if not _controlled(a)])
+                except CommandError:
+                    raise   # the original "nobody answers" stands
+                what = {"overflight": "they're with centre",
+                        "balloon": "that's a balloon",
+                        "vfr": "a VFR target squawking twelve hundred"
+                        }[ghost["plan"]]
+                raise CommandError(f"{ghost['callsign']} isn't on your "
+                                   f"frequency — {what}")
             if ac.get("nordo_until"):
                 raise CommandError(f"nothing heard back from "
                                    f"{ac['callsign']} — they're NORDO, "
@@ -1193,6 +1517,43 @@ class Sim:
             if ac["phase"] in ("cleared", "established", "hold"):
                 ac["phase"] = "cruise"
             return f"direct {ins['fix']}"
+        if kind == "traffic":
+            # a traffic call on the nearest 1200 code: the pilot who gets
+            # the target in sight keeps it there, and the near-miss that
+            # was coming never happens
+            best = None
+            for t in self.aircraft:
+                if _controlled(t) or t["hex"] in ac.get("visual", ()):
+                    continue
+                gap = haversine_nm(ac["lat"], ac["lon"], t["lat"], t["lon"])
+                if gap > 8.0 or abs(t["alt"] - ac["alt"]) > 3500.0:
+                    continue
+                if best is None or gap < best[0]:
+                    best = (gap, t)
+            if best is None:
+                raise CommandError(f"no traffic to call for {me} — "
+                                   "nothing within eight miles of them")
+            gap, t = best
+            rel = (bearing_to(ac["lat"], ac["lon"], t["lat"], t["lon"])
+                   - ac["hdg"]) % 360.0
+            clock = ("twelve", "one", "two", "three", "four", "five", "six",
+                     "seven", "eight", "nine", "ten",
+                     "eleven")[int(round(rel / 30.0)) % 12]
+            miles = max(1, round(gap))
+            what = ("a balloon" if t["plan"] == "balloon"
+                    else "type unknown")
+            self.say(f"{me}, traffic {clock} o'clock, {say_digits(miles)} "
+                     f"mile{'s' if miles != 1 else ''}, {what}, altitude "
+                     f"indicates {say_altitude(t['alt'])}", "atc")
+            seen_p = (0.95 if t["plan"] == "balloon"
+                      else 0.85 if gap < 3.0 else 0.65 if gap < 6.0
+                      else 0.45)
+            if self.rng.random() < seen_p:
+                ac.setdefault("visual", set()).add(t["hex"])
+                return (f"traffic in sight, {clock} o'clock — "
+                        "we'll maintain visual")
+            return (f"negative contact on the {clock} o'clock traffic, "
+                    "looking")
         if kind == "hold":
             if ins["fix"] is not None:
                 spot = self.sector["fixes"].get(ins["fix"])
@@ -1209,17 +1570,26 @@ class Sim:
         if kind == "ils":
             if ac["plan"] != "arrival":
                 raise CommandError(f"unable — {me} is a departure")
-            if self._rwy_closed():
+            # a satellite arrival gets its own field's approach — the
+            # scratchpad on the data block says whose traffic this is
+            sat = self.sector["sat"] if ac.get("sat") else None
+            if self._rwy_closed() and sat is None:
                 raise CommandError("unable — the runway's closed while "
                                    f"they clear the emergency, {me} can "
                                    "take a hold or vectors")
-            rwy = self.sector["rwy"]
-            course, thr = self.sector["course"], self.sector["thr"]
+            if sat is not None:
+                rwy = sat["rwy"]
+                course, thr = sat["course"], sat["thr"]
+            else:
+                rwy = self.sector["rwy"]
+                course, thr = self.sector["course"], self.sector["thr"]
             if ins["rwy"]:
-                end = _runway_end(self.airport, ins["rwy"])
+                apt = self.sector["sat_apt"] if sat is not None \
+                    else self.airport
+                end = _runway_end(apt, ins["rwy"])
                 if end is None:
                     raise CommandError(f"unable — no runway {ins['rwy']} "
-                                       f"at {self.airport['icao']}")
+                                       f"at {apt['icao']}")
                 rwy, course, tlat, tlon = end
                 thr = (tlat, tlon)
             # hopeless geometry gets a puzzled pilot, not a wasted clearance
@@ -1248,6 +1618,14 @@ class Sim:
             if ac["plan"] != "departure":
                 raise CommandError(f"unable — {me} is an arrival, "
                                    "they're yours to land")
+            if self._center_closed():
+                raise CommandError(f"centre is unable to take {me} — "
+                                   "their sector's full, keep them inside "
+                                   "the boundary")
+            if ac.get("xr") and ac["tgt_alt"] < ac["xr"]:
+                raise CommandError(f"centre won't take {me} assigned below "
+                                   f"{say_altitude(ac['xr'])} — "
+                                   "climb them first")
             spot = self.sector["fixes"][ac["fix"]]
             dist_fix = haversine_nm(ac["lat"], ac["lon"], spot[0], spot[1])
             dist_apt = haversine_nm(ac["lat"], ac["lon"],

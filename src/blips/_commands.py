@@ -69,7 +69,7 @@ class CommandError(Exception):
 _WORDS = frozenset((
     "l", "r", "left", "right", "c", "d", "climb", "descend",
     "rs", "is", "reduce", "increase", "s", "dct", "direct",
-    "i", "ils", "ho", "handoff", "co", "hold",
+    "i", "ils", "ho", "handoff", "co", "hold", "tfc", "traffic",
 ))
 
 
@@ -126,6 +126,7 @@ def parse(text):
         {"kind": "direct",  "fix": "LOOSE"}
         {"kind": "ils",     "rwy": "19L"|None}
         {"kind": "handoff"}
+        {"kind": "traffic"}                           # call the VFR target
 
     Raises CommandError with a pilot-flavoured message on bad input.
     """
@@ -177,6 +178,9 @@ def parse(text):
             i += 1
         elif t in ("ho", "handoff", "co"):
             out.append({"kind": "handoff"})
+            i += 1
+        elif t in ("tfc", "traffic"):
+            out.append({"kind": "traffic"})
             i += 1
         elif t == "hold":
             fix = None

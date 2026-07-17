@@ -13,6 +13,9 @@ def sim():
     """A quiet TPA sector: the spawner is parked so tests own the traffic."""
     s = Sim(find_airport("tpa"), seed=1)
     s._next_arrival = s._next_departure = s._next_request = 1e9
+    s._next_vfr = s._next_over = s._next_sat_dep = 1e9
+    s._balloon_event = 2        # the ambient sky stays parked too
+    s._center_events = 1        # centre never saturates unless a test says
     s.hearback_p = 0.0          # pilots hear perfectly unless a test says
     s.wind = (360.0, 0.0)       # calm air unless a test brings weather
     s.react_s = (0.0, 0.0)      # and their hands are instant
@@ -329,6 +332,7 @@ def test_departure_handoff_rules(sim):
     sim._next_departure = 0.0
     sim._spawn_departure()
     dep = sim.aircraft[-1]
+    dep.pop("xr", None)         # crossing restrictions have their own test
     suffix = dep["callsign"][3:]
     assert "won't take" in sim.command(f"{suffix} ho")   # still on the field
     # teleport them out to their exit fix: now centre wants them

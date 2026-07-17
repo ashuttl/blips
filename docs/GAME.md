@@ -61,6 +61,7 @@ A command is a callsign followed by one or more instructions, chained:
 | `dct LAL`           | proceed direct a fix                           |
 | `hold` / `hold LAL` | hold present position / at a fix, right turns  |
 | `i` / `i 19L`       | cleared ILS approach (active runway, or say which) |
+| `tfc`               | traffic call — points out the nearest VFR target   |
 | `ho`                | handoff — near their exit fix, this banks a departure |
 
 Direction is always yours to give — there is no "fly heading" shortcut
@@ -110,6 +111,19 @@ climb them, point them at their exit fix, hand them off at the edge.
 Range rings stay pinned to your airport when you pan, with compass
 headings marked on the second ring — "turn left heading two three zero"
 has somewhere to point.
+
+**A real approach control rarely works one field.** The nearest airport
+with a jet runway inside the sector is the satellite — Portland has
+Brunswick, Heathrow has Farnborough — drawn with its own runway and
+localizer,
+and some of the traffic is theirs: an arrival checks in "inbound ENE
+for Brunswick" and wears the destination on its data block the way a
+STARS scratchpad would, because the wrong airport should never sneak up
+on you. Clear them for "the ILS" and they fly *their* field's approach;
+their final is wherever their runway points, and so is the sequencing
+problem. Satellite departures pop up low in the middle of your airspace
+wanting an exit fix like anybody else. When the flow turns, the
+satellite turns with it — one wind, one direction of traffic.
 
 ## The cast
 
@@ -192,6 +206,44 @@ times the pace for a few minutes. The alternation of calm and slam is
 what makes a shift feel like a shift — and the push doesn't care what
 else is going on.
 
+**Most of what a real scope shows is scenery.** The sky around your
+sector was never empty: centre's overflights slide across the top at
+FL350 in dim data blocks (drawn from the same live pool — flights whose
+real route passes your airport by are exactly what belongs overhead),
+and 1200-code VFR targets wander the practice areas below 6,000 ft in
+limited blocks — altitude readout only, because nobody's tagged them
+up. None of them are on your frequency; key one up and you'll be told
+whose they are. They cost you nothing to carry and everything to
+ignore: a Skyhawk has every right to cross your final at 2,500 ft, and
+vectoring the RJ around traffic that won't move for you is half the
+job. There's no three-mile rule against an aircraft nobody controls —
+you owe them a **traffic call**, not separation. `tfc` points out the
+nearest target the way a controller would ("traffic ten o'clock, three
+miles, type unknown, altitude indicates two thousand five hundred");
+a pilot who answers "traffic in sight" maintains visual and that
+near-miss never happens. One who answers "negative contact" is still
+counting on you. An actual near-miss — inside a mile and 500 ft of an
+unsighted target — is a **traffic alert**: both blips flash, the bell
+rings, and it costs 200 points. The conflict alert projects against
+the uncontrolled sky too, at hazard scale, so the blink comes while
+the turn still saves it.
+
+**On a calm morning, balloons.** Wind under ten knots and somebody's
+aloft: two or three hot-air balloons drift near the field for a few
+minutes, near-stationary ○ targets moving at exactly the speed and
+heading the ATIS read out — the one aircraft that renders the wind.
+The frequency gets a caution; the balloons get wherever the wind is
+going; pilots spot them easily when you call them. Then they're down
+in a field and the caution is cancelled.
+
+**Centre is a character too.** Departures sometimes check in carrying a
+crossing restriction from the letter of agreement — "centre wants one
+one thousand crossing it" — and a handoff assigned below that altitude
+comes straight back: *climb them first*. And once in a while centre's
+own sector fills: for a couple of minutes nothing gets handed off, the
+boundary you normally throw departures over becomes a wall, and `hold`
+earns its keep at the exit fixes until they call back.
+
 **Sometimes it's not routine.** At most once a shift, an arrival declares
 a medical emergency — squawk 7700, the blip goes red and stays red, and
 they want the field *now*. Get them down inside twelve minutes for a
@@ -222,7 +274,7 @@ dead-reckoning glide becomes a no-op.
 | module          | job                                                       |
 | --------------- | --------------------------------------------------------- |
 | `_airports.py`  | vendored airports/runways/navaids (`data/*.json.gz`)      |
-| `_sim.py`       | kinematics, wind, ILS, wake, sector, spawner, separation, conflict alert, hearback, scoring |
+| `_sim.py`       | kinematics, wind, ILS, wake, sector, satellite, spawner, ambient sky, separation, conflict alert, hearback, scoring |
 | `_commands.py`  | parser, callsign matching, phraseology readback           |
 | `_fleet.py`     | live-sampled traffic pool with real routes                |
 | `_terrain.py`   | real-elevation MVA grid                                   |
@@ -230,8 +282,11 @@ dead-reckoning glide becomes a no-op.
 | `_game.py`      | command bar, radio log, tape, HUD, `--game` wiring        |
 
 Scoring: +100 landing less a point per six seconds over par (floored at
-20), +50 handoff, −500 separation bust (debounced), −50 go-around (free
-when a closed runway waves them off), −100 leaving the sector unworked.
-The rating is score against what the concluded traffic was worth; three
+20), +50 handoff, −500 separation bust (debounced), −200 traffic alert
+(a near-miss with an unsighted VFR target), −50 go-around (free when a
+closed runway waves them off), −100 leaving the sector unworked. The
+rating is score against what the concluded traffic was worth; three
 busts is an F, whatever the score. Arrival rate breathes between quiet
-spells and pushes; active count capped so the scope stays readable.
+spells and pushes; active count capped so the scope stays readable —
+and ambient traffic never counts against the cap, never scores, and
+never talks: it's there to make the sky honest, not to make you busier.
