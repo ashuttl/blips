@@ -55,14 +55,14 @@ def test_healthy_feed_keeps_plain_age_status():
 
 def test_fetch_status_resets_after_poll(monkeypatch):
     seen = {}
+    feed = Feed()
 
-    def fake_fetch_point(lat, lon, radius, on_status=None):
+    def fake_fetch(lat, lon, radius, on_status=None):
         on_status("adsb.lol")
         seen["mid"] = feed.fetch_status()
         return [], "adsb.lol"
 
-    monkeypatch.setattr("blips.scope.fetch_point", fake_fetch_point)
-    feed = Feed()
+    monkeypatch.setattr(feed._picker, "fetch", fake_fetch)
     feed.set_view(51.47, -0.45, 100)
     feed.poll_once()
     fetching, started, trying = seen["mid"]

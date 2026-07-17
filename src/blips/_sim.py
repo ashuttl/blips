@@ -40,6 +40,12 @@ SEP_FLOOR_AGL = 900.0     # ignore pairs in the runway environment
 CA_LOOK_S = 45.0          # conflict alert looks this far down the track
 TRAIL_MAX_FIXES = 120
 TRAIL_MIN_GAP_S = 4.0
+# radar echo (0..1) is scaled to intensity: light rain reads near 0, the
+# heavy convective cores near 1 (see _wx_sampler).  Pilots avoid the cores,
+# not the stratiform blue they'd fly through every day.
+WX_DEVIATE = 0.5          # echo at/above this on the path → pilots avoid it
+WX_CLEAR = 0.25           # echo below this → they call clear of weather
+WX_WORSE = 0.1            # a vector only draws "unable" if this much worse
 
 # type → (tracon cruise kt, min clean kt, approach kt, climb fpm, descend fpm)
 PERF = {
@@ -319,12 +325,20 @@ class Sim:
             self._spawn_arrival()
         arrivals = [a for a in self.aircraft if a["plan"] == "arrival"]
         if len(arrivals) > 1:
-            # one of them is already partway in and part-descended
+            # one of them is already partway in and part-descended — but
+            # no closer than a fresh pair of hands can still work, and no
+            # higher than a normal profile would have it at that range
             ac = arrivals[-1]
-            ac["lat"], ac["lon"] = advance(ac["lat"], ac["lon"],
-                                           ac["hdg"], 18.0)
-            ac["alt"] = ac["tgt_alt"] = max(
-                self.airport["elev"] + 5000.0, ac["alt"] - 4000.0)
+            here = haversine_nm(ac["lat"], ac["lon"],
+                                self.airport["lat"], self.airport["lon"])
+            ac["lat"], ac["lon"] = advance(
+                ac["lat"], ac["lon"], ac["hdg"],
+                max(0.0, min(18.0, here - 15.0)))
+            dist = haversine_nm(ac["lat"], ac["lon"],
+                                self.airport["lat"], self.airport["lon"])
+            prof = 1000.0 * ((self.airport["elev"] + dist * 320.0) // 1000)
+            ac["alt"] = ac["tgt_alt"] = min(ac["alt"], max(
+                self.airport["elev"] + 5000.0, prof))
         self._spawn_departure()
 
     # -- Feed interface -----------------------------------------------------
@@ -402,8 +416,14 @@ class Sim:
         # each corner post owns an altitude band, staggered so unworked
         # streams don't conflict with each other — only with your plan
         base = 110 + 10 * self.sector["entries"].index(entry)
-        alt = 100.0 * max(base + self.rng.choice((0, 20)),
-                          (self.airport["elev"] + 6000) // 100 + 10)
+        floor = 100.0 * ((self.airport["elev"] + 6000) // 100 + 10)
+        band = 100.0 * (base + self.rng.choice((0, 20)))
+        # ...but a near gate can't work the full band: nobody checks in
+        # higher than a ~3 nm-per-thousand-feet descent can get down from
+        dist = haversine_nm(lat, lon, self.airport["lat"],
+                            self.airport["lon"])
+        cap = 1000.0 * ((self.airport["elev"] + dist * 350.0) // 1000)
+        alt = max(floor, min(band, cap))
         # never spawn into an immediate conflict the player couldn't
         # prevent — checked before drawing a cast, so an aborted spawn
         # doesn't burn a real flight from the pool
@@ -420,8 +440,6 @@ class Sim:
         # par: the straight-in distance at working speeds plus room for a
         # civilised pattern — beat it and nothing happens, dawdle past it
         # (laps, forgotten holds) and the landing pays less
-        dist = haversine_nm(lat, lon, self.airport["lat"],
-                            self.airport["lon"])
         ac.update(plan="arrival", fix=entry, rwy=self.sector["rwy"],
                   thr=self.sector["thr"], course=self.sector["course"],
                   par=dist * 16.0 + 300.0)
@@ -732,6 +750,22 @@ class Sim:
             worst = max(worst, self.wx_sample(plat, plon) or 0.0)
         return worst
 
+    def _wx_worst(self, lat, lon, hdg, near_nm, far_nm, step_nm=1.0):
+        """Worst echo along a track segment [near, far] nm out from a point.
+
+        Unlike _wx_ahead this starts from an arbitrary spot, not an
+        aircraft — used to sniff the final approach path for a cell.
+        """
+        if self.wx_sample is None:
+            return 0.0
+        worst = 0.0
+        d = near_nm
+        while d <= far_nm + 1e-6:
+            plat, plon = advance(lat, lon, hdg, d)
+            worst = max(worst, self.wx_sample(plat, plon) or 0.0)
+            d += step_nm
+        return worst
+
     def _weather_tick(self, dt):
         """Pilots don't fly into cells: they ask, then they act."""
         if self.wx_sample is None:
@@ -743,13 +777,13 @@ class Sim:
                 continue
             ahead = self._wx_ahead(ac, ac["hdg"], 6.0)
             if ac.get("wx_deviating"):
-                if ahead < 0.3:
+                if ahead < WX_CLEAR:
                     ac["wx_deviating"] = False
                     ac["wx_asked_t"] = None
                     self.say(f"{hail(ac)} clear of weather,"
                              " ready for a vector", "request")
                 continue
-            if ahead < 0.65:
+            if ahead < WX_DEVIATE:
                 ac["wx_asked_t"] = None
                 continue
             side = ("left" if self._wx_ahead(ac, (ac["hdg"] - 30.0) % 360.0)
@@ -1080,7 +1114,8 @@ class Sim:
         if ac["squawk"] == "7700":
             return
         new_wx = self._wx_ahead(ac, new_hdg)
-        if new_wx < 0.65 or new_wx <= self._wx_ahead(ac, ac["hdg"]) + 0.1:
+        if (new_wx < WX_DEVIATE
+                or new_wx <= self._wx_ahead(ac, ac["hdg"]) + WX_WORSE):
             return
         me = hail(ac)
         side = ("left" if self._wx_ahead(ac, (new_hdg - 40.0) % 360.0)
@@ -1197,6 +1232,15 @@ class Sim:
             if theta > 110.0:
                 raise CommandError(f"unable — {me} is pointed away from "
                                    "the localizer, give us a vector first")
+            # a cell parked on the final is a go-around waiting to happen —
+            # no one accepts the approach into it (emergencies excepted)
+            if ac["squawk"] != "7700":
+                recip = (course + 180.0) % 360.0
+                on_final = self._wx_worst(thr[0], thr[1], recip, 1.0, 12.0)
+                if on_final >= WX_DEVIATE:
+                    raise CommandError(
+                        f"unable — there's a cell on the final for "
+                        f"{say_runway(rwy)}, {me} needs vectors around it")
             ac.update(phase="cleared", rwy=rwy, course=course, thr=thr,
                       tower_handoff=None, wake_warned=False)
             return f"cleared ILS runway {say_runway(rwy)} approach"

@@ -192,6 +192,14 @@ def _wx_sampler(rgba, pw, ph, fbbox):
 
     Bound to the frame's own bbox, so it stays honest even if the view
     has panned away since the frame was fetched.
+
+    Echo is intensity, not mere coverage.  The pixel alpha alone can't tell
+    a wall of light stratiform blue from a convective core — both come back
+    near opaque — so a controller keyed on alpha would watch pilots shy from
+    rain they'd fly through without a thought.  The default palette ramps its
+    hue with reflectivity (bright blue → purple → magenta → red as the cells
+    get heavy), so redness (r − b) tracks intensity where alpha can't: light
+    rain reads ~0, the heavy cores climb toward 1.  A faint pixel is clear air.
     """
     minlon, minlat, maxlon, maxlat = fbbox
 
@@ -200,7 +208,11 @@ def _wx_sampler(rgba, pw, ph, fbbox):
             return None
         px = int((lon - minlon) / (maxlon - minlon) * (pw - 1))
         py = int((maxlat - lat) / (maxlat - minlat) * (ph - 1))
-        return rgba[(py * pw + px) * 4 + 3] / 255.0
+        i = (py * pw + px) * 4
+        if rgba[i + 3] < 40:               # too faint to be a real echo
+            return 0.0
+        redness = rgba[i] - rgba[i + 2]    # r − b, the palette's heat axis
+        return max(0.0, min(1.0, (redness + 60) / 240.0))
 
     return sample
 

@@ -5,7 +5,7 @@ import pytest
 from blips._airports import find_airport
 from blips._commands import CommandError
 from blips._geo import advance, cross_along_track, haversine_nm, turn_delta
-from blips._sim import PERF, Sim, build_sector
+from blips._sim import PERF, WX_CLEAR, WX_DEVIATE, Sim, build_sector
 
 
 @pytest.fixture()
@@ -307,6 +307,24 @@ def test_shift_starts_populated():
     assert max(inside) > 12.0
 
 
+def test_shift_opens_workable():
+    # nobody on frequency at 0:00 is unmanageably close or high — every
+    # arrival, including the one already partway in, can still make the
+    # field on a sane descent profile (~3 nm per thousand feet)
+    for icao in ("tpa", "egll", "kden"):
+        apt = find_airport(icao)
+        for seed in range(5):
+            s = Sim(apt, seed=seed)
+            for a in s.aircraft:
+                if a["plan"] != "arrival":
+                    continue
+                dist = haversine_nm(a["lat"], a["lon"],
+                                    apt["lat"], apt["lon"])
+                assert dist > 14.0, (icao, seed, a["callsign"])
+                assert a["alt"] - apt["elev"] <= dist * 350.0 + 1000.0, (
+                    icao, seed, a["callsign"], a["alt"], dist)
+
+
 def test_departure_handoff_rules(sim):
     sim._next_departure = 0.0
     sim._spawn_departure()
@@ -388,6 +406,50 @@ def test_emergency_exempt_from_weather(sim):
     sim.wx_sample = _wall_east_of(ac["lon"] + 0.05)
     sim._declare_emergency(ac)
     assert "turn right heading" in sim.command("100 r 90")
+
+
+def test_wx_sampler_reads_intensity_not_coverage():
+    from blips._game import _wx_sampler
+    # a 2×1 frame: opaque light-blue echo | opaque heavy-red core
+    blue = [0, 94, 182, 255]      # bright blue — light stratiform rain
+    red = [252, 83, 112, 255]     # salmon-red — a convective core
+    rgba = bytearray(blue + red)
+    sample = _wx_sampler(rgba, 2, 1, (0.0, 0.0, 2.0, 1.0))
+    assert sample(0.5, 0.0) < WX_CLEAR        # blue reads as good as clear
+    assert sample(0.5, 2.0) >= WX_DEVIATE      # the red core reads heavy
+    assert sample(0.5, 5.0) is None            # off-frame stays None
+    # a barely-there echo (near-transparent) is clear air, whatever its hue
+    faint = _wx_sampler(bytearray([252, 83, 112, 20]), 1, 1,
+                        (0.0, 0.0, 1.0, 1.0))
+    assert faint(0.5, 0.5) == 0.0
+
+
+def test_ils_refused_with_a_cell_on_the_final(sim):
+    thr = sim.sector["thr"]
+    course = sim.sector["course"]
+    # lined up 12 nm out, ready to be cleared
+    lat, lon = advance(*thr, (course + 180.0) % 360.0, 12.0)
+    ac = _arrival(sim, lat=lat, lon=lon, alt=3000.0, hdg=course, ias=180.0)
+    # heavy echo sitting 6 nm down the final, on the centreline
+    cell = advance(*thr, (course + 180.0) % 360.0, 6.0)
+    sim.wx_sample = (lambda la, lo: 1.0
+                     if abs(la - cell[0]) < 0.05 and abs(lo - cell[1]) < 0.05
+                     else 0.0)
+    line = sim.command("100 i")
+    assert "cell on the final" in line
+    assert ac["phase"] != "cleared"          # clearance withheld
+    sim.wx_sample = lambda la, lo: 0.0        # the cell moves off
+    assert "cleared ILS runway" in sim.command("100 i")
+
+
+def test_emergency_takes_the_ils_through_weather(sim):
+    thr = sim.sector["thr"]
+    course = sim.sector["course"]
+    lat, lon = advance(*thr, (course + 180.0) % 360.0, 12.0)
+    ac = _arrival(sim, lat=lat, lon=lon, alt=3000.0, hdg=course, ias=180.0)
+    sim.wx_sample = lambda la, lo: 1.0        # wall-to-wall weather
+    sim._declare_emergency(ac)
+    assert "cleared ILS runway" in sim.command("100 i")
 
 
 # -- the day changes ------------------------------------------------------------

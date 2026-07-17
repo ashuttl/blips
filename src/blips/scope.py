@@ -26,7 +26,7 @@ import sys
 import threading
 import time
 
-from blips._adsb import fetch_point
+from blips._adsb import SourcePicker
 from blips._routes import RouteLookup
 from blips._basemap import (
     Basemap, DotLayer, SEA_FILL, marine_region, nearest_city, _project,
@@ -164,6 +164,7 @@ class Feed:
         self._fetch_started = None  # wall time the in-flight poll began
         self._trying = ""           # aggregator currently being waited on
         self._view = None    # (lat, lon, radius_nm)
+        self._picker = SourcePicker()  # sticky best-aggregator-for-here
         self._wake = threading.Event()
         self._lock = threading.Lock()
         self._nudge = nudge  # SIGWINCH-poke the live loop after each poll
@@ -188,8 +189,8 @@ class Feed:
             self._fetching = True
             self._fetch_started = time.time()
         try:
-            aircraft, source = fetch_point(lat, lon, radius,
-                                           on_status=_trying)
+            aircraft, source = self._picker.fetch(lat, lon, radius,
+                                                  on_status=_trying)
         finally:
             with self._lock:
                 self._fetching = False
