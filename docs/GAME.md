@@ -261,6 +261,19 @@ rings, and it costs 200 points. The conflict alert projects against
 the uncontrolled sky too, at hazard scale, so the blink comes while
 the turn still saves it.
 
+**A metroplex has neighbours.** Work JFK and LaGuardia and Newark are
+right there; SFO has Oakland and San José, Chicago O'Hare has Midway.
+Their traffic isn't yours — a real TRACON works one position beside
+others — so a nearby major field puts up its own arrivals and departures
+flying its own real SIDs and STARs, dim and tagged with that field's code
+(`112 EWR` descending toward Newark), never on your frequency. You don't
+work them, but you sequence *around* them: they're traffic-as-terrain
+like the VFR sky, owed a turn and not a word, and the same traffic alert
+bites if you vector into one. Their procedures are laid out so the normal
+flows clear each other — the pressure is the picture, not a gauntlet.
+Fields with no major neighbour (Portland, most of the world) simply run
+quieter.
+
 **On a calm morning, balloons.** Wind under ten knots and somebody's
 aloft: two or three hot-air balloons drift near the field for a few
 minutes, near-stationary ○ targets moving at exactly the speed and

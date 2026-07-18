@@ -1,9 +1,11 @@
 """Vendored procedures: real fixes resolve, the overlay stays bounded and
 tied to the sector gates, and fields off the CIFP simply have none."""
 
+import random
+
 from blips._airports import find_airport
 from blips._geo import haversine_nm
-from blips._procedures import overlay_for, procedures_for
+from blips._procedures import flow_path, overlay_for, procedures_for
 
 
 def _gates(icao):
@@ -55,3 +57,20 @@ def test_gates_declutter_never_empties_a_real_field():
     ap, s, eg, xg = _gates("KORD")
     ov = overlay_for(ap, s["rwy"], entry_gates=eg, exit_gates=xg)
     assert ov["labels"]
+
+
+def test_flow_path_stitches_a_departure_from_the_field():
+    ap = find_airport("KEWR")
+    res = flow_path(ap, "22R", "departure", random.Random(3))
+    assert res is not None
+    _name, pts = res
+    assert len(pts) >= 2
+    assert haversine_nm(ap["lat"], ap["lon"], *pts[0]) < 1.5   # off the field
+
+
+def test_flow_path_stitches_an_arrival_to_the_field():
+    ap = find_airport("KMDW")
+    res = flow_path(ap, ap["rwys"][0]["le"][0], "arrival", random.Random(5))
+    assert res is not None
+    _name, pts = res
+    assert haversine_nm(ap["lat"], ap["lon"], *pts[-1]) < 1.5  # ends at field

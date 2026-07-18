@@ -28,7 +28,8 @@ from blips._commands import (
 from blips._geo import (
     advance, bearing_to, cross_along_track, haversine_nm, turn_delta,
 )
-from blips._schedules import far_city
+from blips._procedures import flow_path
+from blips._schedules import far_city, schedule_for
 
 SECTOR_NM = 45.0          # boundary ring radius
 DESPAWN_NM = 60.0         # grace past the farthest gate (arrivals spawn
@@ -455,6 +456,8 @@ def _fix_name(rng):
 GATE_BAND_NM = (22.0, 52.0)   # where sector gates live — wide enough to
                               # catch the real close-in VORs (PIE is 15 nm
                               # off TPA; a near gate is a fun corner)
+NEIGHBOR_BAND_NM = (8.0, 35.0)  # a nearby major is a metroplex neighbour —
+                                # its traffic you see but never work
 _NAV_RANK = {"VORTAC": 0, "VOR-DME": 0, "VOR": 0, "TACAN": 1,
              "NDB-DME": 2, "NDB": 3, "DME": 4}
 
@@ -509,16 +512,31 @@ def build_sector(airport):
     end = rng.choice(("le", "he"))                 # today's flow
     ident, course, thr = _end_geometry(airport, runway, end)
 
+    # the satellite is a minor field you also work; a major nearby is not
+    # yours at all — it's a metroplex neighbour, so keep the two apart
     sat_apt = None
     for _dist, ap in airports_near(lat, lon, 10.0, 34.0):
-        if ap["icao"] != airport["icao"]:
+        if ap["icao"] != airport["icao"] and not ap["large"]:
             sat_apt = ap
             break
+
+    # neighbouring majors: their traffic flies its own procedures and you
+    # navigate around it, the way a TRACON works one position beside others
+    neighbors = []
+    for _dist, ap in airports_near(lat, lon, *NEIGHBOR_BAND_NM):
+        if (ap["icao"] == airport["icao"] or not ap["large"]
+                or (sat_apt and ap["icao"] == sat_apt["icao"])):
+            continue
+        neighbors.append({"apt": ap, "end": _sat_end(ap, course)})
+        if len(neighbors) >= 3:
+            break
+
     return {
         "fixes": fixes, "entries": entries, "exits": exits,
         "rwy": ident, "course": course, "thr": thr, "end": end,
         "elev": airport["elev"], "sat_apt": sat_apt,
         "sat": _sat_end(sat_apt, course) if sat_apt else None,
+        "neighbors": neighbors,
     }
 
 
@@ -533,6 +551,19 @@ def _sat_end(sat_apt, main_course):
             "name": sat_apt["city"] or sat_apt["name"],
             "elev": sat_apt["elev"],
             "rwy": ident, "course": course, "thr": thr}
+
+
+def _edge_point(home, outer, inner, edge_nm):
+    """A point on the segment outer→inner about ``edge_nm`` from home — where
+    a route crosses into the scope, so distant traffic enters at the boundary
+    instead of popping in far off-screen."""
+    do = haversine_nm(home[0], home[1], outer[0], outer[1])
+    di = haversine_nm(home[0], home[1], inner[0], inner[1])
+    if do <= di:
+        return inner
+    f = max(0.0, min(1.0, (do - edge_nm) / (do - di)))
+    return (outer[0] + (inner[0] - outer[0]) * f,
+            outer[1] + (inner[1] - outer[1]) * f)
 
 
 def _end_geometry(airport, runway, end):
@@ -604,6 +635,9 @@ class Sim:
         self._next_over = self.rng.uniform(60.0, 180.0)
         self._next_sat_dep = (self.rng.uniform(240.0, 480.0)
                               if self.sector["sat"] else float("inf"))
+        self._next_neighbor = (self.rng.uniform(30.0, 120.0)
+                               if self.sector.get("neighbors")
+                               else float("inf"))
         self._balloon_event = 0  # 0 not yet · 1 aloft · 2 done for the day
         self._center_until = 0.0
         self._center_events = 0
@@ -958,6 +992,73 @@ class Sim:
         ac.update(plan="overflight", dim=True, route=legs)
         self.aircraft.append(ac)
 
+    def _cast_neighbor(self, ap):
+        """A real flight for a neighbouring field — its own carriers and
+        metal from the vendored schedule, else a synthesized one."""
+        routes = schedule_for(ap["icao"])
+        if routes:
+            prefix, actype, _far, _w = self.rng.choices(
+                routes, [r[3] for r in routes])[0]
+            return self._prefix_callsign(prefix), actype
+        callsign, airline = self._new_callsign()
+        return callsign, self.rng.choice(FLEETS.get(airline, ("A320",)))
+
+    def _spawn_neighbor(self):
+        """A neighbouring major's traffic, flying its own SID or STAR — not
+        yours to work, never on your frequency, but real metal on a real
+        procedure that your traffic has to be sequenced around."""
+        neighbors = self.sector.get("neighbors")
+        if not neighbors or sum(
+                a["plan"] == "neighbor" for a in self.aircraft) >= 4:
+            return
+        home = self.airport["lat"], self.airport["lon"]
+        edge = DESPAWN_NM - 4.0
+        options = [(nb, k) for nb in neighbors
+                   for k in ("arrival", "departure")]
+        self.rng.shuffle(options)
+        for nb, kind in options:
+            ap, end = nb["apt"], nb["end"]
+            res = flow_path(ap, end["rwy"], kind, self.rng)
+            if res is None:
+                continue
+            _name, pts = res
+            if kind == "arrival":
+                # enter where the STAR crosses into the scope, then fly the
+                # rest down to the field — a distant fix isn't a spawn point
+                inside = next((i for i, p in enumerate(pts)
+                               if haversine_nm(home[0], home[1], *p) <= edge),
+                              None)
+                if inside is None:
+                    continue
+                if inside == 0:
+                    spawn = pts[0]
+                else:
+                    spawn = _edge_point(home, pts[inside - 1], pts[inside],
+                                        edge)
+                nav = pts[inside:]
+                cruise = 1000.0 * self.rng.randint(10, 13)
+            else:
+                spawn, nav = pts[0], pts[1:]     # off the neighbour's runway
+                if haversine_nm(home[0], home[1], *spawn) > DESPAWN_NM:
+                    continue
+                cruise = 1000.0 * self.rng.randint(11, 15)
+            if not nav:
+                continue
+            callsign, actype = self._cast_neighbor(ap)
+            if any(a["callsign"] == callsign for a in self.aircraft):
+                return
+            felev = float(ap["elev"])
+            hdg = bearing_to(spawn[0], spawn[1], nav[0][0], nav[0][1])
+            alt = cruise if kind == "arrival" else felev + 400.0
+            ac = self._base(callsign, actype, spawn[0], spawn[1], alt, hdg,
+                            250.0)
+            ac.update(plan="neighbor", dim=True, nav=nav,
+                      neighbor_field=(ap["lat"], ap["lon"]),
+                      neighbor_kind=kind, felev=felev, cruise_alt=cruise,
+                      tag=end["code"], limited=True)
+            self.aircraft.append(ac)
+            return
+
     def _spawn_balloons(self):
         """A calm morning's reward: hot air balloons, the one aircraft
         that renders the wind — near-stationary targets drifting at
@@ -993,6 +1094,10 @@ class Sim:
         if self._next_over <= 0:
             self._spawn_overflight()
             self._next_over = self.rng.uniform(120.0, 300.0)
+        self._next_neighbor -= dt
+        if self._next_neighbor <= 0:
+            self._spawn_neighbor()
+            self._next_neighbor = self.rng.uniform(75.0, 200.0)
         if (self._balloon_event == 0 and self._elapsed > 240.0
                 and self.wind[1] <= 10.0
                 and self.rng.random() <= dt / 1200.0):
@@ -1098,6 +1203,8 @@ class Sim:
 
         if ac["phase"] in ("cleared", "established"):
             self._fly_ils(ac)
+        elif ac.get("nav"):
+            self._fly_nav(ac)
         elif ac["phase"] == "hold":
             # a lazy right-hand orbit around the holding point
             hlat, hlon = ac["hold_at"]
@@ -1167,6 +1274,24 @@ class Sim:
         ac["lat"], ac["lon"] = advance(ac["lat"], ac["lon"], ac["track"],
                                        ac["gs"] * dt / 3600.0)
         ac["fix_time"] = time.time()
+
+    def _fly_nav(self, ac):
+        """Fly an ordered list of fixes: steer for the next one, drop it as
+        it's reached, and ride a plain descent or climb against the field
+        the route belongs to.  Uncontrolled procedural traffic flies this."""
+        nav = ac["nav"]
+        while nav and haversine_nm(ac["lat"], ac["lon"],
+                                   nav[0][0], nav[0][1]) < 1.5:
+            nav.pop(0)
+        if not nav:
+            return
+        ac["tgt_hdg"] = bearing_to(ac["lat"], ac["lon"], nav[0][0], nav[0][1])
+        ac["turn_dir"] = None
+        flat, flon = ac["neighbor_field"]
+        dist = haversine_nm(ac["lat"], ac["lon"], flat, flon)
+        slope = 300.0 if ac["neighbor_kind"] == "arrival" else 450.0
+        ac["tgt_alt"] = max(ac["felev"],
+                            min(ac["cruise_alt"], ac["felev"] + dist * slope))
 
     def _fly_ils(self, ac):
         """Capture and ride the localizer, then the glideslope, then land."""
@@ -1516,7 +1641,12 @@ class Sim:
                 # nobody's traffic comes and goes on its own: no score,
                 # no radio, no ledger — the sky just breathes
                 down = ac.get("balloon_down")
-                gone = (down is not None and self._elapsed >= down) or (
+                # a neighbour's arrival is done when it reaches its own field
+                landed_next_door = (ac["plan"] == "neighbor"
+                                    and ac.get("neighbor_kind") == "arrival"
+                                    and not ac.get("nav"))
+                gone = landed_next_door or (
+                    down is not None and self._elapsed >= down) or (
                     haversine_nm(ac["lat"], ac["lon"], self.airport["lat"],
                                  self.airport["lon"]) > DESPAWN_NM)
                 if gone:
@@ -1635,6 +1765,7 @@ class Sim:
                     self.score -= 200
                     self.bell = True
                     what = ("the balloon" if t["plan"] == "balloon"
+                            else "the traffic" if t["plan"] == "neighbor"
                             else "the VFR traffic")
                     self.say(f"TRAFFIC ALERT — {a['callsign']} and {what}, "
                              f"{say_altitude(t['alt'])}", "alert")

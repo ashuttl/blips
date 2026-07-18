@@ -154,8 +154,12 @@ def data_block(ac):
         return ac["callsign"]
     if ac.get("limited"):
         # an uncorrelated 1200 target the way STARS shows one: altitude
-        # readout only — nobody's tagged them up, because they're nobody's
-        return f"{round(ac['alt'] / 100):03d}"
+        # readout only — nobody's tagged them up, because they're nobody's.
+        # A neighbouring field's traffic wears that field's code, so its
+        # stream reads as bound somewhere else, not as loose VFR.
+        alt = f"{round(ac['alt'] / 100):03d}"
+        tag = ac.get("tag")
+        return f"{alt} {tag}" if tag else alt
     tgt = ac.get("tgt_alt")
     if tgt is not None and abs(tgt - ac["alt"]) > 300.0:
         arrow = "↑" if tgt > ac["alt"] else "↓"

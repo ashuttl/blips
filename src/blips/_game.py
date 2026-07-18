@@ -233,6 +233,10 @@ def _sector_pins(sim, airport):
                        8.0)
         lines.append((sthr[0], sthr[1], sfar[0], sfar[1], MUTED))
         lines.append((sthr[0], sthr[1], sloc[0], sloc[1], RING))
+    for nb in sector.get("neighbors", ()):
+        ap = nb["apt"]
+        pins.append((ap["lat"], ap["lon"], "⊕", DIM,
+                     nb["end"]["code"]))          # a major you don't work
     return pins, lines
 
 

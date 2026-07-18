@@ -7,7 +7,9 @@ import pytest
 from blips._airports import find_airport
 from blips._commands import CommandError
 from blips._geo import advance, cross_along_track, haversine_nm, turn_delta
-from blips._sim import PERF, WX_CLEAR, WX_DEVIATE, Sim, build_sector
+from blips._sim import (
+    PERF, WX_CLEAR, WX_DEVIATE, Sim, _controlled, build_sector,
+)
 
 
 @pytest.fixture()
@@ -398,6 +400,53 @@ def test_ex_cifp_field_still_degrades_to_synthesized_gates():
     s = build_sector(find_airport("yssy"))
     assert len(s["fixes"]) == 8
     assert any(g not in real for g in s["fixes"])   # some are synthesized
+
+
+def test_metroplex_has_uncontrolled_neighbors():
+    # New York is the textbook case: JFK works beside LGA and EWR.
+    s = build_sector(find_airport("kjfk"))
+    codes = {nb["end"]["code"] for nb in s["neighbors"]}
+    assert {"LGA", "EWR"} <= codes
+    # Portland is no metroplex — a satellite, but no neighbouring major.
+    assert build_sector(find_airport("kpwm"))["neighbors"] == []
+
+
+def test_satellite_is_never_a_major():
+    # a nearby major is a neighbour you don't work, not a satellite you do
+    for code in ("kjfk", "ksfo", "kord"):
+        s = build_sector(find_airport(code))
+        if s["sat_apt"] is not None:
+            assert not s["sat_apt"]["large"]
+
+
+def test_neighbor_traffic_is_uncontrolled_and_navigates_a_procedure():
+    sim = Sim(find_airport("kjfk"), seed=7)
+    sim.hearback_p = 0.0
+    for _ in range(8):
+        sim._spawn_neighbor()
+    nb = [a for a in sim.aircraft if a["plan"] == "neighbor"]
+    assert nb                                   # the metroplex populated
+    for a in nb:
+        assert not _controlled(a)               # never on your frequency
+        assert a["dim"] and a["nav"]            # someone else's, flying fixes
+
+
+def test_neighbor_arrival_descends_toward_its_own_field():
+    sim = Sim(find_airport("kjfk"), seed=7)
+    sim.hearback_p = 0.0
+    for _ in range(8):
+        sim._spawn_neighbor()
+    arr = next(a for a in sim.aircraft
+               if a["plan"] == "neighbor" and a["neighbor_kind"] == "arrival")
+    start_alt = arr["alt"]
+    start_d = haversine_nm(arr["lat"], arr["lon"], *arr["neighbor_field"])
+    for _ in range(120):
+        sim._fly(arr, 3.0)
+        if not arr.get("nav"):
+            break
+    assert arr["alt"] < start_alt               # came down
+    assert haversine_nm(arr["lat"], arr["lon"],
+                        *arr["neighbor_field"]) < start_d   # and closer in
 
 
 def test_shift_starts_populated():
@@ -954,7 +1003,7 @@ def test_prompt_landing_keeps_the_hundred(sim):
 
 
 def test_spawned_arrivals_carry_a_reachable_par(sim):
-    sim._spawn_arrival()
+    sim._spawn_arrival(allow_sat=False)    # the main-field par formula
     ac = sim.aircraft[-1]
     # par ≈ 16 s/nm plus five minutes of slack: a straight-in at working
     # speeds beats it comfortably, a couple of laps does not

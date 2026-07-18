@@ -181,3 +181,58 @@ def overlay_for(airport, active_rwy, entry_gates=None, exit_gates=None,
             paths.append((kind, pts))
         labels.append((outer[0], outer[1], name, kind))
     return {"paths": paths, "labels": labels}
+
+
+def flow_path(airport, active_rwy, kind, rng):
+    """One stitched polyline for a random SID/STAR serving the runway — the
+    fix sequence a flight actually flies, ordered gate→field for an arrival
+    and field→gate for a departure — as ``(name, [(lat, lon), ...])`` or None.
+
+    A transition is classed by its identifier: ``RW…`` is the runway leg,
+    empty is the common route, anything else is a named entry/exit.  An
+    arrival stitches entry → common → runway → field; a departure the reverse.
+    Used to fly the uncontrolled traffic of neighbouring fields down their
+    own procedures.
+    """
+    want = "STAR" if kind == "arrival" else "SID"
+    procs = [p for p in procedures_for(airport["icao"]) if p["k"] == want]
+    order = list(range(len(procs)))
+    rng.shuffle(order)
+    field = (airport["lat"], airport["lon"])
+    active = _rwy_digits(active_rwy)
+    for idx in order:
+        proc = procs[idx]
+        enroute, common, runway = [], None, None
+        for tr in proc["t"]:
+            v = tr["v"] or ""
+            if v.startswith("RW"):
+                if _serves(v, active):
+                    runway = tr
+            elif v == "":
+                common = tr
+            else:
+                enroute.append(tr)
+        if any((t["v"] or "").startswith("RW") for t in proc["t"]) \
+                and runway is None:
+            continue                              # serves only other runways
+        entry = enroute[rng.randrange(len(enroute))] if enroute else None
+        chain = ([entry, common, runway] if want == "STAR"
+                 else [runway, common, entry])
+        pts = []
+        for tr in chain:
+            if tr is None:
+                continue
+            for leg in tr["legs"]:
+                p = _resolve(leg, airport)
+                if p is not None and (not pts or haversine_nm(
+                        pts[-1][0], pts[-1][1], p[0], p[1]) > 0.2):
+                    pts.append(p)
+        if want == "STAR":
+            if not pts or haversine_nm(pts[-1][0], pts[-1][1], *field) > 1.0:
+                pts.append(field)
+        else:
+            if not pts or haversine_nm(pts[0][0], pts[0][1], *field) > 1.0:
+                pts.insert(0, field)
+        if len(pts) >= 2:
+            return proc["n"], pts
+    return None
