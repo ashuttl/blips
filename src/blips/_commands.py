@@ -83,6 +83,7 @@ _WORDS = frozenset((
     "l", "r", "left", "right", "c", "d", "climb", "descend",
     "rs", "is", "reduce", "increase", "s", "dct", "direct",
     "i", "ils", "ho", "handoff", "co", "hold", "tfc", "traffic",
+    "u", "unable", "neg",
 ))
 
 
@@ -147,6 +148,7 @@ def parse(text):
         {"kind": "ils",     "rwy": "19L"|None}
         {"kind": "handoff"}
         {"kind": "traffic"}                           # call the VFR target
+        {"kind": "unable"}                            # decline their request
 
     Raises CommandError with a pilot-flavoured message on bad input.
     """
@@ -201,6 +203,9 @@ def parse(text):
             i += 1
         elif t in ("tfc", "traffic"):
             out.append({"kind": "traffic"})
+            i += 1
+        elif t in ("u", "unable", "neg"):
+            out.append({"kind": "unable"})
             i += 1
         elif t == "hold":
             fix = None

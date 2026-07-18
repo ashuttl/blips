@@ -28,6 +28,7 @@ from blips._commands import (
 from blips._geo import (
     advance, bearing_to, cross_along_track, haversine_nm, turn_delta,
 )
+from blips._schedules import far_city
 
 SECTOR_NM = 45.0          # boundary ring radius
 DESPAWN_NM = 60.0         # grace past the farthest gate (arrivals spawn
@@ -361,12 +362,14 @@ def _runway_end(airport, ident):
 class Sim:
     """The sector, its traffic, and the frequency.  Feed-compatible."""
 
-    def __init__(self, airport, seed=None, pool=None, terrain=None):
+    def __init__(self, airport, seed=None, pool=None, terrain=None,
+                 schedule=None):
         self.airport = airport
         self.sector = build_sector(airport)
         self.rng = random.Random(seed)
         self.pool = pool         # live-sampled traffic, or None when offline
         self.terrain = terrain   # sector MVA grid, or None for a flat world
+        self.schedule = schedule or []   # vendored real routes for this field
         self.wx_sample = None    # callable(lat, lon) → echo 0..1, or None
         self.sector_rev = 0      # bumps on a flow change so the UI redraws
         self.bell = False        # ring the terminal on the next frame
@@ -502,16 +505,55 @@ class Sim:
         longest = max((r["len"] for r in rwys), default=99999)
         return MIN_RWY.get(actype, 0) <= longest
 
-    def _cast_flight(self, role):
-        """(callsign, actype, far_city|None) — live-sampled when possible.
+    def _prefix_callsign(self, prefix):
+        """A unique flight for a given operating carrier — its prefix and a
+        plausible flight number."""
+        for _ in range(20):
+            number = str(self.rng.randint(1, 9)) + "".join(
+                str(self.rng.randint(0, 9))
+                for _ in range(self.rng.randint(1, 3)))
+            callsign = prefix + number
+            if not any(ac["callsign"] == callsign for ac in self.aircraft):
+                return callsign
+        return f"{prefix}{self._counter}"
 
-        The pool holds flights genuinely in the air near this airport
-        right now, with their real routes; the synthesized country mix
-        only plays when the pool is empty or offline.  Arrivals and
-        departures are gated to what the field's runway can take — a
-        widebody never lands on a short strip — while overflights, passing
-        overhead at altitude, are cast exactly as drawn.
+    def _draw_schedule(self, role):
+        """A real (callsign, actype, far_city) from the vendored schedule,
+        or None.  The route's own metal flies unless the field's runway
+        can't take it, in which case the carrier's next-best fitting type
+        stands in (a guard against a bad equipment guess in the data)."""
+        routes = self.schedule
+        if not routes:
+            return None
+        weights = [r[3] for r in routes]
+        for _ in range(8):
+            prefix, actype, far, _w = self.rng.choices(routes, weights)[0]
+            if not self._runway_ok(actype):
+                fits = [t for t in FLEETS.get(prefix, ())
+                        if self._runway_ok(t)]
+                if not fits:
+                    continue
+                actype = self.rng.choice(fits)
+            return self._prefix_callsign(prefix), actype, far_city(far)
+        return None
+
+    def _cast_flight(self, role):
+        """(callsign, actype, far_city|None) — a real flight when we can.
+
+        For arrivals and departures the vendored schedule leads: the real
+        carriers, metal and routes that serve this field, so the check-in
+        and the hover chip carry a true origin/destination.  Failing that
+        (no schedule for this field) the live pool casts whoever's actually
+        in the air nearby, and last the synthesized country mix.  Overflights
+        skip the schedule (it holds no through-traffic) and come from the
+        pool.  Arrivals and departures are gated to what the field's runway
+        can take — a widebody never lands on a short strip — while
+        overflights, passing overhead at altitude, are cast exactly as drawn.
         """
+        if role != "overflight":
+            pick = self._draw_schedule(role)
+            if pick is not None:
+                return pick
         if self.pool is not None:
             pick = self.pool.draw(role)
             if pick is not None and not any(
@@ -1253,15 +1295,18 @@ class Sim:
                 continue
             if (ac["plan"] == "arrival" and ac["alt"] > 9000.0
                     and ac["tgt_alt"] >= ac["alt"]):
-                wanting.append((ac, "requesting lower"))
+                wanting.append((ac, "requesting lower", {"what": "lower"}))
             elif (ac["plan"] == "departure"
                   and ac["alt"] >= ac["tgt_alt"] - 200.0):
-                verb = self.rng.choice(
-                    ("requesting higher", f"requesting direct {ac['fix']}"))
-                wanting.append((ac, verb))
+                if self.rng.random() < 0.5:
+                    wanting.append((ac, "requesting higher", {"what": "higher"}))
+                else:
+                    wanting.append((ac, f"requesting direct {ac['fix']}",
+                                    {"what": "direct", "fix": ac["fix"]}))
         if wanting:
-            ac, want = self.rng.choice(wanting)
+            ac, want, req = self.rng.choice(wanting)
             ac["asked"] = True
+            ac["req"] = req      # the standing ask, so `unable` can decline it
             self.say(f"{hail(ac)} {want}", "request", voice=ac["callsign"])
 
     def _retire(self):
@@ -1510,6 +1555,9 @@ class Sim:
                     said = self._apply(ac, ins, due)
                 phrases.append(said)
                 intended.append(self._spoken(ac, ins) or said)
+            # a declined request is settled once both lines are worded
+            if any(ins["kind"] == "unable" for ins in instructions):
+                ac["req"] = None
         except CommandError as exc:
             line = str(exc)
             self.say(line, "error")
@@ -1589,6 +1637,15 @@ class Sim:
                 return "resume normal speed"
             direction = "reduce" if ins["dir"] == "reduce" else "increase"
             return f"{direction} speed {say_digits(ins['kt'])}"
+        if kind == "unable":
+            # what you keyed, spelled out for the log's echo — "unable direct
+            # EFLOW" / "unable lower".  Reads the still-standing request.
+            req = ac.get("req")
+            if not req:
+                return "unable"
+            if req["what"] == "direct":
+                return f"unable direct {req['fix']}"
+            return f"unable {req['what']}"
         return None
 
     def _apply(self, ac, ins, due=None):
@@ -1625,6 +1682,7 @@ class Sim:
                         f"vectoring altitude here is {say_altitude(floor)}")
             self._stage(ac, due, tgt_alt=float(ins["alt_ft"]))
             ac["terrain_stop"] = False
+            ac["req"] = None       # a new altitude answers a lower/higher ask
             return self._spoken(ac, ins)
         if kind == "speed":
             if ins["kt"] is None:
@@ -1654,6 +1712,7 @@ class Sim:
             self._wx_check(ac, hdg)
             self._stage(ac, due, tgt_hdg=hdg, turn_dir=None)
             ac["wx_deviating"] = False
+            ac["req"] = None       # sending them direct answers a direct ask
             if ac["phase"] in ("cleared", "established", "hold"):
                 ac["phase"] = "cruise"
             return f"direct {ins['fix']}"
@@ -1694,6 +1753,18 @@ class Sim:
                         "we'll maintain visual")
             return (f"negative contact on the {clock} o'clock traffic, "
                     "looking")
+        if kind == "unable":
+            # decline a standing request — the pilot rogers and holds what
+            # they've got.  `_spoken` reads the same `req` for the tx echo
+            # ("unable direct EFLOW"), so it must survive until after the
+            # readback is worded; command() clears it once both lines exist.
+            req = ac.get("req")
+            if not req:
+                raise CommandError(f"unable what? {me} hasn't asked for "
+                                   "anything")
+            if req["what"] in ("lower", "higher"):
+                return f"roger, maintaining {say_altitude(ac['alt'])}"
+            return "roger"
         if kind == "hold":
             if ins["fix"] is not None:
                 spot = self.sector["fixes"].get(ins["fix"])

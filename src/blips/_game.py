@@ -46,8 +46,8 @@ RADIO_COLORS = {
 TERRAIN_TINT = (126, 96, 58)   # high ground, as a dim warm wash
 
 HINT = ("callsign then:  l/r hdg · c/d alt · rs/is spd · s resume · "
-        "dct FIX · hold [FIX] · i [rwy] · tfc · ho  —  ? help · log · "
-        "voice · pause · quit")
+        "dct FIX · hold [FIX] · i [rwy] · tfc · ho · unable  —  ? help · "
+        "log · voice · pause · quit")
 
 
 def _strip_card(ac):
@@ -356,7 +356,11 @@ def main(args):
             pool.start()  # the real traffic near this airport, filling in
     else:
         terrain._fetch(retries=1)  # a screenshot is worth a short wait
-    sim = Sim(airport, seed=seed, pool=pool, terrain=terrain)
+    # vendored real routes for this field — deterministic, so seeded shifts
+    # keep them too; the check-in and hover chip get a true origin/dest
+    from blips._schedules import schedule_for
+    sim = Sim(airport, seed=seed, pool=pool, terrain=terrain,
+              schedule=schedule_for(airport["icao"]))
     center = [airport["lat"], airport["lon"]]
     zoom = [GAME_ZOOM]
     scenery = {"rev": -1, "pins": None, "lines": None}

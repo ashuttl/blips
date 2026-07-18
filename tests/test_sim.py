@@ -130,6 +130,42 @@ def test_unknown_fix_and_wrong_plan(sim):
     assert "arrival" in sim.command("100 ho")       # arrivals aren't handed off
 
 
+def test_unable_declines_a_standing_request(sim):
+    """`unable` answers a pilot's ask: you key the decline spelled out, they
+    roger and hold what they've got.  Direct and altitude asks read back
+    differently — an altitude decline restates the level they'll keep."""
+    ac = _arrival(sim, callsign="FFT2615", alt=24000.0)
+    ac["phase"] = "cruise"
+    # a direct request, declined
+    ac["req"] = {"what": "direct", "fix": "EFLOW"}
+    line = sim.command("2615 unable")
+    assert line == "Roger, Frontier Flight 2615."
+    assert sim.radio[-2][1] == "Frontier Flight 2615, unable direct EFLOW."
+    assert ac.get("req") is None                 # the ask is settled
+    # a lower request, declined: they read back the level they'll maintain
+    ac["req"] = {"what": "lower"}
+    line = sim.command("2615 unable")
+    assert line == "Roger, maintaining flight level two four zero, Frontier Flight 2615."
+    assert sim.radio[-2][1] == "Frontier Flight 2615, unable lower."
+
+
+def test_unable_with_no_request_is_puzzled(sim):
+    ac = _arrival(sim, callsign="DAL100")
+    ac["phase"] = "cruise"
+    assert "hasn't asked for anything" in sim.command("100 unable")
+
+
+def test_granting_clears_the_standing_request(sim):
+    """Sending them where they asked settles the ask, so a later `unable`
+    has nothing to decline."""
+    ac = _arrival(sim, callsign="DAL100", alt=24000.0)
+    ac["phase"] = "cruise"
+    ac["req"] = {"what": "lower"}
+    sim.command("100 d 100")
+    assert ac.get("req") is None
+    assert "hasn't asked for anything" in sim.command("100 unable")
+
+
 def test_readback_uses_telephony(sim):
     _arrival(sim, callsign="RPA5655")
     line = sim.command("5655 r 270")
@@ -454,6 +490,22 @@ def test_hover_chip_shows_origin_and_destination():
     # a flight whose far city is unknown simply omits the line
     del arr["from"]
     assert "from" not in plain(_strip_card(arr))
+
+
+def test_schedule_drives_real_routes_with_origin():
+    """Given a vendored schedule, arrivals come from it — the real carrier
+    flying real metal, with a true origin stored for the check-in and chip.
+    An IATA far end resolves to its city ('CHS' → 'Charleston')."""
+    sched = [["MXY", "A223", "CHS", 3], ["RPA", "E175", "LGA", 4]]
+    s = Sim(find_airport("kpwm"), seed=7, schedule=sched)
+    for _ in range(12):
+        s._spawn_arrival()
+    arrs = [ac for ac in s.aircraft if ac.get("plan") == "arrival"]
+    assert arrs
+    for ac in arrs:
+        assert ac["callsign"][:3] in ("MXY", "RPA")
+        assert ac["actype"] in ("A223", "E175")
+        assert ac.get("from") in ("Charleston", "New York")
 
 
 # -- weather ------------------------------------------------------------------
