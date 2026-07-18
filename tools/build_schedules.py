@@ -52,14 +52,45 @@ OPENFLIGHTS_URL = ("https://raw.githubusercontent.com/jpatokal/openflights/"
 # Airports to build.  Easy to extend — anything find_airport resolves that
 # also has a Wikipedia route table gets a profile; the rest are logged.
 AIRPORTS = [
-    # US
+    # US — major hubs
     "KPWM", "KBOS", "KJFK", "KLGA", "KEWR", "KDCA", "KIAD", "KBWI", "KPHL",
     "KATL", "KCLT", "KORD", "KDFW", "KDEN", "KLAX", "KSFO", "KSEA", "KLAS",
     "KMCO", "KMIA", "KTPA", "KMSP", "KDTW", "KSAN", "KSLC", "KBNA", "KAUS",
-    # International
-    "CYYZ", "CYVR", "EGLL", "EGKK", "EHAM", "LFPG", "EDDF", "LEMD", "LIRF",
-    "LSZH", "LTFM", "OMDB", "OTHH", "VHHH", "RJTT", "RJAA", "WSSS", "YSSY",
-    "NZAA", "CYUL", "SBGR", "MMMX", "FAOR", "HECA", "DNMM", "HKJK",
+    # US — mid-tier (the fields a US player is likely near)
+    "KPHX", "KIAH", "KFLL", "KMDW", "KDAL", "KHOU", "KSJC", "KOAK", "KPDX",
+    "KSMF", "KRDU", "KBDL", "KPIT", "KCLE", "KCMH", "KIND", "KMCI", "KSTL",
+    "KMKE", "KCVG", "KMEM", "KABQ", "KTUS", "KSNA", "KSAT", "KOKC", "KTUL",
+    "KOMA", "KBUF", "KROC", "KALB", "KPVD", "KMHT", "KBGR", "KSYR", "KJAX",
+    "KRSW", "KPBI", "KSAV", "KCHS", "KGSP", "KGRR", "KDSM", "KMSN", "KONT",
+    "KBUR", "PHNL", "PANC", "PHOG", "KGEG", "KBOI", "KRIC", "KORF", "KGSO",
+    # Canada
+    "CYYZ", "CYVR", "CYUL", "CYYC", "CYEG", "CYOW", "CYWG", "CYHZ", "CYQB",
+    # Latin America & Caribbean
+    "SBGR", "MMMX", "SKBO", "SPIM", "SCEL", "SAEZ", "SEQM", "SBGL", "SBBR",
+    "SBSP", "MPTO", "MDSD", "MUHA", "MMUN", "MMGL", "MMMY", "TJSJ", "SVMI",
+    "SUMU", "SGAS", "SLLP", "MGGT", "MSLP", "MHTG", "MROC",
+    # Europe
+    "EGLL", "EGKK", "EHAM", "LFPG", "EDDF", "LEMD", "LIRF", "LSZH", "LTFM",
+    "EIDW", "EGCC", "EGSS", "EGGW", "LFPO", "LEBL", "EDDM", "EDDL", "EDDK",
+    "LOWW", "EKCH", "ESSA", "ENGM", "EFHK", "LGAV", "LPPT", "LKPR", "EPWA",
+    "LHBP", "LFMN", "LIMC", "LEPA", "GCLP", "EBBR", "EDDH", "ELLX", "LFLL",
+    "LFBO", "EGPH", "EGGD", "LIME", "LIPZ", "LDZA", "LYBE", "UKBB",
+    # Middle East
+    "OMDB", "OTHH", "OERK", "OEJN", "OMAA", "OKKK", "OBBI", "OJAI", "OIIE",
+    "OPKC", "UAAA",
+    # Africa
+    "FAOR", "HECA", "DNMM", "HKJK", "DGAA", "GMMN", "HAAB", "FACT", "FALE",
+    "DIAP", "GOBD", "HTDA", "FVHA", "FLLS", "HRYR", "DTTA", "HLLM", "GABS",
+    # South Asia
+    "VIDP", "VABB", "VOBL", "VOMM", "VOHS", "VECC", "VOCI", "VOTV", "VGHS",
+    "VCBI",
+    # East Asia
+    "VHHH", "RJTT", "RJAA", "ZBAA", "ZBAD", "ZSPD", "ZSSS", "ZGGG", "ZGSZ",
+    "ZUUU", "ZLXY", "RKSI", "RCTP", "RJBB", "RJGG", "RJCC", "RJFF",
+    # Southeast Asia
+    "WSSS", "VTBS", "VTBD", "WMKK", "WIII", "RPLL", "VVTS", "VVNB", "WADD",
+    # Oceania
+    "YSSY", "NZAA", "YMML", "YBBN", "YPPH", "YPAD", "NZCH", "NZWN", "YSCB",
 ]
 
 
