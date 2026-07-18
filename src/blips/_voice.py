@@ -36,6 +36,21 @@ _ACCENT = {
     "QFA": "en_AU", "JST": "en_AU", "ANZ": "en_AU",       # Qantas, Jetstar, NZ
     "UAE": "en_GB", "QTR": "en_GB", "ETD": "en_GB",       # Emirates, Qatari…
     "SVA": "en_GB",
+    # 2026 long-tail: Gulf & British carriers en_GB, South African en_ZA, Australian en_AU
+    "AUR": "en_GB",
+    "FAD": "en_GB",
+    "FCA": "en_AU",
+    "FDB": "en_GB",
+    "FRE": "en_AU",
+    "KEM": "en_ZA",
+    "KNE": "en_GB",
+    "LNK": "en_ZA",
+    "LOG": "en_GB",
+    "OMS": "en_GB",
+    "RXA": "en_AU",
+    "RXI": "en_GB",
+    "SFR": "en_ZA",
+    "TOM": "en_GB",
 }
 
 # Curated conversational voices by locale — bare names, matched against

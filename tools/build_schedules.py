@@ -34,6 +34,7 @@ import json
 import re
 import sys
 import time
+import unicodedata
 import urllib.parse
 import urllib.request
 
@@ -63,34 +64,56 @@ AIRPORTS = [
     "KOMA", "KBUF", "KROC", "KALB", "KPVD", "KMHT", "KBGR", "KSYR", "KJAX",
     "KRSW", "KPBI", "KSAV", "KCHS", "KGSP", "KGRR", "KDSM", "KMSN", "KONT",
     "KBUR", "PHNL", "PANC", "PHOG", "KGEG", "KBOI", "KRIC", "KORF", "KGSO",
+    # US — smaller regional & the rest of Maine (so a home field is first
+    # class, right down to Cape Air out of Augusta and Bar Harbor)
+    "KMYR", "KSDF", "KBHM", "KLIT", "KGRB", "KFAR", "KFSD", "KICT", "KELP",
+    "KTYS", "KAVL", "KMDT", "KDAY", "KTOL",
+    "KAUG", "KRKD", "KBHB", "KPQI", "KHUL",
     # Canada
     "CYYZ", "CYVR", "CYUL", "CYYC", "CYEG", "CYOW", "CYWG", "CYHZ", "CYQB",
     # Latin America & Caribbean
     "SBGR", "MMMX", "SKBO", "SPIM", "SCEL", "SAEZ", "SEQM", "SBGL", "SBBR",
     "SBSP", "MPTO", "MDSD", "MUHA", "MMUN", "MMGL", "MMMY", "TJSJ", "SVMI",
     "SUMU", "SGAS", "SLLP", "MGGT", "MSLP", "MHTG", "MROC",
+    "SKRG", "SKCG", "SEGU", "SPZO", "SACO", "SAME", "SBFZ", "SBRF", "SBSV",
+    "SBPA", "SBCF", "SBCT", "SBEG", "MRLB", "MDPC", "MKJS", "MKJP", "MYNN",
+    "TNCA", "TBPB", "SKCL",
     # Europe
     "EGLL", "EGKK", "EHAM", "LFPG", "EDDF", "LEMD", "LIRF", "LSZH", "LTFM",
     "EIDW", "EGCC", "EGSS", "EGGW", "LFPO", "LEBL", "EDDM", "EDDL", "EDDK",
     "LOWW", "EKCH", "ESSA", "ENGM", "EFHK", "LGAV", "LPPT", "LKPR", "EPWA",
     "LHBP", "LFMN", "LIMC", "LEPA", "GCLP", "EBBR", "EDDH", "ELLX", "LFLL",
     "LFBO", "EGPH", "EGGD", "LIME", "LIPZ", "LDZA", "LYBE", "UKBB",
-    # Middle East
+    "EGBB", "EGNX", "EGPF", "EGPD", "EGHI", "EGLC", "EICK", "LFML", "LFBD",
+    "LFRS", "LFSB", "LSGG", "EDDS", "EDDN", "EDDV", "EDDP", "LOWS", "LOWI",
+    "EKBI", "ENBR", "ENVA", "ESGG", "EPKK", "EPGD", "LROP", "LBSF", "LDSP",
+    "LDDU", "EETN", "EVRA", "EYVI", "LGTS", "LGIR", "LGKR", "LCLK", "LMML",
+    "BIKF", "LPPR", "LPFR", "LEMG", "LEBB", "LEVC", "LEZL", "LEAL", "LEIB",
+    "GCTS", "LIRN", "LIPE", "LIML", "LICC", "LICJ",
+    # Middle East / Central Asia
     "OMDB", "OTHH", "OERK", "OEJN", "OMAA", "OKKK", "OBBI", "OJAI", "OIIE",
     "OPKC", "UAAA",
+    "OOMS", "OLBA", "OEDF", "LLBG", "OMSJ", "OEMA", "UTTT", "UACC",
     # Africa
     "FAOR", "HECA", "DNMM", "HKJK", "DGAA", "GMMN", "HAAB", "FACT", "FALE",
     "DIAP", "GOBD", "HTDA", "FVHA", "FLLS", "HRYR", "DTTA", "HLLM", "GABS",
+    "HUEN", "HTZA", "FYWH", "FQMA", "FNLU", "DNAA", "GMMX", "DAAG", "GVAC",
+    "FMEE", "FMMI",
     # South Asia
     "VIDP", "VABB", "VOBL", "VOMM", "VOHS", "VECC", "VOCI", "VOTV", "VGHS",
     "VCBI",
+    "VAAH", "VOGO", "VAPO", "VILK", "VIJP", "VOTR",
     # East Asia
     "VHHH", "RJTT", "RJAA", "ZBAA", "ZBAD", "ZSPD", "ZSSS", "ZGGG", "ZGSZ",
     "ZUUU", "ZLXY", "RKSI", "RCTP", "RJBB", "RJGG", "RJCC", "RJFF",
+    "ZPPP", "ZUCK", "ZSHC", "ZSNJ", "ZHHH", "ZSAM", "ZSQD", "ZGHA", "ZHCC",
+    "ROAH", "RJOO", "RJSS", "RKPK", "RKPC", "RCKH",
     # Southeast Asia
     "WSSS", "VTBS", "VTBD", "WMKK", "WIII", "RPLL", "VVTS", "VVNB", "WADD",
+    "VTSP", "VTCC", "RPVM", "VVDN", "WMKP", "WARR", "VDPP", "VYYY", "WBKK",
     # Oceania
     "YSSY", "NZAA", "YMML", "YBBN", "YPPH", "YPAD", "NZCH", "NZWN", "YSCB",
+    "NZQN", "YBCS", "YBCG", "YMHB", "NFFN", "YPDN", "NTAA",
 ]
 
 
@@ -132,19 +155,30 @@ def resolve_page(ap):
     """Wikipedia page title carrying an airport's route table, or None.
 
     Tries the airport's formal name first (usually the article title, and
-    parse follows redirects), then a Wikipedia search — accepting the first
-    candidate whose article has an "Airlines and destinations" section.
+    parse follows redirects), then its city, then a Wikipedia search.  A
+    candidate is accepted only when its article has an "Airlines and
+    destinations" section AND it plausibly belongs to this airport.
+
+    The plausibility gate matters for the small fields: a thin article with
+    no such section used to fall through to the first *search hit* that had
+    one, so "Presque Isle" quietly inherited Boston Logan's whole route
+    table.  Candidates drawn from the airport's own name/city are trusted;
+    search hits must share a distinctive token with the airport (its name or
+    city), so a hub can never stand in for an unrelated small field.
     """
+    own_tokens = _tokens(ap["name"]) | _tokens(ap["city"] or "")
     tried = set()
-    candidates = [ap["name"]]
+    trusted = [ap["name"]]
     if ap["city"]:
-        candidates.append(f"{ap['city']} Airport")
-    candidates += wiki_search(f"{ap['name']} airlines destinations")
-    for title in candidates:
+        trusted.append(f"{ap['city']} Airport")
+    searched = wiki_search(f"{ap['name']} airlines destinations")
+    for title in trusted + searched:
         key = title.lower()
         if key in tried:
             continue
         tried.add(key)
+        if title in searched and not (_tokens(title) & own_tokens):
+            continue                   # unrelated hub — never adopt its table
         try:
             idx = find_section(title, "Airlines and destinations")
         except Exception:
@@ -251,7 +285,12 @@ def parse_dest_table(wikitext):
 # Operator name -> operating-carrier ICAO callsign prefix
 # ---------------------------------------------------------------------------
 def _norm(name):
-    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", " ", name.lower())).strip()
+    # strip diacritics first, so "Aeroméxico"/"Air Algérie"/"Gol Linhas
+    # Aéreas" normalize to their plain-ASCII forms and match the curated
+    # maps — otherwise é/í become spaces and the carrier goes unresolved
+    name = "".join(c for c in unicodedata.normalize("NFKD", name.lower())
+                   if not unicodedata.combining(c))
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", " ", name)).strip()
 
 
 # Source 1+2: curated feed-brand / marketing map and a hand map of full
@@ -337,6 +376,290 @@ _CURATED_RAW = {
     "Ethiopian Airlines": "ETH", "Kenya Airways": "KQA", "RwandAir": "RWD",
     "EgyptAir": "MSR", "Royal Air Maroc": "RAM", "Air Peace": "APK",
     "South African Airways": "RWD",   # no SAA in-game; a regional stand-in
+    # --- 2026 long-tail expansion: newly-resolved operators + subsidiary aliases ---
+    "9 Air": "JYH",
+    "AJet": "TKJ",
+    "ANA Wings": "AKX",
+    "ASKY": "SKK",
+    "ASKY Airlines": "SKK",
+    "Aero K": "EOK",
+    "Aero K Airlines": "EOK",
+    "Aeroflot": "AFL",
+    "Aeroflot Russian Airlines": "AFL",
+    "Aeroitalia": "AEZ",
+    "Aerolineas Argentinas": "ARG",
+    "Aerolíneas Argentinas": "ARG",
+    "Air Algerie": "DAH",
+    "Air Algérie": "DAH",
+    "Air Baltic": "BTI",
+    "Air Cairo": "MSC",
+    "Air Caledonie International": "ACI",
+    "Air Calédonie International": "ACI",
+    "Air Century": "CEY",
+    "Air Cote d'Ivoire": "VRE",
+    "Air Côte d'Ivoire": "VRE",
+    "Air Do": "ADO",
+    "Air Guilin": "CGH",
+    "Air Montenegro": "MNE",
+    "Air North": "ANT",
+    "Air North, Yukon's Airline": "ANT",
+    "Air Premia": "APZ",
+    "Air Samarkand": "UZS",
+    "Air Senegal": "SZN",
+    "Air Seoul": "ASV",
+    "Air Sénégal": "SZN",
+    "AirAsia Cambodia": "AXM",
+    "AirAsia X": "AXM",
+    "AirDo": "ADO",
+    "Aircalin": "ACI",
+    "Airlink": "LNK",
+    "Ajet": "TKJ",
+    "AnadoluJet": "TKJ",
+    "Arajet": "DWI",
+    "Arkia": "AIZ",
+    "Arkia Israel Airlines": "AIZ",
+    "Arkia Israeli Airlines": "AIZ",
+    "Asky Airlines": "SKK",
+    "Aurigny": "AUR",
+    "Aurigny Air Services": "AUR",
+    "Avianca Costa Rica": "AVA",
+    "Avianca Ecuador": "AVA",
+    "Avianca El Salvador": "AVA",
+    "Avianca Guatemala": "AVA",
+    "Azores Airlines": "RZO",
+    "Badr Airline": "BDR",
+    "Badr Airlines": "BDR",
+    "Bamboo Airways": "BAV",
+    "Batik Air": "BTK",
+    "Batik Air Indonesia": "BTK",
+    "Batik Air Malaysia": "MXD",
+    "Beijing Capital Airlines": "CBJ",
+    "Belavia": "BRU",
+    "Belavia Belarusian Airlines": "BRU",
+    "BermudAir": "BMA",
+    "Bhutan Airlines": "BTN",
+    "BoA": "BOV",
+    "Boliviana de Aviacion": "BOV",
+    "Boliviana de Aviación": "BOV",
+    "CEM Air": "KEM",
+    "Cabo Verde Airlines": "TCV",
+    "Cape Air": "KAP",
+    "Cape Verde Airlines": "TCV",
+    "Capital Airlines": "CBJ",
+    "CemAir": "KEM",
+    "Central Airlines (China)": "HLF",
+    "Central Mountain Air": "GLR",
+    "Centrum Air": "MFX",
+    "Chair": "CSW",
+    "Chair Airlines": "CSW",
+    "Chengdu Airlines": "UEA",
+    "China Central Airlines": "HLF",
+    "China West Air": "CHB",
+    "Citilink": "CTV",
+    "Citilink Indonesia": "CTV",
+    "Colorful Guizhou Airlines": "CGZ",
+    "Corsair": "CRL",
+    "Corsair International": "CRL",
+    "Dalian Airlines": "CCD",
+    "Denver Air Connection": "LYM",
+    "Discover Airlines": "OCN",
+    "Donghai Airlines": "EPA",
+    "Druk Air": "DRK",
+    "Drukair": "DRK",
+    "Duocai Guizhou Airlines": "CGZ",
+    "Enter Air": "ENT",
+    "Eswatini Air": "SZL",
+    "Fly Arystan": "AYN",
+    "Fly Corporate": "FCA",
+    "Fly One": "FIA",
+    "FlyArystan": "AYN",
+    "FlyOne": "FIA",
+    "FlyPelican": "FRE",
+    "FlySafair": "SFR",
+    "Flyadeal": "FAD",
+    "Flybondi": "FBZ",
+    "Flydubai": "FDB",
+    "Flynas": "KNE",
+    "Free Bird Airlines": "FHY",
+    "Freebird": "FHY",
+    "Freebird Airlines": "FHY",
+    "French Bee": "FBU",
+    "French bee": "FBU",
+    "Greater Bay Airlines": "HGB",
+    "HiSky": "HYM",
+    "HiSky Europe": "HYM",
+    "Hokkaido International Airlines": "ADO",
+    "Hyannis Air Service": "KAP",
+    "Iberojet": "EVE",
+    "Indonesia AirAsia": "AXM",
+    "InterCaribbean": "IWY",
+    "InterCaribbean Airways": "IWY",
+    "Island Aviation": "DQA",
+    "Island Aviation Services": "DQA",
+    "JetSMART": "JAT",
+    "JetSmart": "JAT",
+    "JetSmart Argentina": "JAT",
+    "JetSmart Chile": "JAT",
+    "JetSmart Colombia": "JAT",
+    "JetSmart Peru": "JAT",
+    "JetSmart Perú": "JAT",
+    "Jiangxi Air": "CJX",
+    "Juneyao Air": "DKH",
+    "Juneyao Airlines": "DKH",
+    "KM Malta": "KMM",
+    "KM Malta Airlines": "KMM",
+    "Key Lime Air": "LYM",
+    "Kunming Airlines": "KNA",
+    "LAM Mozambique": "LAM",
+    "LAM Mozambique Airlines": "LAM",
+    "LASER Airlines": "LER",
+    "LATAM Airlines Brasil": "LAN",
+    "LATAM Brasil": "LAN",
+    "LATAM Colombia": "LAN",
+    "LATAM Ecuador": "LAN",
+    "LATAM Paraguay": "LAN",
+    "LATAM Peru": "LAN",
+    "LATAM Perú": "LAN",
+    "LEVEL": "LVL",
+    "La Compagnie": "DJT",
+    "Laser Airlines": "LER",
+    "Level": "LVL",
+    "Libyan Airlines": "LAA",
+    "Libyan Arab Airlines": "LAA",
+    "Link Airways": "FCA",
+    "Lion Air": "LNI",
+    "Lion Air Indonesia": "LNI",
+    "Logan Air": "LOG",
+    "Loganair": "LOG",
+    "Loong Air": "CDC",
+    "Loong Airlines": "CDC",
+    "Lucky Air": "LKE",
+    "Malawi Airlines": "MWI",
+    "Malawian Airlines": "MWI",
+    "Maldivian": "DQA",
+    "Malindo Air": "MXD",
+    "Mauritania Airlines": "MAI",
+    "Mauritania Airlines International": "MAI",
+    "Mavi Gok Airlines": "MGH",
+    "Mavi Gök": "MGH",
+    "Mavi Gök Airlines": "MGH",
+    "Nas Air": "KNE",
+    "Neos": "NOS",
+    "Neos Air": "NOS",
+    "Nine Air": "JYH",
+    "Nouvel Air": "LBT",
+    "Nouvelair": "LBT",
+    "Nouvelair Tunisie": "LBT",
+    "Okay Airways": "OKA",
+    "Peach": "APJ",
+    "Peach Aviation": "APJ",
+    "Pelican Airlines": "FRE",
+    "Pelita Air": "PAS",
+    "Pelita Air Service": "PAS",
+    "Philippines AirAsia": "AXM",
+    "Plus Ultra": "PUE",
+    "Plus Ultra Lineas Aereas": "PUE",
+    "Plus Ultra Líneas Aéreas": "PUE",
+    "Proflight Zambia": "PFZ",
+    "Qanot Sharq": "QNT",
+    "Qanot Sharq Airlines": "QNT",
+    "Qingdao Airlines": "QDA",
+    "RUTACA": "RUC",
+    "RUTACA Airlines": "RUC",
+    "Regional Express": "RXA",
+    "Rex": "RXA",
+    "Rex Airlines": "RXA",
+    "Riyadh Air": "RXI",
+    "Rossiya": "SDM",
+    "Rossiya - Russian Airlines": "SDM",
+    "Rossiya Airlines": "SDM",
+    "Royal Bhutan Airlines": "DRK",
+    "Ruili Airlines": "RLH",
+    "Rutaca Airlines": "RUC",
+    "SA Airlink": "LNK",
+    "SATA": "RZO",
+    "SATA Azores Airlines": "RZO",
+    "SCAT": "VSV",
+    "SCAT Airlines": "VSV",
+    "SKY Airline": "SKU",
+    "STARLUX": "SJX",
+    "Safair": "SFR",
+    "Salam Air": "OMS",
+    "SalamAir": "OMS",
+    "Scat Air": "VSV",
+    "Shanghai Juneyao Airlines": "DKH",
+    "Shenzhen Donghai Airlines": "EPA",
+    "Sky Airline": "SKU",
+    "Sky High": "SHH",
+    "Sky High Aviation Services": "SHH",
+    "Sky High Dominicana": "SHH",
+    "SkyUp": "SQP",
+    "SkyUp Airlines": "SQP",
+    "SmartWings": "TVS",
+    "Smartwings": "TVS",
+    "Solaseed": "SNJ",
+    "Solaseed Air": "SNJ",
+    "Somon Air": "SMR",
+    "South African Airlink": "LNK",
+    "StarFlyer": "SFJ",
+    "Starflyer": "SFJ",
+    "Starlux": "SJX",
+    "Starlux Airlines": "SJX",
+    "Sun D'Or": "ERO",
+    "Sun d'Or": "ERO",
+    "Sunan Ruili Airlines": "RLH",
+    "Sundor": "ERO",
+    "Suparna Airlines": "YZR",
+    "Super Air Jet": "SJV",
+    "T'way": "TWB",
+    "T'way Air": "TWB",
+    "TACV": "TCV",
+    "TUI": "TOM",
+    "TUI Airways": "TOM",
+    "TUI fly": "TOM",
+    "TUI fly Belgium": "TOM",
+    "TUI fly Deutschland": "TOM",
+    "TUI fly Netherlands": "TOM",
+    "TUI fly Nordic": "TOM",
+    "TUIfly": "TOM",
+    "Tashi Air": "BTN",
+    "Thai AirAsia": "AXM",
+    "Thai AirAsia X": "AXM",
+    "Thai Lion Air": "TLM",
+    "Tibet Airlines": "TBA",
+    "Tigerair": "TTW",
+    "Tigerair Taiwan": "TTW",
+    "TransNusa": "TNU",
+    "TransNusa Aviation": "TNU",
+    "Turpial": "VTU",
+    "Turpial Airlines": "VTU",
+    "Tway Air": "TWB",
+    "Uganda Airlines": "UGD",
+    "Uganda National Airlines": "UGD",
+    "Urumqi Air": "CUH",
+    "Urumqi Airlines": "CUH",
+    "Volaris Costa Rica": "VOI",
+    "Volaris El Salvador": "VOI",
+    "West Air": "CHB",
+    "West Air (China)": "CHB",
+    "Wingo": "RPB",
+    "World2Fly": "WFL",
+    "Xiamen Air": "CXA",
+    "Xiamen Airlines": "CXA",
+    "XiamenAir": "CXA",
+    "Xizang Airlines": "TBA",
+    "Yangtze River Airlines": "YZR",
+    "ZIPAIR": "TZP",
+    "Zambia Airways": "AZB",
+    "Zhejiang Loong Airlines": "CDC",
+    "Zhongzhou Airlines": "HLF",
+    "Zipair": "TZP",
+    "Zipair Tokyo": "TZP",
+    "airBaltic": "BTI",
+    "flyadeal": "FAD",
+    "flydubai": "FDB",
+    "flynas": "KNE",
+    "interCaribbean Airways": "IWY",
 }
 CURATED = {_norm(k): v for k, v in _CURATED_RAW.items()}
 
