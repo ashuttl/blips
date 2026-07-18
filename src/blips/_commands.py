@@ -3,13 +3,13 @@
 A transmission is a callsign followed by chained instructions:
 
     rpa5655 l 230 c 240 s 210
-    → Brickyard 5655, turn left heading two three zero, climb and
-      maintain flight level two four zero, reduce speed two one zero.
+    → Turn left heading two three zero, climb and maintain flight level
+      two four zero, reduce speed two one zero, Brickyard 5655.
 
 ``parse()`` turns the text into instruction dicts without needing any
 aircraft state; ``resolve_callsign()`` matches the (possibly abbreviated)
-callsign against the traffic; ``readback()`` composes the pilot's answer
-once the sim has applied the instructions and knows which way is up.
+callsign against the traffic.  The sim words the readback itself, once it
+has applied the instructions and knows which way is up.
 
 Altitudes are typed in hundreds of feet, exactly as the data blocks show
 them: ``c 40`` is 4,000 ft, ``d 240`` is FL240.  Direction is always the
@@ -26,7 +26,7 @@ TELEPHONY = {
     # US majors + cargo
     "AAL": "American", "DAL": "Delta", "UAL": "United", "SWA": "Southwest",
     "JBU": "JetBlue", "ASA": "Alaska", "FFT": "Frontier Flight",
-    "NKS": "Spirit Wings", "AAY": "Allegiant", "HAL": "Hawaiian",
+    "AAY": "Allegiant", "HAL": "Hawaiian",
     "SCX": "Sun Country", "MXY": "Moxy", "FDX": "FedEx", "UPS": "UPS",
     "GTI": "Giant", "ATN": "Air Transport",
     # US regionals
@@ -53,6 +53,19 @@ TELEPHONY = {
     "MAS": "Malaysian", "THA": "Thai", "EVA": "Eva", "CAL": "Dynasty",
     "AIC": "Air India", "IGO": "Ifly", "QFA": "Qantas",
     "ANZ": "New Zealand", "JST": "Jetstar", "FJI": "Fiji",
+    # 2026 entrants, feeders & carriers reached via real-schedule spawning
+    "VXP": "Avelo", "JSX": "Bigstripe", "VTE": "Volunteer",
+    "QXE": "Horizon Air", "FLE": "Flair", "GJS": "Lindbergh",
+    "UCA": "CommutAir", "ABX": "Abex", "CJT": "Cargojet",
+    "NBT": "Longship", "LOT": "Lot", "VLG": "Vueling", "NAX": "Nor Shuttle",
+    "EWG": "Eurowings", "CFG": "Condor", "TRA": "Transavia", "PGT": "Sunturk",
+    "AEE": "Aegean", "AEA": "Europa", "ITY": "Itarrow",
+    "LAN": "Lan", "AZU": "Azul", "VIV": "Viva", "JAT": "Rocksmart",
+    "ETH": "Ethiopian", "KQA": "Kenya", "RWD": "Rwandair", "MSR": "Egyptair",
+    "RAM": "Royalair Maroc", "APK": "Peace Bird",
+    "HVN": "Vietnam Airlines", "PAL": "Philippine", "GIA": "Indonesia",
+    "VJC": "Vietjet Air", "AXM": "Red Cap", "CEB": "Cebu",
+    "TGW": "Scooter", "AKJ": "Akasa",
 }
 
 _DIGITS = {"0": "zero", "1": "one", "2": "two", "3": "three", "4": "four",
@@ -220,8 +233,3 @@ def resolve_callsign(query, aircraft):
         raise CommandError(f"nobody on frequency answers \"{query}\"")
     names = ", ".join(ac["callsign"] for ac in matches[:4])
     raise CommandError(f"multiple aircraft match \"{query}\": {names}")
-
-
-def readback(callsign, phrases):
-    """Compose the pilot's reply from already-worded instruction phrases."""
-    return f"{telephony(callsign)}, {', '.join(phrases)}."

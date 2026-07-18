@@ -5,7 +5,7 @@ currently within 250 nm of the airport (same ADS-B client the scope
 uses) and keeps the airline callsigns and types.  Their real routes fill
 in asynchronously via the route API the scope already speaks.  The
 spawner draws from this pool, so a session at TPA is Southwest 737s and
-Silver ATRs with "from Baltimore" on check-in, not a country-level
+Breeze A220s with "from Baltimore" on check-in, not a country-level
 guess — and it degrades to the country pools when offline.
 
 Each pool entry is spawned at most once per session; a callsign in the
@@ -33,12 +33,12 @@ TYPE_ALIAS = {
     "A318": "A320", "A319": "A320", "A19N": "A320", "A21N": "A321",
     "B753": "B752", "B762": "B763", "B764": "B763", "MD11": "B763",
     "A306": "B763", "A310": "B763", "A332": "B763", "A333": "B763",
-    "A339": "B763", "A346": "B77W", "A343": "B77W",
+    "A338": "A339", "A346": "B77W", "A343": "B77W",
     "B772": "B77W", "B773": "B77W", "B77L": "B77W", "B744": "B77W",
-    "B748": "B77W", "B779": "B77W", "A359": "B788", "A35K": "B788",
+    "B748": "B77W", "B779": "B77W", "A35K": "A359",
     "B787": "B788", "B789": "B788", "B78X": "B788",
     "E170": "E175", "E75L": "E175", "E75S": "E175", "E195": "E190",
-    "E290": "E190", "E195-E2": "E190", "BCS1": "E190", "BCS3": "E190",
+    "E294": "E290", "E295": "E290", "BCS1": "A223", "BCS3": "A223",
     "E145": "CRJ7", "E45X": "CRJ7", "E135": "CRJ7",
     "CRJ1": "CRJ7", "CRJ2": "CRJ7", "CRJX": "CRJ9",
     "AT43": "AT76", "AT45": "AT76", "AT72": "AT76", "AT75": "AT76",

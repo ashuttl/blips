@@ -55,11 +55,14 @@ PERF = {
     "B738": (280, 210, 140, 2300, 2100), "B739": (280, 215, 145, 2200, 2100),
     "A320": (280, 205, 138, 2200, 2000), "A321": (280, 210, 142, 2000, 2000),
     "A20N": (280, 205, 136, 2400, 2000), "B752": (280, 200, 135, 2600, 2200),
+    "A223": (280, 200, 133, 2500, 2000),   # A220-300: short-field friendly
     "E175": (270, 195, 130, 2400, 2000), "E190": (270, 200, 132, 2300, 2000),
+    "E290": (270, 200, 133, 2300, 2000),   # E195-E2
     "CRJ9": (270, 200, 135, 2200, 2100), "CRJ7": (270, 195, 132, 2200, 2100),
     "DH8D": (240, 170, 120, 1500, 1600), "AT76": (230, 165, 115, 1400, 1500),
     "B763": (280, 210, 145, 2200, 2000), "B77W": (290, 220, 150, 2000, 2000),
     "A388": (290, 225, 150, 1800, 1900), "B788": (290, 215, 145, 2300, 2000),
+    "A359": (290, 215, 145, 2200, 2000), "A339": (285, 210, 143, 2100, 2000),
     "C56X": (270, 180, 115, 3000, 2500), "GLF5": (290, 190, 130, 3500, 2800),
 }
 
@@ -83,9 +86,24 @@ def _controlled(ac):
 # notorious enough on final to carry extra spacing in the real rules.
 WAKE = {"A388": "super",
         "B77W": "heavy", "B763": "heavy", "B788": "heavy",
+        "A359": "heavy", "A339": "heavy",
         "B752": "b757"}
 WAKE_NM = {"super": 6.0, "heavy": 5.0, "b757": 4.0}   # in-trail behind one
 _WAKE_WORD = {"super": "super", "heavy": "heavy", "b757": "seven five seven"}
+
+# longest runway (ft) a type realistically uses — the spawner won't cast an
+# arrival or departure onto a field whose longest runway can't take it, so a
+# 7,200 ft strip like PWM sees narrowbodies and RJs but never a widebody.
+# Overflights (passing overhead at altitude) are exempt.  Unlisted types fit
+# anywhere.
+MIN_RWY = {
+    "B738": 6500, "B739": 6800, "A320": 6300, "A321": 6800, "A20N": 6300,
+    "A223": 5500, "B752": 6000,
+    "E175": 5800, "E190": 6000, "E290": 6200, "CRJ9": 6000, "CRJ7": 5800,
+    "DH8D": 4500, "AT76": 4500, "C56X": 5000, "GLF5": 5500,
+    "B763": 8000, "B788": 8500, "A339": 8500, "A359": 9000,
+    "B77W": 9000, "A388": 10000,
+}
 
 
 def hail(ac):
@@ -95,42 +113,88 @@ def hail(ac):
     return telephony(ac["callsign"]) + (tag or "")
 
 
-# airline → plausible TRACON fleet (types must exist in PERF)
+# airline → plausible TRACON fleet, 2026-accurate (types must exist in PERF).
+# The runway gate keeps widebodies off short fields, so entries list a
+# carrier's real metal without worrying about which airport takes it.
 FLEETS = {
-    "AAL": ("B738", "A321", "E175"), "DAL": ("B738", "A320", "A321", "B752"),
-    "UAL": ("B738", "B739", "A320"), "SWA": ("B738",),
-    "JBU": ("A320", "A321", "E190"), "ASA": ("B738", "E175"),
-    "FFT": ("A20N", "A321"), "NKS": ("A20N", "A321"),
-    "AAY": ("A320",), "SCX": ("B738",), "MXY": ("A20N", "E190"),
+    # US majors
+    "AAL": ("B738", "A320", "A321", "B77W", "B788"),
+    "DAL": ("B738", "B739", "A320", "A321", "A223", "B752", "B763",
+            "A339", "A359"),
+    "UAL": ("B738", "B739", "A320", "A321", "B752", "B763", "B77W", "B788"),
+    "SWA": ("B738",), "JBU": ("A320", "A321", "A223"),
+    "ASA": ("B738", "B739"), "FFT": ("A20N", "A321"),
+    "AAY": ("A320", "B738"), "SCX": ("B738",), "MXY": ("A223", "E190"),
+    "HAL": ("A339", "A321", "B788"), "VXP": ("B738",), "JSX": ("CRJ7",),
+    # US cargo
     "FDX": ("B763", "B752"), "UPS": ("B763",), "GTI": ("B763",),
+    "ABX": ("B763",), "CJT": ("B763",),
+    # US / Canada regionals & feeders
     "SKW": ("E175", "CRJ9", "CRJ7"), "RPA": ("E175",), "EDV": ("CRJ9",),
     "ENY": ("E175", "CRJ7"), "PDT": ("E175",), "JIA": ("CRJ9", "CRJ7"),
-    "AWI": ("CRJ7",), "EJA": ("C56X", "GLF5"), "LXJ": ("C56X", "GLF5"),
-    "ACA": ("A320", "A321", "B738"), "WJA": ("B738",),
-    "POE": ("E190", "DH8D"), "JZA": ("CRJ9", "DH8D"),
-    "AMX": ("B738",), "VOI": ("A320", "A321"), "CMP": ("B738",),
-    "AVA": ("A320",), "GLO": ("B738",),
-    "BAW": ("A320", "A321", "B77W", "B788"), "VIR": ("B788", "A388"),
-    "DLH": ("A320", "A321", "B788"), "AFR": ("A320", "A321"),
-    "KLM": ("B738", "E190"), "RYR": ("B738",), "EZY": ("A320", "A20N"),
-    "WZZ": ("A321", "A20N"), "IBE": ("A320", "A321"), "TAP": ("A320", "A321"),
-    "SAS": ("A320", "A20N"), "FIN": ("A320", "E190"), "SWR": ("A320", "A321"),
-    "AUA": ("A320",), "BEL": ("A320",), "EIN": ("A320", "A321"),
-    "ICE": ("B738",), "THY": ("A321", "B77W"), "ELY": ("B738", "B788"),
-    "UAE": ("B77W", "A388"), "QTR": ("B77W", "A320"), "ETD": ("B788",),
-    "SVA": ("A320", "B77W"), "ANA": ("B788", "B77W", "A321"),
-    "JAL": ("B788", "B738"), "KAL": ("B77W", "A321"), "AAR": ("A321",),
-    "CPA": ("B77W", "A321"), "CCA": ("B77W", "A320"), "CES": ("A320", "B788"),
-    "CSN": ("A320", "B788"), "SIA": ("B77W", "A388"), "MAS": ("B738",),
-    "THA": ("B77W",), "EVA": ("B77W",), "CAL": ("B77W",),
-    "AIC": ("B788", "A320"), "IGO": ("A320", "A321"),
-    "QFA": ("B738", "A388"), "ANZ": ("A320", "B788"), "JST": ("A320",),
-    "FJI": ("B738",),
+    "AWI": ("CRJ7",), "QXE": ("E175",), "GJS": ("CRJ7",), "UCA": ("CRJ7",),
+    "VTE": ("CRJ7",), "JZA": ("CRJ9", "DH8D"),
+    # bizjet fractional
+    "EJA": ("C56X", "GLF5"), "LXJ": ("C56X", "GLF5"),
+    # Canada
+    "ACA": ("A223", "A320", "A321", "B738", "B788", "B77W"),
+    "WJA": ("B738", "B788"), "POE": ("E290",), "FLE": ("B738",),
+    # Mexico / Central & South America
+    "AMX": ("B738", "B788"), "VOI": ("A320", "A321", "A20N"),
+    "CMP": ("B738", "B739"), "AVA": ("A320", "A321", "B788"), "GLO": ("B738",),
+    "LAN": ("A320", "A321", "B788", "B77W"),
+    "AZU": ("A20N", "E290", "AT76", "A339"), "VIV": ("A320", "A321", "A20N"),
+    "JAT": ("A320", "A20N"),
+    # UK / Europe legacy
+    "BAW": ("A320", "A321", "B77W", "B788", "A359"),
+    "VIR": ("B788", "A339", "A359"),
+    "DLH": ("A320", "A321", "A359", "B788", "A388"),
+    "AFR": ("A223", "A320", "A321", "B77W", "A359"),
+    "KLM": ("B738", "E190", "B77W", "B788"),
+    "IBE": ("A320", "A321", "A359"), "TAP": ("A320", "A321", "A339"),
+    "SAS": ("A320", "A20N", "A359"), "FIN": ("A320", "A321", "A359"),
+    "SWR": ("A320", "A321", "B77W"), "AUA": ("A320", "B788"),
+    "BEL": ("A320", "A339"), "EIN": ("A320", "A321", "A339"),
+    "LOT": ("B738", "B788", "E175"), "VLG": ("A320", "A321", "A20N"),
+    "EWG": ("A320", "A321"), "CFG": ("A20N", "A339"), "TRA": ("B738", "A321"),
+    "AEE": ("A320", "A321", "A20N"), "AEA": ("B738", "B788"),
+    "ITY": ("A320", "A321", "A339", "A359"), "TSC": ("A321", "A339"),
+    # Europe LCC
+    "RYR": ("B738",), "EZY": ("A320", "A20N", "A321"),
+    "WZZ": ("A321", "A20N", "A320"), "PGT": ("A20N", "A321", "B738"),
+    "NAX": ("B738",),
+    # Nordic / Iceland / trans-Atlantic
+    "ICE": ("B738", "B752", "A321"), "NBT": ("B788",),
+    # Middle East / Turkey / Israel
+    "THY": ("A321", "B77W", "B788", "A359"), "ELY": ("B738", "B788"),
+    "UAE": ("B77W", "A388"), "QTR": ("A320", "B77W", "A359", "A388"),
+    "ETD": ("A320", "B788", "B77W", "A388"), "SVA": ("A320", "B77W", "B788"),
+    # East Asia
+    "ANA": ("B788", "B77W", "A321", "A388"), "JAL": ("B738", "B788", "A359"),
+    "KAL": ("B77W", "A321", "A388", "B788"), "AAR": ("A321", "A359", "A388"),
+    "CPA": ("B77W", "A359", "A321"), "CCA": ("A320", "B77W", "B788"),
+    "CES": ("A320", "B77W", "A359"), "CSN": ("A320", "B77W", "A359"),
+    "CAL": ("B77W", "A359", "A321"), "EVA": ("B77W", "B788", "A321"),
+    # SE Asia / South Asia / Oceania
+    "SIA": ("B77W", "A388", "A359"), "MAS": ("B738", "A339", "A359"),
+    "THA": ("B77W", "A359", "A320"),
+    "AIC": ("A320", "A321", "B77W", "A359"), "IGO": ("A320", "A321", "A20N"),
+    "QFA": ("B738", "A339", "B788", "A388"), "ANZ": ("A320", "A321", "B788"),
+    "JST": ("A320", "A321", "B788"), "FJI": ("B738", "A359"),
+    # Africa
+    "ETH": ("B788", "A359", "B77W"), "KQA": ("B788", "B738", "E190"),
+    "RWD": ("B738", "A320", "A339"), "MSR": ("B738", "A321", "B788", "B77W"),
+    "RAM": ("B738", "B788", "E190"), "APK": ("B738", "E290", "B77W"),
+    # South / SE Asia extras
+    "HVN": ("A321", "A359", "B788"), "PAL": ("A321", "A359", "B77W"),
+    "GIA": ("B738", "B77W", "A339"), "VJC": ("A320", "A321", "A20N"),
+    "AXM": ("A320", "A20N"), "CEB": ("A320", "A321", "A339"),
+    "TGW": ("B788", "A20N", "E290"), "AKJ": ("B738",),
 }
 
 # country → airlines likely on frequency there (fallback: a world mix)
 POOLS = {
-    "US": ("AAL", "DAL", "UAL", "SWA", "JBU", "ASA", "FFT", "NKS", "AAY",
+    "US": ("AAL", "DAL", "UAL", "SWA", "JBU", "ASA", "FFT", "VXP", "AAY",
            "SCX", "MXY", "FDX", "UPS", "SKW", "RPA", "EDV", "ENY", "PDT",
            "JIA", "AWI", "EJA", "LXJ", "ACA", "WJA", "AMX", "VOI", "CMP",
            "BAW", "DLH", "UAE"),
@@ -431,20 +495,48 @@ class Sim:
                 return callsign, airline
         return f"SIM{self._counter}", "SIM"
 
+    def _runway_ok(self, actype):
+        """Will the field's longest runway take this type?  Missing runway
+        data never restricts; unlisted types (GA, bizjets) always fit."""
+        rwys = self.airport.get("rwys") or ()
+        longest = max((r["len"] for r in rwys), default=99999)
+        return MIN_RWY.get(actype, 0) <= longest
+
     def _cast_flight(self, role):
         """(callsign, actype, far_city|None) — live-sampled when possible.
 
         The pool holds flights genuinely in the air near this airport
         right now, with their real routes; the synthesized country mix
-        only plays when the pool is empty or offline.
+        only plays when the pool is empty or offline.  Arrivals and
+        departures are gated to what the field's runway can take — a
+        widebody never lands on a short strip — while overflights, passing
+        overhead at altitude, are cast exactly as drawn.
         """
         if self.pool is not None:
             pick = self.pool.draw(role)
             if pick is not None and not any(
                     ac["callsign"] == pick[0] for ac in self.aircraft):
-                return pick
+                cs, actype, extra = pick
+                if role == "overflight" or self._runway_ok(actype):
+                    return cs, actype, extra
+                # keep the real flight, but sub in a type its airline flies
+                # that this runway can actually take
+                fits = [t for t in FLEETS.get(cs[:3], ()) if self._runway_ok(t)]
+                if fits:
+                    return cs, self.rng.choice(fits), extra
         callsign, airline = self._new_callsign()
-        actype = self.rng.choice(FLEETS.get(airline, ("A320",)))
+        fleet = FLEETS.get(airline, ("A320",))
+        if role != "overflight":
+            for _ in range(8):    # re-roll past airlines with no fitting metal
+                fits = [t for t in fleet if self._runway_ok(t)]
+                if fits:
+                    fleet = fits
+                    break
+                callsign, airline = self._new_callsign()
+                fleet = FLEETS.get(airline, ("A320",))
+            else:
+                fleet = ("E175",)   # nothing fit: a regional always does
+        actype = self.rng.choice(fleet)
         return callsign, actype, None
 
     def _base(self, callsign, actype, lat, lon, alt, hdg, ias):
@@ -513,6 +605,8 @@ class Sim:
                       thr=self.sector["thr"], course=self.sector["course"],
                       felev=float(self.airport["elev"]),
                       par=dist * 16.0 + 300.0)
+        if origin:
+            ac["from"] = origin   # the far city, kept for the hover chip
         self.aircraft.append(ac)
         where = f" for {sat['name']}" if sat is not None else ""
         tail = f", from {origin}" if origin else ""
@@ -546,6 +640,8 @@ class Sim:
                 (self.airport["elev"]
                  + self.rng.choice((7000.0, 9000.0, 11000.0))) / 1000.0)
             note = f" — centre wants {say_altitude(ac['xr'])} crossing it"
+        if dest:
+            ac["to"] = dest   # the far city, kept for the hover chip
         self.aircraft.append(ac)
         off = (f"off {sat['name']}, runway {say_runway(sat['rwy'])}"
                if sat is not None
@@ -850,7 +946,8 @@ class Sim:
                 ac["phase"] = "established"
                 ac["turn_dir"] = None
                 self.say(f"{hail(ac)} established, "
-                         f"runway {ac['rwy']}", "pilot", voice=ac["callsign"])
+                         f"runway {say_runway(ac['rwy'])}", "pilot",
+                         voice=ac["callsign"])
             else:
                 return
         # established: track the centreline with a proportional nudge…
@@ -1421,7 +1518,10 @@ class Sim:
         # it — read down the two and a misheard number is there to be caught
         me = hail(ac)
         self.say(f"{me}, {', '.join(intended)}.", "tx")
-        line = f"{me}, {', '.join(phrases)}."
+        # controller leads with the callsign; the pilot trails it, the way
+        # the R/T actually runs — your echo above, their readback below.
+        body = ", ".join(phrases)
+        line = f"{body[:1].upper()}{body[1:]}, {me}."
         self.say(line, "readback", voice=ac["callsign"])
         return line
 

@@ -1,5 +1,7 @@
 """The sim: honest kinematics, ILS geometry, separation, sector rules."""
 
+import re
+
 import pytest
 
 from blips._airports import find_airport
@@ -119,7 +121,7 @@ def test_speed_envelope(sim):
     _arrival(sim)
     assert "unable" in sim.command("100 rs 120")   # below clean minimum
     ok = sim.command("100 rs 210")
-    assert "reduce speed two one zero" in ok
+    assert "reduce speed two one zero" in ok.lower()
 
 
 def test_unknown_fix_and_wrong_plan(sim):
@@ -131,7 +133,7 @@ def test_unknown_fix_and_wrong_plan(sim):
 def test_readback_uses_telephony(sim):
     _arrival(sim, callsign="RPA5655")
     line = sim.command("5655 r 270")
-    assert line.startswith("Brickyard 5655, turn right heading two seven zero")
+    assert line == "Turn right heading two seven zero, Brickyard 5655."
 
 
 def test_command_echoes_your_own_transmission(sim):
@@ -145,8 +147,10 @@ def test_command_echoes_your_own_transmission(sim):
     tx = sim.radio[-2][1]
     assert tx == ("Delta 100, descend and maintain six thousand, "
                   "reduce speed two one zero.")
-    # a clean copy reads identically top and bottom
-    assert tx == sim.radio[-1][1]
+    # controller leads with the callsign, the pilot trails it — a clean copy
+    # carries the same instruction body both ways, read down the two
+    assert sim.radio[-1][1] == ("Descend and maintain six thousand, "
+                                "reduce speed two one zero, Delta 100.")
 
 
 def test_echo_reveals_a_mishear(sim):
@@ -189,7 +193,7 @@ def test_ils_capture_glideslope_landing(sim):
     lat, lon = advance(*thr, (course + 180.0) % 360.0, 12.0)
     ac = _arrival(sim, lat=lat, lon=lon, alt=3000.0, hdg=course, ias=200.0)
     line = sim.command("100 i")
-    assert "cleared ILS runway" in line
+    assert "cleared ils runway" in line.lower()
     _run(sim, 60)
     assert ac["phase"] == "established"
     _run(sim, 600)
@@ -253,7 +257,7 @@ def test_unstable_approach_goes_around(sim):
 def test_hold_orbits_and_vectors_cancel_it(sim):
     ac = _arrival(sim, alt=8000.0)
     line = sim.command("100 hold")
-    assert "hold present position, right turns" in line
+    assert "hold present position, right turns" in line.lower()
     start = (ac["lat"], ac["lon"])
     _run(sim, 300)
     assert ac["phase"] == "hold"
@@ -268,7 +272,7 @@ def test_hold_at_a_fix(sim):
     spot = sim.sector["fixes"][fix]
     ac = _arrival(sim, alt=9000.0)
     line = sim.command(f"100 hold {fix.lower()}")
-    assert f"hold at {fix}" in line
+    assert f"hold at {fix}".lower() in line.lower()
     _run(sim, 900)
     assert haversine_nm(ac["lat"], ac["lon"], *spot) < 6.0
 
@@ -384,7 +388,7 @@ def test_departure_handoff_rules(sim):
     # teleport them out to their exit fix: now centre wants them
     dep["lat"], dep["lon"] = sim.sector["fixes"][dep["fix"]]
     line = sim.command(f"{suffix} ho")
-    assert "switching" in line
+    assert "switching" in line.lower()
     assert sim.score == 50
 
 
@@ -414,6 +418,44 @@ def test_type_aliases_land_in_perf():
         assert alias in PERF, f"{real} → {alias} but PERF doesn't know it"
 
 
+def test_runway_gate_keeps_widebodies_off_short_fields():
+    """A 7,200 ft field (PWM) never casts a widebody arrival or departure;
+    a long field (JFK) can take anything.  The gate reads each airport's
+    own runways, so it's airport-agnostic, not a KPWM special case."""
+    from blips._sim import Sim
+    wide = {"B763", "B788", "B77W", "A388", "A359", "A339"}
+    pwm = Sim(find_airport("kpwm"), seed=3)
+    assert not any(pwm._runway_ok(t) for t in wide)   # 7,200 ft can't take one
+    assert pwm._runway_ok("B738") and pwm._runway_ok("A223")
+    for _ in range(300):
+        assert pwm._cast_flight("arrival")[1] not in wide
+        assert pwm._cast_flight("departure")[1] not in wide
+    jfk = Sim(find_airport("kjfk"), seed=3)
+    assert all(jfk._runway_ok(t) for t in wide)
+
+
+def test_hover_chip_shows_origin_and_destination():
+    """Arrivals carry 'from <city>' in the hover chip and departures 'to
+    <city>' — the game's parity with the live scope's route line."""
+    from blips._game import _strip_card
+
+    def plain(lines):
+        return " ".join(re.sub(r"\x1b\[[0-9;]*m", "", ln) for ln in lines)
+
+    arr = {"plan": "arrival", "callsign": "MXY4964", "actype": "A223",
+           "fix": "ICTEB", "rwy": "11", "from": "Charleston", "alt": 6000,
+           "tgt_alt": 3000, "hdg": 110, "tgt_hdg": 110, "ias": 250,
+           "phase": "cruise"}
+    dep = {"plan": "departure", "callsign": "RPA606", "actype": "CRJ7",
+           "fix": "AUG", "to": "Newark", "alt": 2000, "tgt_alt": 11000,
+           "hdg": 290, "tgt_hdg": 290, "ias": 210, "phase": "cruise"}
+    assert "from Charleston" in plain(_strip_card(arr))
+    assert "to Newark" in plain(_strip_card(dep))
+    # a flight whose far city is unknown simply omits the line
+    del arr["from"]
+    assert "from" not in plain(_strip_card(arr))
+
+
 # -- weather ------------------------------------------------------------------
 
 def _wall_east_of(lon0):
@@ -429,7 +471,7 @@ def test_vector_into_a_cell_is_refused(sim):
     line = sim.command("100 r 90")      # straight into the wall
     assert "into a cell" in line
     assert ac["tgt_hdg"] == 360.0       # instruction not applied
-    assert "turn left heading" in sim.command("100 l 270")  # away: fine
+    assert "turn left heading" in sim.command("100 l 270").lower()  # away: fine
 
 
 def test_pilots_deviate_when_ignored(sim):
@@ -455,7 +497,7 @@ def test_emergency_exempt_from_weather(sim):
                   hdg=360.0)
     sim.wx_sample = _wall_east_of(ac["lon"] + 0.05)
     sim._declare_emergency(ac)
-    assert "turn right heading" in sim.command("100 r 90")
+    assert "turn right heading" in sim.command("100 r 90").lower()
 
 
 def test_wx_sampler_reads_intensity_not_coverage():
@@ -489,7 +531,7 @@ def test_ils_refused_with_a_cell_on_the_final(sim):
     assert "cell on the final" in line
     assert ac["phase"] != "cleared"          # clearance withheld
     sim.wx_sample = lambda la, lo: 0.0        # the cell moves off
-    assert "cleared ILS runway" in sim.command("100 i")
+    assert "cleared ils runway" in sim.command("100 i").lower()
 
 
 def test_emergency_takes_the_ils_through_weather(sim):
@@ -499,7 +541,7 @@ def test_emergency_takes_the_ils_through_weather(sim):
     ac = _arrival(sim, lat=lat, lon=lon, alt=3000.0, hdg=course, ias=180.0)
     sim.wx_sample = lambda la, lo: 1.0        # wall-to-wall weather
     sim._declare_emergency(ac)
-    assert "cleared ILS runway" in sim.command("100 i")
+    assert "cleared ils runway" in sim.command("100 i").lower()
 
 
 # -- the day changes ------------------------------------------------------------
@@ -577,7 +619,7 @@ def test_radios_come_back(sim):
     assert ac["nordo_until"] is None
     assert ac["squawk"] != "7600"
     assert any("back with you" in line for _t, line, _k in sim.radio)
-    assert "turn left heading" in sim.command("100 l 360")
+    assert "turn left heading" in sim.command("100 l 360").lower()
 
 
 # -- reaction time ----------------------------------------------------------------
@@ -777,9 +819,9 @@ def _final_pair(sim, lead_type, lead_nm, foll_type, foll_nm):
 def test_heavies_carry_the_suffix_on_frequency(sim):
     _arrival(sim, callsign="BAW12", actype="B77W")
     line = sim.command("12 l 270")
-    assert line.startswith("Speedbird 12 heavy,")
+    assert line.endswith(", Speedbird 12 heavy.")
     _arrival(sim, callsign="DAL200", actype="B738")
-    assert sim.command("200 l 270").startswith("Delta 200,")
+    assert sim.command("200 l 270").endswith(", Delta 200.")
 
 
 def test_three_miles_behind_a_heavy_goes_around(sim):
@@ -870,7 +912,7 @@ def test_misheard_readback_is_flown_until_corrected(sim):
     sim.hearback_p = 1.0
     sim._elapsed = 300.0                # past the settling-in grace
     line = sim.command("100 d 70")
-    assert "descend and maintain" in line
+    assert "descend and maintain" in line.lower()
     assert ac["tgt_alt"] != 7000.0      # they heard a different number
     assert abs(ac["tgt_alt"] - 7000.0) == 1000.0
     assert "seven thousand" not in line  # and the readback says so
@@ -946,7 +988,7 @@ def test_descent_below_mva_is_refused(hilly):
     # same descent over the flat side is fine
     _arrival(hilly, callsign="DAL200",
              lat=ap["lat"] + 0.3, lon=ap["lon"] - 0.5, alt=12000.0)
-    assert "descend and maintain" in hilly.command("200 d 40")
+    assert "descend and maintain" in hilly.command("200 d 40").lower()
 
 
 def test_descending_into_rising_terrain_levels_off(hilly):

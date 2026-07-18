@@ -127,7 +127,7 @@ def test_tfc_calls_the_target_and_pilot_sees_it(sim):
     t = _vfr(sim, lat=a["lat"] + 3.0 / 60.0, lon=a["lon"], alt=2400.0)
     sim.rng.random = lambda: 0.0         # eyes like a hawk today
     line = sim.command("100 tfc")
-    assert "traffic in sight" in line
+    assert "traffic in sight" in line.lower()
     assert t["hex"] in a["visual"]
     assert any("twelve o'clock" in said and kind == "atc"
                for _t, said, kind in sim.radio)
@@ -137,7 +137,7 @@ def test_tfc_negative_contact_grants_nothing(sim):
     _vfr(sim, lat=a["lat"] + 7.0 / 60.0, lon=a["lon"], alt=2400.0)
     sim.rng.random = lambda: 0.99        # staring into the haze
     line = sim.command("100 tfc")
-    assert "negative contact" in line
+    assert "negative contact" in line.lower()
     assert not a.get("visual")
 
 def test_tfc_with_an_empty_sky(sim):
@@ -212,7 +212,7 @@ def test_satellite_arrival_lands_at_the_satellite(sim):
     ac.update(sat=True, tag=sat["code"], felev=float(sat["elev"]),
               rwy=sat["rwy"], thr=sat["thr"], course=sat["course"])
     line = sim.command("100 i")
-    assert "cleared ILS" in line
+    assert "cleared ils" in line.lower()
     _run(sim, 420)
     assert sim.landed == 1
 
@@ -249,7 +249,7 @@ def test_saturated_center_refuses_handoffs(sim):
     assert "sector's full" in line
     assert dep["phase"] != "handed"
     sim._center_until = 0.0
-    assert "switching" in sim.command(f"{dep['callsign']} ho")
+    assert "switching" in sim.command(f"{dep['callsign']} ho").lower()
 
 def test_crossing_restriction_blocks_a_low_handoff(sim):
     dep = _departure_at_fix(sim)
@@ -257,7 +257,7 @@ def test_crossing_restriction_blocks_a_low_handoff(sim):
     line = sim.command(f"{dep['callsign']} ho")
     assert "climb them first" in line
     sim.command(f"{dep['callsign']} c 110")
-    assert "switching" in sim.command(f"{dep['callsign']} ho")
+    assert "switching" in sim.command(f"{dep['callsign']} ho").lower()
 
 
 # -- the scope's new vocabulary ----------------------------------------------

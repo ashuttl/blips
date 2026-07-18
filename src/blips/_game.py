@@ -74,10 +74,14 @@ def _strip_card(ac):
     elif plan == "arrival":
         where = f"{ac['tag']} " if ac.get("tag") else ""
         job = f"arrival via {ac['fix']} → {where}rwy {ac['rwy']}"
+        if ac.get("from"):
+            route = f"from {ac['from']}"
     else:
         off = f"off {ac['tag']} " if ac.get("tag") else ""
         cross = (f" · cross at {ac['xr']:,.0f}+ ft" if ac.get("xr") else "")
         job = f"departure {off}→ {ac['fix']}{cross}"
+        if ac.get("to"):
+            route = f"to {ac['to']}"
     if plan in ("vfr", "overflight", "balloon"):
         state = f"{ac['alt']:,.0f} ft · {ac['gs']:.0f} kt"
     else:
