@@ -463,19 +463,22 @@ def build_sector(airport):
     """Fixes and active runway for an airport, seeded by its ICAO code.
 
     The corner posts are real: the best radio navaid in each 45° octant
-    of the gate band, VORs first, the way TRACON gates always were.  A
-    synthesized five-letter fix fills any octant the real world left
-    empty.  Deterministic per airport either way — TPA's sector is
-    always TPA's sector, so learning it means something.
+    of the gate band, VORs first, the way TRACON gates always were, then a
+    real named waypoint where no navaid stands (the FAA CIFP fixes).  Only
+    an octant the real world left with neither — off the CIFP's coverage,
+    so outside the US — falls back to a synthesized five-letter fix.
+    Deterministic per airport either way — TPA's sector is always TPA's
+    sector, so learning it means something.
 
     A real approach control rarely works one field: the nearest airport
     with a jet runway inside the sector becomes the satellite, and some
     of the traffic is theirs.
     """
-    from blips._airports import airports_near, navaids_near
+    from blips._airports import airports_near, fixes_near, navaids_near
     rng = random.Random(airport["icao"])
     lat, lon = airport["lat"], airport["lon"]
-    candidates = navaids_near(lat, lon, *GATE_BAND_NM)
+    candidates = (navaids_near(lat, lon, *GATE_BAND_NM)
+                  + fixes_near(lat, lon, *GATE_BAND_NM))
     ideal = sum(GATE_BAND_NM) / 2.0
 
     fixes, names, entries, exits = {}, set(), [], []

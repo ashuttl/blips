@@ -90,6 +90,42 @@ def navaids_near(lat, lon, min_nm, max_nm):
     return out
 
 
+_FIXES = None
+
+
+def load_fixes():
+    """The vendored named-waypoint list (see tools/build_fixes.py)."""
+    global _FIXES
+    if _FIXES is None:
+        path = os.path.join(os.path.dirname(__file__), "data",
+                            "fixes.json.gz")
+        with gzip.open(path, "rt", encoding="utf-8") as fh:
+            _FIXES = json.load(fh)["fixes"]
+    return _FIXES
+
+
+def fixes_near(lat, lon, min_nm, max_nm):
+    """Named waypoints in a distance band: (dist_nm, bearing, fix).
+
+    Same cheap prefilter as navaids_near.  Fixes carry no radio type, so
+    they tag along as ``type: "WPT"`` — good enough to name a gate the real
+    world left without a navaid, but ranked behind every real navaid.
+    """
+    out = []
+    coslat = max(0.2, math.cos(math.radians(lat)))
+    max_deg = max_nm / 60.0 + 0.5
+    for fix in load_fixes():
+        if (abs(fix["lat"] - lat) > max_deg
+                or abs(fix["lon"] - lon) * coslat > max_deg):
+            continue
+        d = haversine_nm(lat, lon, fix["lat"], fix["lon"])
+        if min_nm <= d <= max_nm:
+            nav = {"id": fix["id"], "name": fix["id"], "type": "WPT",
+                   "lat": fix["lat"], "lon": fix["lon"]}
+            out.append((d, bearing_to(lat, lon, fix["lat"], fix["lon"]), nav))
+    return out
+
+
 def airports_near(lat, lon, min_nm, max_nm):
     """Airports in a distance band around a point: (dist_nm, airport),
     nearest first.  Same cheap prefilter as navaids_near."""

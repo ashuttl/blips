@@ -379,6 +379,27 @@ def test_sector_gates_are_real_navaids_where_possible():
     assert "LAL" in s["fixes"] and "SRQ" in s["fixes"]
 
 
+def test_us_gates_are_all_real_fixes_or_navaids():
+    # The CIFP covers the US, so a US field invents no gates at all — every
+    # corner post is a real navaid or a real named waypoint (no more ICTEB).
+    from blips._airports import load_fixes, load_navaids
+    real = ({n["id"] for n in load_navaids()} | {f["id"] for f in load_fixes()})
+    for code in ("kpwm", "ktpa", "kjfk", "klax"):
+        s = build_sector(find_airport(code))
+        invented = [g for g in s["fixes"] if g not in real]
+        assert not invented, f"{code} invented gates: {invented}"
+
+
+def test_ex_cifp_field_still_degrades_to_synthesized_gates():
+    # Sydney is off the CIFP's coverage: navaids fill what octants they can,
+    # the rest fall back to synthesized fixes rather than leaving a hole.
+    from blips._airports import load_fixes, load_navaids
+    real = ({n["id"] for n in load_navaids()} | {f["id"] for f in load_fixes()})
+    s = build_sector(find_airport("yssy"))
+    assert len(s["fixes"]) == 8
+    assert any(g not in real for g in s["fixes"])   # some are synthesized
+
+
 def test_shift_starts_populated():
     s = Sim(find_airport("tpa"), seed=1)
     arrivals = [a for a in s.aircraft if a["plan"] == "arrival"]

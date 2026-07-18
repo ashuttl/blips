@@ -120,8 +120,11 @@ fields with real runways). The corner posts are **real radio navaids** —
 the best VOR/NDB in each 45° octant of the gate band, from the same
 public-domain dataset — so Heathrow's gates are Barkway, Mayfield,
 Southampton and Daventry, and learning a sector means learning its actual
-geography. A synthesized five-letter fix fills any octant the real world
-left empty. Deterministic per airport, always.
+geography. Where no navaid stands, a **real named waypoint** takes the
+gate (the FAA's [CIFP](https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/)
+fixes, public domain), so a US sector's gates are its true fixes end to
+end. Only an octant off the CIFP's coverage — outside the US — falls back
+to a synthesized five-letter fix. Deterministic per airport, always.
 
 Arrivals check in at entry gates between 11,000 and 16,000 ft; your job
 ends when they're established on the localizer — cleared, coupled, the
