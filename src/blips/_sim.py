@@ -65,6 +65,9 @@ PERF = {
     "A388": (290, 225, 150, 1800, 1900), "B788": (290, 215, 145, 2300, 2000),
     "A359": (290, 215, 145, 2200, 2000), "A339": (285, 210, 143, 2100, 2000),
     "C56X": (270, 180, 115, 3000, 2500), "GLF5": (290, 190, 130, 3500, 2800),
+    # 9-seat commuter piston twins — Cape Air's metal, slower finals than a
+    # turboprop (Cessna 402, Tecnam P2012 Traveller)
+    "C402": (175, 110, 95, 1200, 1000), "P212": (160, 100, 90, 1100, 900),
 }
 
 # the sky that isn't yours: GA types that wander the sector VFR, squawking
@@ -252,7 +255,7 @@ FLEETS = {
     "HYM": ("A320", "A321", "A339"),
     "IWY": ("AT76", "CRJ9"),
     "JYH": ("B738",),
-    "KAP": ("DH8D",),
+    "KAP": ("C402", "P212"),
     "KEM": ("CRJ9", "CRJ7", "DH8D"),
     "KMM": ("A20N",),
     "KNA": ("B738",),
