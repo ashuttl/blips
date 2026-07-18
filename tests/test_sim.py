@@ -437,16 +437,84 @@ def test_neighbor_arrival_descends_toward_its_own_field():
     for _ in range(8):
         sim._spawn_neighbor()
     arr = next(a for a in sim.aircraft
-               if a["plan"] == "neighbor" and a["neighbor_kind"] == "arrival")
+               if a["plan"] == "neighbor" and a["nav_kind"] == "arrival")
     start_alt = arr["alt"]
-    start_d = haversine_nm(arr["lat"], arr["lon"], *arr["neighbor_field"])
+    start_d = haversine_nm(arr["lat"], arr["lon"], *arr["nav_field"])
     for _ in range(120):
         sim._fly(arr, 3.0)
         if not arr.get("nav"):
             break
     assert arr["alt"] < start_alt               # came down
     assert haversine_nm(arr["lat"], arr["lon"],
-                        *arr["neighbor_field"]) < start_d   # and closer in
+                        *arr["nav_field"]) < start_d   # and closer in
+
+
+def _pwm():
+    s = Sim(find_airport("kpwm"), seed=4)
+    s.hearback_p = 0.0
+    s.react_s = (0.0, 0.0)
+    s._next_arrival = s._next_departure = s._next_request = 1e9
+    s._next_vfr = s._next_over = s._next_sat_dep = s._next_neighbor = 1e9
+    s._balloon_event = 2
+    s.aircraft.clear()
+    return s
+
+
+def test_clearing_an_arrival_onto_a_star():
+    s = _pwm()
+    s._spawn_arrival(allow_sat=False)
+    a = s.aircraft[-1]
+    line = s.command(f"{a['callsign']} via CDOGG4")     # a real KPWM STAR
+    assert "descend via the cdogg four arrival" in line.lower()
+    assert a["phase"] == "nav" and a["nav"] and a["via_name"] == "CDOGG4"
+    assert _controlled(a)                               # still yours to work
+    start_alt = a["alt"]
+    t = 0.0
+    s.tick(t)
+    for _ in range(120):
+        t += 3.0
+        s.tick(t)
+    assert a["alt"] < start_alt                         # it descends the STAR
+
+
+def test_wrong_procedure_kind_and_unknown_are_refused():
+    s = _pwm()
+    s._spawn_arrival(allow_sat=False)
+    a = s.aircraft[-1]
+    assert "is a departure" in s.command(f"{a['callsign']} via HSKEL4")
+    assert "unfamiliar" in s.command(f"{a['callsign']} via NOPE9")
+
+
+def test_a_vector_cancels_the_procedure():
+    s = _pwm()
+    s._spawn_arrival(allow_sat=False)
+    a = s.aircraft[-1]
+    s.command(f"{a['callsign']} via CDOGG4")
+    assert a["phase"] == "nav"
+    s.command(f"{a['callsign']} l 200")                 # taking it back by hand
+    assert a["phase"] == "cruise" and not a["nav"] and not a["via_name"]
+
+
+def test_an_altitude_amends_a_procedure_without_cancelling():
+    s = _pwm()
+    s._spawn_departure()
+    d = s.aircraft[-1]
+    s.command(f"{d['callsign']} via HSKEL4")            # a real KPWM SID
+    assert d["phase"] == "nav"
+    s.command(f"{d['callsign']} c 230")
+    assert d["phase"] == "nav" and d["nav"]             # still on the SID
+    assert d["cruise_alt"] == 23000.0                   # ceiling amended
+
+
+def test_ex_cifp_field_declines_a_procedure():
+    s = Sim(find_airport("egll"), seed=1)
+    s.hearback_p = 0.0
+    s._next_arrival = s._next_vfr = s._next_over = 1e9
+    s._next_sat_dep = s._next_neighbor = s._next_departure = 1e9
+    s.aircraft.clear()
+    s._spawn_arrival(allow_sat=False)
+    a = s.aircraft[-1]
+    assert "unfamiliar" in s.command(f"{a['callsign']} via CDOGG4")
 
 
 def test_shift_starts_populated():

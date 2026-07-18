@@ -49,8 +49,8 @@ RADIO_COLORS = {
 TERRAIN_TINT = (126, 96, 58)   # high ground, as a dim warm wash
 
 HINT = ("callsign then:  l/r hdg · c/d alt · rs/is spd · s resume · "
-        "dct FIX · hold [FIX] · i [rwy] · tfc · ho · unable  —  ? help · "
-        "log · voice · proc · pause · quit")
+        "dct FIX · via PROC · hold [FIX] · i [rwy] · tfc · ho · unable  —  "
+        "? help · log · voice · proc · pause · quit")
 
 
 def _strip_card(ac):

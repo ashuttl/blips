@@ -44,6 +44,13 @@ def test_bare_ils_and_bare_s():
     assert ins == [{"kind": "ils", "rwy": None}, {"kind": "speed", "kt": None}]
 
 
+def test_via_procedure():
+    _, ins = parse("55 via cdogg4")
+    assert ins == [{"kind": "procedure", "name": "CDOGG4"}]
+    with pytest.raises(CommandError):
+        parse("55 via")               # a procedure clearance needs a name
+
+
 def test_callsign_forgives_a_space():
     assert parse("ual 71 l 230")[0] == "ual71"
     assert parse("ual71 l 230")[0] == "ual71"

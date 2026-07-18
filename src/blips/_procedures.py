@@ -236,3 +236,68 @@ def flow_path(airport, active_rwy, kind, rng):
         if len(pts) >= 2:
             return proc["n"], pts
     return None
+
+
+def find_named(icao, name):
+    """The procedure at a field with this name (case-insensitive), or None."""
+    want = (name or "").strip().upper()
+    for proc in procedures_for(icao):
+        if proc["n"].upper() == want:
+            return proc
+    return None
+
+
+def build_join(airport, active_rwy, proc, ref):
+    """The fix sequence to fly for a named procedure, from the point nearest
+    ``ref`` onward — how a controller joins a plane onto a published routing.
+
+    For a STAR the sequence runs entry → common → runway (stopping at the
+    last real fix, short of the field, where the approach takes over); for a
+    SID it runs runway → common → exit, out of the field.  The entry (or
+    exit) transition is the one whose join fix sits nearest ``ref``, so the
+    plane joins where it already is.  Returns [] when nothing resolves.
+    """
+    active = _rwy_digits(active_rwy)
+    field = (airport["lat"], airport["lon"])
+    enroute, common, runway = [], None, None
+    for tr in proc["t"]:
+        v = tr["v"] or ""
+        if v.startswith("RW"):
+            if _serves(v, active):
+                runway = tr
+        elif v == "":
+            common = tr
+        else:
+            enroute.append(tr)
+    star = proc["k"] == "STAR"
+
+    def pts_of(tr):
+        out = []
+        for leg in (tr["legs"] if tr else ()):
+            p = _resolve(leg, airport)
+            if p is None or haversine_nm(field[0], field[1], *p) < 0.6:
+                continue                          # drop the field-centre legs
+            if not out or haversine_nm(out[-1][0], out[-1][1], *p) > 0.2:
+                out.append(p)
+        return out
+
+    common_pts, runway_pts = pts_of(common), pts_of(runway)
+    best = None
+    for entry in (enroute or [None]):
+        e_pts = pts_of(entry)
+        seq = (e_pts + common_pts + runway_pts if star
+               else runway_pts + common_pts + e_pts)
+        merged = []
+        for p in seq:
+            if not merged or haversine_nm(merged[-1][0], merged[-1][1],
+                                          *p) > 0.2:
+                merged.append(p)
+        if not merged:
+            continue
+        ji = min(range(len(merged)),
+                 key=lambda i: haversine_nm(ref[0], ref[1], *merged[i]))
+        nav = merged[ji:]
+        d = haversine_nm(ref[0], ref[1], *nav[0])
+        if best is None or d < best[0]:
+            best = (d, nav)
+    return best[1] if best else []

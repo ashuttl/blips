@@ -276,7 +276,7 @@ _WORDS = frozenset((
     "l", "r", "left", "right", "c", "d", "climb", "descend",
     "rs", "is", "reduce", "increase", "s", "dct", "direct",
     "i", "ils", "ho", "handoff", "co", "hold", "tfc", "traffic",
-    "u", "unable", "neg",
+    "u", "unable", "neg", "via",
 ))
 
 
@@ -338,6 +338,7 @@ def parse(text):
         {"kind": "speed",   "kt": 210, "dir": "reduce"|"increase"}
         {"kind": "speed",   "kt": None}              # resume normal speed
         {"kind": "direct",  "fix": "LOOSE"}
+        {"kind": "procedure", "name": "CDOGG4"}       # join a SID/STAR
         {"kind": "ils",     "rwy": "19L"|None}
         {"kind": "handoff"}
         {"kind": "traffic"}                           # call the VFR target
@@ -383,6 +384,11 @@ def parse(text):
             if i + 1 >= len(tokens):
                 raise CommandError("direct where?")
             out.append({"kind": "direct", "fix": tokens[i + 1].upper()})
+            i += 2
+        elif t == "via":
+            if i + 1 >= len(tokens):
+                raise CommandError("via which procedure?")
+            out.append({"kind": "procedure", "name": tokens[i + 1].upper()})
             i += 2
         elif t in ("i", "ils"):
             rwy = None

@@ -168,9 +168,10 @@ def data_block(ac):
     else:
         block = (f"{ac['callsign']} {round(ac['alt'] / 100):03d}"
                  f"{trend_arrow(ac)}")
-    # the scratchpad: a satellite-field arrival wears its destination the
-    # way a real STARS track does, so the wrong airport never sneaks up
-    tag = ac.get("tag")
+    # the scratchpad: a satellite-field arrival wears its destination, and
+    # one flying a named procedure wears the procedure — the way a real
+    # STARS track does, so what a plane is doing never sneaks up on you
+    tag = ac.get("via_name") or ac.get("tag")
     return f"{block} {tag}" if tag else block
 
 

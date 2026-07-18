@@ -28,7 +28,7 @@ from blips._commands import (
 from blips._geo import (
     advance, bearing_to, cross_along_track, haversine_nm, turn_delta,
 )
-from blips._procedures import flow_path
+from blips._procedures import build_join, find_named, flow_path
 from blips._schedules import far_city, schedule_for
 
 SECTOR_NM = 45.0          # boundary ring radius
@@ -438,6 +438,15 @@ _NATO = ("alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf",
          "victor", "whiskey", "xray", "yankee", "zulu")
 
 
+def say_proc(name):
+    """'CDOGG4' → 'CDOGG four' — the name spoken, the revision as a digit."""
+    i = len(name)
+    while i > 0 and name[i - 1].isdigit():
+        i -= 1
+    word, num = name[:i], name[i:]
+    return f"{word} {say_digits(num)}" if num else word
+
+
 def say_runway(rwy):
     """'01L' → 'one left' — digits spoken, side spelled out."""
     num = "".join(c for c in rwy if c.isdigit())
@@ -829,9 +838,9 @@ class Sim:
             "ias": ias, "hdg": hdg, "tgt_hdg": hdg, "turn_dir": None,
             "tgt_alt": alt, "tgt_ias": ias,
             "perf": PERF.get(actype) or GA_PERF[actype],
-            "phase": "cruise",   # cruise | cleared | established | handed
+            "phase": "cruise",   # cruise | cleared | established | handed | nav
             "plan": "arrival", "fix": None, "rwy": None, "thr": None,
-            "course": None, "delay": 0.0,
+            "course": None, "delay": 0.0, "nav": None, "via_name": None,
         }
 
     def _spawn_arrival(self, allow_sat=True):
@@ -1053,8 +1062,8 @@ class Sim:
             ac = self._base(callsign, actype, spawn[0], spawn[1], alt, hdg,
                             250.0)
             ac.update(plan="neighbor", dim=True, nav=nav,
-                      neighbor_field=(ap["lat"], ap["lon"]),
-                      neighbor_kind=kind, felev=felev, cruise_alt=cruise,
+                      nav_field=(ap["lat"], ap["lon"]),
+                      nav_kind=kind, felev=felev, cruise_alt=cruise,
                       tag=end["code"], limited=True)
             self.aircraft.append(ac)
             return
@@ -1277,8 +1286,9 @@ class Sim:
 
     def _fly_nav(self, ac):
         """Fly an ordered list of fixes: steer for the next one, drop it as
-        it's reached, and ride a plain descent or climb against the field
-        the route belongs to.  Uncontrolled procedural traffic flies this."""
+        it's reached, and ride a plain descent or climb against the field the
+        route belongs to.  Both a neighbour's uncontrolled traffic and one of
+        your own cleared onto a procedure fly this."""
         nav = ac["nav"]
         while nav and haversine_nm(ac["lat"], ac["lon"],
                                    nav[0][0], nav[0][1]) < 1.5:
@@ -1287,9 +1297,9 @@ class Sim:
             return
         ac["tgt_hdg"] = bearing_to(ac["lat"], ac["lon"], nav[0][0], nav[0][1])
         ac["turn_dir"] = None
-        flat, flon = ac["neighbor_field"]
+        flat, flon = ac["nav_field"]
         dist = haversine_nm(ac["lat"], ac["lon"], flat, flon)
-        slope = 300.0 if ac["neighbor_kind"] == "arrival" else 450.0
+        slope = 300.0 if ac["nav_kind"] == "arrival" else 450.0
         ac["tgt_alt"] = max(ac["felev"],
                             min(ac["cruise_alt"], ac["felev"] + dist * slope))
 
@@ -1643,7 +1653,7 @@ class Sim:
                 down = ac.get("balloon_down")
                 # a neighbour's arrival is done when it reaches its own field
                 landed_next_door = (ac["plan"] == "neighbor"
-                                    and ac.get("neighbor_kind") == "arrival"
+                                    and ac.get("nav_kind") == "arrival"
                                     and not ac.get("nav"))
                 gone = landed_next_door or (
                     down is not None and self._elapsed >= down) or (
@@ -1993,8 +2003,9 @@ class Sim:
             self._wx_check(ac, hdg)
             self._stage(ac, due, tgt_hdg=hdg, turn_dir=ins["dir"])
             ac["wx_deviating"] = False
-            if ac["phase"] in ("cleared", "established", "hold"):
-                ac["phase"] = "cruise"     # vectored off approach or hold
+            if ac["phase"] in ("cleared", "established", "hold", "nav"):
+                ac["phase"] = "cruise"     # vectored off approach/hold/proc
+            ac["nav"] = ac["via_name"] = None
             return self._spoken(ac, ins)
         if kind == "alt":
             up = ins["alt_ft"] > ac["alt"]
@@ -2010,7 +2021,12 @@ class Sim:
                     raise CommandError(
                         f"unable {say_altitude(ins['alt_ft'])} — minimum "
                         f"vectoring altitude here is {say_altitude(floor)}")
-            self._stage(ac, due, tgt_alt=float(ins["alt_ft"]))
+            fields = {"tgt_alt": float(ins["alt_ft"])}
+            if ac["phase"] == "nav":
+                # an altitude on a procedure amends it, doesn't cancel it —
+                # "climb via the SID" then "climb and maintain FL230"
+                fields["cruise_alt"] = float(ins["alt_ft"])
+            self._stage(ac, due, **fields)
             ac["terrain_stop"] = False
             ac["req"] = None       # a new altitude answers a lower/higher ask
             return self._spoken(ac, ins)
@@ -2043,9 +2059,52 @@ class Sim:
             self._stage(ac, due, tgt_hdg=hdg, turn_dir=None)
             ac["wx_deviating"] = False
             ac["req"] = None       # sending them direct answers a direct ask
-            if ac["phase"] in ("cleared", "established", "hold"):
+            if ac["phase"] in ("cleared", "established", "hold", "nav"):
                 ac["phase"] = "cruise"
+            ac["nav"] = ac["via_name"] = None
             return f"direct {ins['fix']}"
+        if kind == "procedure":
+            if ac["plan"] not in ("arrival", "departure"):
+                raise CommandError(f"unable — {me} isn't yours to route")
+            if ac.get("sat"):
+                raise CommandError(f"unable — {me} is working the satellite "
+                                   "field, vectors or the ILS only")
+            proc = find_named(self.airport["icao"], ins["name"])
+            if proc is None:
+                raise CommandError(f"unable — {me} is unfamiliar with "
+                                   f"{ins['name']}")
+            want = "STAR" if ac["plan"] == "arrival" else "SID"
+            if proc["k"] != want:
+                is_a = {"STAR": "an arrival", "SID": "a departure"}.get(
+                    proc["k"], "an approach")
+                mine = "an arrival" if ac["plan"] == "arrival" else "a departure"
+                raise CommandError(f"unable — {ins['name']} is {is_a}, "
+                                   f"{me} is {mine}")
+            nav = build_join(self.airport, self.sector["rwy"], proc,
+                             (ac["lat"], ac["lon"]))
+            if not nav:
+                raise CommandError(
+                    f"unable {ins['name']} — nothing of it serves runway "
+                    f"{say_runway(self.sector['rwy'])}")
+            join = nav[0]
+            to_join = bearing_to(ac["lat"], ac["lon"], join[0], join[1])
+            if (abs(turn_delta(ac["hdg"], to_join)) > 135.0
+                    and haversine_nm(ac["lat"], ac["lon"], *join) > 6.0):
+                raise CommandError(f"unable — {me} isn't positioned to join "
+                                   f"{ins['name']}, we'll take vectors")
+            self._wx_check(ac, to_join)
+            plan = ac["plan"]
+            cruise = (ac["alt"] if plan == "arrival"
+                      else max(ac["tgt_alt"], self.sector["elev"] + 12000.0))
+            self._stage(ac, due, phase="nav", nav=list(nav), turn_dir=None,
+                        nav_field=(self.airport["lat"], self.airport["lon"]),
+                        nav_kind=plan, felev=float(self.sector["elev"]),
+                        cruise_alt=float(cruise), via_name=proc["n"])
+            ac["req"] = None
+            ac["wx_deviating"] = False
+            verb = "descend" if plan == "arrival" else "climb"
+            noun = "arrival" if plan == "arrival" else "departure"
+            return f"{verb} via the {say_proc(proc['n'])} {noun}"
         if kind == "traffic":
             # a traffic call on the nearest 1200 code: the pilot who gets
             # the target in sight keeps it there, and the near-miss that
@@ -2107,6 +2166,7 @@ class Sim:
                 ac["hold_at"] = (ac["lat"], ac["lon"])
                 where = "present position"
             ac["phase"] = "hold"
+            ac["nav"] = ac["via_name"] = None
             return f"hold {where}, right turns"
         if kind == "ils":
             if ac["plan"] != "arrival":
@@ -2153,7 +2213,8 @@ class Sim:
                         f"unable — there's a cell on the final for "
                         f"{say_runway(rwy)}, {me} needs vectors around it")
             ac.update(phase="cleared", rwy=rwy, course=course, thr=thr,
-                      tower_handoff=None, wake_warned=False)
+                      tower_handoff=None, wake_warned=False,
+                      nav=None, via_name=None)
             return f"cleared ILS runway {say_runway(rwy)} approach"
         if kind == "handoff":
             if ac["plan"] != "departure":

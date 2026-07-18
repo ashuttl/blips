@@ -59,6 +59,7 @@ A command is a callsign followed by one or more instructions, chained:
 | `c 110` / `d 110`   | climb/descend and maintain (hundreds of feet, like the data blocks: `110` = 11,000 ft, `240` = FL240) |
 | `rs 180` / `is 250` | reduce/increase speed (knots); bare `s` resumes normal speed |
 | `dct LAL`           | proceed direct a fix                           |
+| `via CDOGG4`        | join a named SID/STAR — it flies the fixes itself |
 | `hold` / `hold LAL` | hold present position / at a fix, right turns  |
 | `i` / `i 19L`       | cleared ILS approach (active runway, or say which) |
 | `tfc`               | traffic call — points out the nearest VFR target   |
@@ -134,6 +135,21 @@ amber, so the two flows read apart at a glance. A busy field would drown in
 plates, so the picture is held to the flows through your own gates: the
 nearest arrival to each entry, the nearest departure to each exit. Off by
 default; the localizer and the traffic always read first.
+
+And you can fly them. Once a plane is positioned so it could pick one up —
+the way you point one at the localizer before clearing the approach — `via
+CDOGG4` clears it onto that arrival (or a departure onto its SID) and it
+flies the fixes itself, descending or climbing on the procedure while you
+work the rest of the room. The name has to be real and the right kind
+(`via HSKEL4` to an arrival gets *"HSKEL4 is a departure"*), and it has to
+be joinable — pointed the wrong way, the pilot asks for vectors first. The
+scratchpad on the data block wears the procedure (`EJA925 093 CDOGG4`) so
+you can see who's flying themselves. An altitude *amends* the clearance
+(`c 230` = "climb via the SID, then maintain FL230") without dropping it; a
+heading or a `dct` is you taking it back by hand, and cancels the
+procedure; the ILS clearance picks up naturally where the arrival ends. A
+field off the CIFP has no procedures to join, so there it's vectors as
+ever.
 
 Arrivals check in at entry gates between 11,000 and 16,000 ft; your job
 ends when they're established on the localizer — cleared, coupled, the
