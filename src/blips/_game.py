@@ -25,6 +25,7 @@ from blips._radar_sources import theme_id
 from blips._runtime import resolve_live
 from blips._commands import airline_name
 from blips._sim import SECTOR_NM, Sim
+from blips._procedures import overlay_for
 from blips._theme import ensure_contrast
 from blips._voice import Speaker
 from blips.scope import (
@@ -36,6 +37,8 @@ TEXT = (214, 219, 233)
 GOOD = (140, 210, 110)
 WARN = (240, 190, 80)
 TX = (120, 175, 225)      # your own key: the controller's side of the exchange
+STAR_COLOR = (72, 122, 134)   # arrivals: a cool teal, dim under the localizer
+SID_COLOR = (150, 108, 66)    # departures: a warm amber, the other flow
 GAME_ZOOM = 1.9           # degrees of latitude: the sector ring plus margin
 
 RADIO_COLORS = {
@@ -47,7 +50,7 @@ TERRAIN_TINT = (126, 96, 58)   # high ground, as a dim warm wash
 
 HINT = ("callsign then:  l/r hdg · c/d alt · rs/is spd · s resume · "
         "dct FIX · hold [FIX] · i [rwy] · tfc · ho · unable  —  ? help · "
-        "log · voice · pause · quit")
+        "log · voice · proc · pause · quit")
 
 
 def _strip_card(ac):
@@ -233,6 +236,26 @@ def _sector_pins(sim, airport):
     return pins, lines
 
 
+def _procedure_overlay(sim, airport):
+    """The named SIDs and STARs feeding today's runway, as dotted strokes
+    with a name at each outer end — drawn dim, under the localizer, so the
+    approach picture still reads first.  Empty where no procedures are
+    vendored (outside the CIFP's coverage)."""
+    sector = sim.sector
+    ov = overlay_for(
+        airport, sector["rwy"],
+        entry_gates=[sector["fixes"][n] for n in sector["entries"]],
+        exit_gates=[sector["fixes"][n] for n in sector["exits"]])
+    lines = []
+    for kind, pts in ov["paths"]:
+        color = STAR_COLOR if kind == "STAR" else SID_COLOR
+        for (la1, lo1), (la2, lo2) in zip(pts, pts[1:]):
+            lines.append((la1, lo1, la2, lo2, color))
+    pins = [(lat, lon, "·", STAR_COLOR if kind == "STAR" else SID_COLOR, name)
+            for lat, lon, name, kind in ov["labels"]]
+    return pins, lines
+
+
 def _wx_sampler(rgba, pw, ph, fbbox):
     """Point-sample a radar frame: (lat, lon) → echo 0..1, None off-frame.
 
@@ -363,15 +386,21 @@ def main(args):
               schedule=schedule_for(airport["icao"]))
     center = [airport["lat"], airport["lon"]]
     zoom = [GAME_ZOOM]
-    scenery = {"rev": -1, "pins": None, "lines": None}
+    scenery = {"rev": -1, "pins": None, "lines": None, "proc": None}
     _ground_cache = {}
 
     def sector_scenery():
-        """Pins and strokes for the current sector, rebuilt on flow change."""
+        """Pins and strokes for the current sector, rebuilt on flow change.
+        The procedure overlay rides along, shown only when toggled on."""
         if scenery["rev"] != sim.sector_rev:
             scenery["pins"], scenery["lines"] = _sector_pins(sim, airport)
+            scenery["proc"] = _procedure_overlay(sim, airport)
             scenery["rev"] = sim.sector_rev
-        return scenery["pins"], scenery["lines"]
+        pins, lines = scenery["pins"], scenery["lines"]
+        if state["procs"]:
+            ppins, plines = scenery["proc"]
+            return pins + ppins, lines + plines
+        return pins, lines
 
     def ground(bbox, gw, hc):
         """Terrain as a per-cell underlay tint: MVA above the field glows."""
@@ -403,7 +432,7 @@ def main(args):
         return grid
     weather = WeatherFeed(airport["lat"], airport["lon"],
                           theme=theme_id(args.wx_theme), nudge=live)
-    state = {"paused": False, "weather": bool(args.weather)}
+    state = {"paused": False, "weather": bool(args.weather), "procs": False}
 
     def clock():
         m, s = divmod(int(sim._elapsed), 60)
@@ -444,6 +473,12 @@ def main(args):
             return True
         if word in ("log", "r", "radio", "tape"):
             console.log_open = not console.log_open
+            return True
+        if word in ("proc", "procs", "procedures", "sid", "sids", "star",
+                    "stars"):
+            state["procs"] = not state["procs"]
+            sim.say("procedures shown" if state["procs"]
+                    else "procedures hidden", "help")
             return True
         if word in ("voice", "voices", "tts", "sound"):
             if sim.speaker is not None:

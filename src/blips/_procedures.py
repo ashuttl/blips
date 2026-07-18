@@ -1,0 +1,183 @@
+"""Vendored per-airport instrument procedures: the named SIDs, STARs and
+approaches that string real fixes into the arrival and departure flows a
+controller actually works.
+
+Built offline from the FAA CIFP (tools/build_procedures.py →
+data/procedures.json.gz) and refreshed only every few years, the same
+vendored pattern as the schedule and airport data.  US-first, because the
+CIFP is; an airport with no vendored procedures simply has none, and the
+game falls back to plain vectoring the way it always did.
+
+Each airport maps to a list of procedures; a procedure is a name, a kind
+(SID / STAR / APPCH), and its transitions; a transition is an ordered list
+of legs.  A leg names the fix it flies to and the ARINC path/terminator that
+gets there — see build_procedures.py for the record shape.  Fix coordinates
+are not stored: they resolve here against the vendored fixes and navaids, so
+one waypoint has one position across the whole game.
+"""
+
+import gzip
+import json
+import math
+import os
+
+from blips._airports import load_fixes, load_navaids
+from blips._geo import haversine_nm
+
+_DATA = None
+_FIXC = None      # fix ident -> (lat, lon), unique
+_NAVC = None      # navaid ident -> [(lat, lon), ...]  (idents repeat globally)
+
+
+def _load():
+    global _DATA
+    if _DATA is None:
+        path = os.path.join(os.path.dirname(__file__), "data",
+                            "procedures.json.gz")
+        try:
+            with gzip.open(path, "rt", encoding="utf-8") as fh:
+                _DATA = json.load(fh)
+        except FileNotFoundError:      # no vendored procedures — vectors only
+            _DATA = {}
+    return _DATA
+
+
+def procedures_for(icao):
+    """The procedure list for an airport, or [] when none is vendored."""
+    rec = _load().get((icao or "").upper())
+    return rec["procs"] if rec else []
+
+
+def _coords():
+    global _FIXC, _NAVC
+    if _FIXC is None:
+        _FIXC = {f["id"]: (f["lat"], f["lon"]) for f in load_fixes()}
+        _NAVC = {}
+        for n in load_navaids():
+            _NAVC.setdefault(n["id"], []).append((n["lat"], n["lon"]))
+    return _FIXC, _NAVC
+
+
+def _resolve(leg, airport):
+    """A leg's fix as (lat, lon), or None when it flies a heading, not a fix.
+
+    Runway and airport references collapse to the field; a navaid or
+    waypoint resolves from its dataset, and a duplicated navaid ident picks
+    the copy nearest the field — the one the procedure means.
+    """
+    fix, section = leg["f"], leg["s"]
+    if not fix:
+        return None
+    if fix.startswith("RW") or section in ("PG", "PA") or fix == airport["icao"]:
+        return (airport["lat"], airport["lon"])
+    fixc, navc = _coords()
+    if section in ("D", "DB", "PN"):
+        cands = navc.get(fix, [])
+    else:
+        c = fixc.get(fix)
+        cands = [c] if c else []
+    if not cands:                                  # section lied — try both
+        c = fixc.get(fix)
+        cands = [c] if c else list(navc.get(fix, []))
+    if not cands:
+        return None
+    if len(cands) == 1:
+        return cands[0]
+    coslat = math.cos(math.radians(airport["lat"]))
+    return min(cands, key=lambda p: (p[0] - airport["lat"]) ** 2
+               + ((p[1] - airport["lon"]) * coslat) ** 2)
+
+
+def _rwy_digits(rwy):
+    return "".join(c for c in (rwy or "") if c.isdigit())
+
+
+def _serves(trans, active):
+    """Does a transition belong to today's flow?  Enroute and common-route
+    transitions always do; a runway transition only when it's this runway."""
+    if not trans or trans == "RWALL" or not trans.startswith("RW"):
+        return True
+    return _rwy_digits(trans[2:]) == active
+
+
+def _serving(airport, active, radius_nm):
+    """Every SID/STAR that serves the active runway, as
+    (kind, name, paths, outer_point) — legs clipped to the terminal area."""
+    alat, alon = airport["lat"], airport["lon"]
+    out = []
+    for proc in procedures_for(airport["icao"]):
+        if proc["k"] not in ("SID", "STAR"):
+            continue
+        rw_trans = [t for t in proc["t"] if (t["v"] or "").startswith("RW")]
+        if rw_trans and not any(_serves(t["v"], active) for t in rw_trans):
+            continue                               # only serves other runways
+        proc_paths, farthest = [], None
+        for tr in proc["t"]:
+            if not _serves(tr["v"], active):
+                continue
+            pts = [p for p in (_resolve(leg, airport) for leg in tr["legs"])
+                   if p is not None
+                   and haversine_nm(alat, alon, p[0], p[1]) <= radius_nm]
+            if len(pts) >= 2:
+                proc_paths.append(pts)
+            for p in pts:
+                d = haversine_nm(alat, alon, p[0], p[1])
+                if farthest is None or d > farthest[0]:
+                    farthest = (d, p)
+        if farthest is not None:
+            out.append((proc["k"], proc["n"], proc_paths, farthest[1]))
+    return out
+
+
+def overlay_for(airport, active_rwy, entry_gates=None, exit_gates=None,
+                radius_nm=60.0):
+    """Drawable geometry for the procedures feeding today's runway:
+
+        {"paths": [(kind, [(lat, lon), ...]), ...],   # dotted polylines
+         "labels": [(lat, lon, name, kind), ...]}      # one per procedure
+
+    ``kind`` is "STAR" or "SID" so the caller can paint arrivals and depar-
+    tures apart.
+
+    Only SIDs and STARs are drawn — the approach's final segment is already
+    the localizer the scope paints.  A procedure is skipped unless it serves
+    the active runway (or is runway-agnostic).
+
+    The declutter ties back to the sector's gates: a busy field lists dozens
+    of procedures, but a controller only has up the ones on their own flows,
+    so each entry gate keeps the STAR whose outer end lies nearest it, each
+    exit gate the nearest SID.  That bounds the picture to roughly one path
+    per gate, spread around the compass, and never empties a real field the
+    way a hard distance cutoff would.  With no gates given, every serving
+    procedure is drawn (the raw plate).
+
+    Fixes past ``radius_nm`` are clipped to the terminal area the scope shows.
+    """
+    active = _rwy_digits(active_rwy)
+    serving = _serving(airport, active, radius_nm)
+
+    if entry_gates is None and exit_gates is None:
+        chosen = serving
+    else:
+        chosen, picked = [], set()
+
+        def take(gates, kind):
+            for glat, glon in gates or []:
+                cands = [s for s in serving if s[0] == kind]
+                if not cands:
+                    continue
+                best = min(cands, key=lambda s: haversine_nm(
+                    glat, glon, s[3][0], s[3][1]))
+                if best[1] not in picked:
+                    picked.add(best[1])
+                    chosen.append(best)
+
+        take(entry_gates, "STAR")
+        take(exit_gates, "SID")
+
+    paths, labels = [], []
+    for kind, name, proc_paths, outer in chosen:
+        for pts in proc_paths:
+            paths.append((kind, pts))
+        labels.append((outer[0], outer[1], name, kind))
+    return {"paths": paths, "labels": labels}

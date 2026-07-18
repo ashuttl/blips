@@ -126,6 +126,15 @@ fixes, public domain), so a US sector's gates are its true fixes end to
 end. Only an octant off the CIFP's coverage — outside the US — falls back
 to a synthesized five-letter fix. Deterministic per airport, always.
 
+The named procedures are real too. Type `proc` and the SIDs and STARs that
+feed today's runway draw as dotted fans through their actual fixes — CDOGG
+FOUR and SCOGS FOUR into Portland, the arrival's own waypoints strung
+between the gate and the field — arrivals in cool teal, departures in warm
+amber, so the two flows read apart at a glance. A busy field would drown in
+plates, so the picture is held to the flows through your own gates: the
+nearest arrival to each entry, the nearest departure to each exit. Off by
+default; the localizer and the traffic always read first.
+
 Arrivals check in at entry gates between 11,000 and 16,000 ft; your job
 ends when they're established on the localizer — cleared, coupled, the
 sim flies the approach and the landing. Departures appear off the runway
@@ -297,7 +306,8 @@ dead-reckoning glide becomes a no-op.
 
 | module          | job                                                       |
 | --------------- | --------------------------------------------------------- |
-| `_airports.py`  | vendored airports/runways/navaids (`data/*.json.gz`)      |
+| `_airports.py`  | vendored airports/runways/navaids/fixes (`data/*.json.gz`) |
+| `_procedures.py`| vendored SIDs/STARs/approaches, the gate-decluttered overlay |
 | `_sim.py`       | kinematics, wind, ILS, wake, sector, satellite, spawner, ambient sky, separation, conflict alert, hearback, scoring |
 | `_commands.py`  | parser, callsign matching, phraseology readback           |
 | `_fleet.py`     | live-sampled traffic pool with real routes                |
