@@ -51,6 +51,18 @@ _ACCENT = {
     "RXI": "en_GB",
     "SFR": "en_ZA",
     "TOM": "en_GB",
+    # OpenFlights-resolved: Gulf carriers en_GB, Indian en_IN, Jet2/Virgin AU
+    "ABY": "en_GB",
+    "AXB": "en_IN",
+    "EXS": "en_GB",
+    "GFA": "en_GB",
+    "JZR": "en_GB",
+    "KAC": "en_GB",
+    "MEA": "en_GB",
+    "OMA": "en_GB",
+    "RJA": "en_GB",
+    "SEJ": "en_IN",
+    "VOZ": "en_AU",
 }
 
 # Curated conversational voices by locale — bare names, matched against
