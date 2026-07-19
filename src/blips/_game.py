@@ -405,8 +405,14 @@ def main(args):
             return pins + ppins, lines + plines
         return pins, lines
 
-    def ground(bbox, gw, hc):
-        """Terrain as a per-cell underlay tint: MVA above the field glows."""
+    def ground(bbox, gw, hc, sea=None):
+        """Terrain as a per-cell underlay tint: MVA above the field glows.
+
+        Clipped to the basemap's land/sea mask (when given) so the terrain
+        footprint follows the coastline instead of spilling square-edged
+        into open water, and interpolated between samples so it reads as a
+        smooth relief rather than the raw fetch grid.
+        """
         if terrain is None:
             return None
         key = (tuple(round(v, 3) for v in bbox), gw, hc)
@@ -419,14 +425,21 @@ def main(args):
         grid = []
         for cy in range(hc):
             clat = maxlat - (cy + 0.5) * (maxlat - minlat) / hc
+            srow = sea[cy] if sea is not None else None
             row = []
             for cx in range(gw):
+                if srow is not None and srow[cx]:
+                    row.append(None)      # terrain lives on land only
+                    continue
                 clon = minlon + (cx + 0.5) * (maxlon - minlon) / gw
-                mva = terrain.mva_at(clat, clon)
+                mva = terrain.mva_smooth(clat, clon)
                 if mva is None or mva <= base:
                     row.append(None)
                 else:
-                    w = min(0.42, 0.14 + (mva - base) / 8000.0 * 0.30)
+                    # low floor so valleys fade almost to nothing and the
+                    # relief climbs across the range — ridges read, not a
+                    # flat wash of brown over everything above the field
+                    w = min(0.42, 0.06 + (mva - base) / 6500.0 * 0.36)
                     row.append((*TERRAIN_TINT, w))
             grid.append(row)
         if len(_ground_cache) > 4:

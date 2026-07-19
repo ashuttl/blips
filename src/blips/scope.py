@@ -764,7 +764,7 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
     # terrain (or any ground tint) sits under the weather: it only fills
     # cells the precipitation leaves empty, so storms always read on top
     if ground is not None:
-        gecho = ground(bbox, graph_w, height_cells)
+        gecho = ground(bbox, graph_w, height_cells, basemap.sea)
         if gecho is not None:
             if echo is None:
                 echo = gecho
