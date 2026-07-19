@@ -65,7 +65,8 @@ def test_flow_path_stitches_a_departure_from_the_field():
     assert res is not None
     _name, pts = res
     assert len(pts) >= 2
-    assert haversine_nm(ap["lat"], ap["lon"], *pts[0]) < 1.5   # off the field
+    assert haversine_nm(ap["lat"], ap["lon"],
+                        pts[0][0], pts[0][1]) < 1.5   # off the field
 
 
 def test_flow_path_stitches_an_arrival_to_the_field():
@@ -73,4 +74,5 @@ def test_flow_path_stitches_an_arrival_to_the_field():
     res = flow_path(ap, ap["rwys"][0]["le"][0], "arrival", random.Random(5))
     assert res is not None
     _name, pts = res
-    assert haversine_nm(ap["lat"], ap["lon"], *pts[-1]) < 1.5  # ends at field
+    assert haversine_nm(ap["lat"], ap["lon"],
+                        pts[-1][0], pts[-1][1]) < 1.5  # ends at field

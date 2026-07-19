@@ -92,6 +92,33 @@ def _rwy_digits(rwy):
     return "".join(c for c in (rwy or "") if c.isdigit())
 
 
+def _restr(leg):
+    """A leg's crossing restriction as ``(floor_ft, ceil_ft, speed_kt)``, any
+    of them None.  The altitude carries an ARINC descriptor: ``+`` is at-or-
+    above (a floor), ``-`` at-or-below (a ceiling), a bare number a mandatory
+    crossing (both), and ``FLxxx`` is a flight level.  The speed limit reads
+    as a maximum to cross at."""
+    lo = hi = spd = None
+    a = leg.get("a")
+    if a:
+        digits = "".join(c for c in a if c.isdigit())
+        if digits:
+            ft = float(digits) * (100.0 if "FL" in a else 1.0)
+            if a[0] == "+":
+                lo = ft
+            elif a[0] == "-":
+                hi = ft
+            else:                       # bare 'at', or a block we keep as 'at'
+                lo = hi = ft
+    s = leg.get("spd")
+    if s:
+        try:
+            spd = int(s)
+        except ValueError:
+            spd = None
+    return lo, hi, spd
+
+
 def _serves(trans, active):
     """Does a transition belong to today's flow?  Enroute and common-route
     transitions always do; a runway transition only when it's this runway."""
@@ -186,7 +213,9 @@ def overlay_for(airport, active_rwy, entry_gates=None, exit_gates=None,
 def flow_path(airport, active_rwy, kind, rng):
     """One stitched polyline for a random SID/STAR serving the runway — the
     fix sequence a flight actually flies, ordered gate→field for an arrival
-    and field→gate for a departure — as ``(name, [(lat, lon), ...])`` or None.
+    and field→gate for a departure — as ``(name, [(lat, lon, floor_ft,
+    ceil_ft, speed_kt), ...])`` or None; the last three carry each fix's
+    crossing restriction (any None) so the flight can descend/climb via it.
 
     A transition is classed by its identifier: ``RW…`` is the runway leg,
     empty is the common route, anything else is a named entry/exit.  An
@@ -226,13 +255,15 @@ def flow_path(airport, active_rwy, kind, rng):
                 p = _resolve(leg, airport)
                 if p is not None and (not pts or haversine_nm(
                         pts[-1][0], pts[-1][1], p[0], p[1]) > 0.2):
-                    pts.append(p)
+                    lo, hi, spd = _restr(leg)
+                    pts.append((p[0], p[1], lo, hi, spd))
+        field_pt = (field[0], field[1], None, None, None)
         if want == "STAR":
             if not pts or haversine_nm(pts[-1][0], pts[-1][1], *field) > 1.0:
-                pts.append(field)
+                pts.append(field_pt)
         else:
             if not pts or haversine_nm(pts[0][0], pts[0][1], *field) > 1.0:
-                pts.insert(0, field)
+                pts.insert(0, field_pt)
         if len(pts) >= 2:
             return proc["n"], pts
     return None
@@ -255,7 +286,10 @@ def build_join(airport, active_rwy, proc, ref):
     last real fix, short of the field, where the approach takes over); for a
     SID it runs runway → common → exit, out of the field.  The entry (or
     exit) transition is the one whose join fix sits nearest ``ref``, so the
-    plane joins where it already is.  Returns [] when nothing resolves.
+    plane joins where it already is.  Each point is ``(lat, lon, floor_ft,
+    ceil_ft, speed_kt)`` — the crossing restriction rides along so the plane
+    can fly the published 'descend via' profile.  Returns [] when nothing
+    resolves.
     """
     active = _rwy_digits(active_rwy)
     field = (airport["lat"], airport["lon"])
@@ -278,7 +312,8 @@ def build_join(airport, active_rwy, proc, ref):
             if p is None or haversine_nm(field[0], field[1], *p) < 0.6:
                 continue                          # drop the field-centre legs
             if not out or haversine_nm(out[-1][0], out[-1][1], *p) > 0.2:
-                out.append(p)
+                lo, hi, spd = _restr(leg)
+                out.append((p[0], p[1], lo, hi, spd))
         return out
 
     common_pts, runway_pts = pts_of(common), pts_of(runway)
@@ -290,14 +325,15 @@ def build_join(airport, active_rwy, proc, ref):
         merged = []
         for p in seq:
             if not merged or haversine_nm(merged[-1][0], merged[-1][1],
-                                          *p) > 0.2:
+                                          p[0], p[1]) > 0.2:
                 merged.append(p)
         if not merged:
             continue
         ji = min(range(len(merged)),
-                 key=lambda i: haversine_nm(ref[0], ref[1], *merged[i]))
+                 key=lambda i: haversine_nm(ref[0], ref[1],
+                                            merged[i][0], merged[i][1]))
         nav = merged[ji:]
-        d = haversine_nm(ref[0], ref[1], *nav[0])
+        d = haversine_nm(ref[0], ref[1], nav[0][0], nav[0][1])
         if best is None or d < best[0]:
             best = (d, nav)
     return best[1] if best else []

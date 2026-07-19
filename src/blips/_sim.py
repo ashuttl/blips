@@ -25,6 +25,7 @@ from blips._commands import (
     CommandError, parse, resolve_callsign, say_altitude, say_digits,
     telephony,
 )
+from blips._airports import find_airport
 from blips._geo import (
     advance, bearing_to, cross_along_track, haversine_nm, turn_delta,
 )
@@ -462,6 +463,13 @@ def _fix_name(rng):
                    for c in pattern)
 
 
+# metal that has no business synthesized at FL350 over the top of a sector —
+# regional jets, turboprops, bizjets and light twins fly the short legs, not
+# the high-altitude through-routes an overflight represents
+NOT_OVERFLIGHT = frozenset((
+    "CRJ7", "CRJ9", "E175", "DH8D", "AT76", "C56X", "GLF5", "C402", "P212",
+))
+
 GATE_BAND_NM = (22.0, 52.0)   # where sector gates live — wide enough to
                               # catch the real close-in VORs (PIE is 15 nm
                               # off TPA; a near gate is a fun corner)
@@ -634,6 +642,7 @@ class Sim:
         self.nmacs = 0           # near-misses with traffic nobody controls
         self._counter = 0
         self._next_arrival = 45.0
+        self._held_arrival = None   # a cast held over an aborted spawn
         self._next_departure = 30.0
         self._next_request = 150.0
         self._next_flow = self.rng.uniform(600.0, 1080.0)
@@ -760,8 +769,10 @@ class Sim:
         return f"{prefix}{self._counter}"
 
     def _draw_schedule(self, role):
-        """A real (callsign, actype, far_city) from the vendored schedule,
-        or None.  The route's own metal flies unless the field's runway
+        """A real (callsign, actype, (place, code)) from the vendored
+        schedule, or None.  ``code`` is the far end's IATA/name as stored,
+        kept so the spawner can place it on the map; ``place`` is its
+        display city.  The route's own metal flies unless the field's runway
         can't take it, in which case the carrier's next-best fitting type
         stands in (a guard against a bad equipment guess in the data)."""
         routes = self.schedule
@@ -776,38 +787,64 @@ class Sim:
                 if not fits:
                     continue
                 actype = self.rng.choice(fits)
-            return self._prefix_callsign(prefix), actype, far_city(far)
+            return self._prefix_callsign(prefix), actype, (far_city(far), far)
         return None
 
+    def _far(self, end):
+        """(display, (lat, lon) | None) for a route's far end — a ``(place,
+        code)`` pair — or None.  The far end is placed on the map by
+        resolving its code (then its city name) against the airport DB, so
+        the spawner can enter it from the direction it really lies; a far
+        end we can't place still reads back on the radio, it just spawns
+        from a random gate."""
+        if not end:
+            return None
+        place, code = end
+        ap = (find_airport(code) if code else None) or (
+            find_airport(place) if place else None)
+        return (place or code), ((ap["lat"], ap["lon"]) if ap else None)
+
+    def _gate_toward(self, gates, coords):
+        """The gate whose bearing off the field is nearest the real bearing
+        to ``coords`` — an arrival enters from the direction its origin lies,
+        a departure leaves toward its destination.  Random when the far end
+        is unknown, so a synthesized flight still gets a plausible gate."""
+        if not coords:
+            return self.rng.choice(gates)
+        lat, lon = self.airport["lat"], self.airport["lon"]
+        want = bearing_to(lat, lon, coords[0], coords[1])
+        return min(gates, key=lambda g: abs(turn_delta(
+            bearing_to(lat, lon, *self.sector["fixes"][g]), want)))
+
     def _cast_flight(self, role):
-        """(callsign, actype, far_city|None) — a real flight when we can.
+        """(callsign, actype, far) — a real flight when we can.  ``far`` is
+        ``(display, (lat, lon) | None)`` for the origin (arrivals) or
+        destination (departures), or None when the cast carries no route.
 
         For arrivals and departures the vendored schedule leads: the real
         carriers, metal and routes that serve this field, so the check-in
         and the hover chip carry a true origin/destination.  Failing that
         (no schedule for this field) the live pool casts whoever's actually
-        in the air nearby, and last the synthesized country mix.  Overflights
-        skip the schedule (it holds no through-traffic) and come from the
-        pool.  Arrivals and departures are gated to what the field's runway
-        can take — a widebody never lands on a short strip — while
-        overflights, passing overhead at altitude, are cast exactly as drawn.
+        in the air nearby, and last the synthesized country mix.  Arrivals
+        and departures are gated to what the field's runway can take — a
+        widebody never lands on a short strip.
         """
-        if role != "overflight":
-            pick = self._draw_schedule(role)
-            if pick is not None:
-                return pick
+        pick = self._draw_schedule(role)
+        if pick is not None:
+            cs, actype, end = pick
+            return cs, actype, self._far(end)
         if self.pool is not None:
             pick = self.pool.draw(role)
             if pick is not None and not any(
                     ac["callsign"] == pick[0] for ac in self.aircraft):
-                cs, actype, extra = pick
-                if role == "overflight" or self._runway_ok(actype):
-                    return cs, actype, extra
+                cs, actype, end = pick
+                if self._runway_ok(actype):
+                    return cs, actype, self._far(end)
                 # keep the real flight, but sub in a type its airline flies
                 # that this runway can actually take
                 fits = [t for t in FLEETS.get(cs[:3], ()) if self._runway_ok(t)]
                 if fits:
-                    return cs, self.rng.choice(fits), extra
+                    return cs, self.rng.choice(fits), self._far(end)
         callsign, airline = self._new_callsign()
         fleet = FLEETS.get(airline, ("A320",))
         if role != "overflight":
@@ -844,7 +881,17 @@ class Sim:
         }
 
     def _spawn_arrival(self, allow_sat=True):
-        entry = self.rng.choice(self.sector["entries"])
+        # cast first: the origin picks the gate, so a flight enters from the
+        # direction it really comes from.  A cast held over an aborted spawn
+        # is reused rather than redrawn, so a conflict never burns a real
+        # flight from the pool.
+        if self._held_arrival is not None:
+            callsign, actype, origin = self._held_arrival
+            self._held_arrival = None
+        else:
+            callsign, actype, origin = self._cast_flight("arrival")
+        entry = self._gate_toward(self.sector["entries"],
+                                  origin[1] if origin else None)
         elat, elon = self.sector["fixes"][entry]
         lat, lon = advance(elat, elon,
                            bearing_to(self.airport["lat"],
@@ -868,9 +915,9 @@ class Sim:
             if (abs(other["alt"] - alt) < SEP_FT * 1.5
                     and haversine_nm(other["lat"], other["lon"],
                                      lat, lon) < SEP_NM * 3):
+                self._held_arrival = (callsign, actype, origin)
                 self._next_arrival = 25.0   # try again shortly
                 return
-        callsign, actype, origin = self._cast_flight("arrival")
         hdg = bearing_to(lat, lon, self.airport["lat"], self.airport["lon"])
         ias = float(self.rng.choice((250, 270, 280)))
         ac = self._base(callsign, actype, lat, lon, alt, hdg, ias)
@@ -890,10 +937,10 @@ class Sim:
                       felev=float(self.airport["elev"]),
                       par=dist * 16.0 + 300.0)
         if origin:
-            ac["from"] = origin   # the far city, kept for the hover chip
+            ac["from"] = origin[0]   # the far city, kept for the hover chip
         self.aircraft.append(ac)
         where = f" for {sat['name']}" if sat is not None else ""
-        tail = f", from {origin}" if origin else ""
+        tail = f", from {origin[0]}" if origin else ""
         self.say(f"{self.airport['city'] or 'Approach'} approach, "
                  f"{hail(ac)} with you, {say_altitude(alt)}, "
                  f"inbound {entry}{where}{tail}", "checkin",
@@ -908,7 +955,8 @@ class Sim:
         thr = src["thr"]
         lat, lon = advance(thr[0], thr[1], course, 1.5)  # rolling, airborne
         elev = src["elev"]
-        exit_fix = self.rng.choice(self.sector["exits"])
+        exit_fix = self._gate_toward(self.sector["exits"],
+                                     dest[1] if dest else None)
         initial = float(round((elev + 3000) / 1000) * 1000)
         ac = self._base(callsign, actype, lat, lon, elev + 1200.0,
                         course, 170.0)
@@ -925,12 +973,12 @@ class Sim:
                  + self.rng.choice((7000.0, 9000.0, 11000.0))) / 1000.0)
             note = f" — centre wants {say_altitude(ac['xr'])} crossing it"
         if dest:
-            ac["to"] = dest   # the far city, kept for the hover chip
+            ac["to"] = dest[0]   # the far city, kept for the hover chip
         self.aircraft.append(ac)
         off = (f"off {sat['name']}, runway {say_runway(sat['rwy'])}"
                if sat is not None
                else f"off runway {say_runway(self.sector['rwy'])}")
-        tail = f", for {dest}" if dest else ""
+        tail = f", for {dest[0]}" if dest else ""
         self.say(f"{hail(ac)} {off}, "
                  f"passing {say_altitude(ac['alt'])} for "
                  f"{say_altitude(initial)}, requesting {exit_fix}{tail}"
@@ -969,35 +1017,88 @@ class Sim:
                   vfr_leave=self._elapsed + self.rng.uniform(360.0, 900.0))
         self.aircraft.append(ac)
 
+    def _overfly_course(self, o, d):
+        """(course, entry) for a through-flight from origin ``o`` to
+        destination ``d`` whose track really crosses this sector, or None if
+        it passes the field by.  The blip flies the true origin→destination
+        bearing and enters at the boundary on the origin side, so the route
+        on the hover chip is a route you can watch cross — and a
+        Washington→Albany flight, which never nears Portland, simply isn't
+        drawn overhead here."""
+        home = self.airport["lat"], self.airport["lon"]
+        course = bearing_to(o[0], o[1], d[0], d[1])
+        # the field's offset from the o→d track: cross (signed lateral nm)
+        # and along (nm from origin to the track's closest point to the field)
+        dist = haversine_nm(o[0], o[1], home[0], home[1])
+        off = math.radians(bearing_to(o[0], o[1], home[0], home[1]) - course)
+        cross = dist * math.sin(off)
+        along = dist * math.cos(off)
+        if abs(cross) > SECTOR_NM or not 0.0 < along < haversine_nm(
+                o[0], o[1], d[0], d[1]):
+            return None
+        r = DESPAWN_NM - 4.0
+        foot = advance(o[0], o[1], course, along)   # closest point to field
+        half = math.sqrt(r * r - cross * cross)      # back up to the boundary
+        return course, advance(foot[0], foot[1],
+                               (course + 180.0) % 360.0, half)
+
     def _spawn_overflight(self):
         """Centre's traffic, four miles above yours: a blip sliding across
         the top of the sector in a dim block.  Scenery — the way most of
-        what a real scope shows is scenery."""
+        what a real scope shows is scenery — but scenery that flies where
+        its route says it does."""
         if sum(ac["plan"] == "overflight" for ac in self.aircraft) >= 3:
             return
-        callsign = actype = legs = None
+        callsign = actype = legs = course = entry = None
+        # take the first through-flight whose track really crosses near the
+        # field, so the route on the chip matches the path across the scope;
+        # unplaceable or wrong-way routes are passed over rather than shown
         if self.pool is not None:
-            pick = self.pool.draw("overflight")
-            if pick is not None and not any(
-                    a["callsign"] == pick[0] for a in self.aircraft):
-                callsign, actype, legs = pick
+            for _ in range(6):
+                pick = self.pool.draw("overflight")
+                if pick is None:
+                    break
+                cs, at, (origin, dest) = pick
+                if any(a["callsign"] == cs for a in self.aircraft):
+                    continue
+                o, d = self._far(origin), self._far(dest)
+                if not (o and o[1] and d and d[1]):
+                    continue
+                geom = self._overfly_course(o[1], d[1])
+                if geom is None:
+                    continue
+                callsign, actype, legs = cs, at, (origin, dest)
+                course, entry = geom
+                break
         if callsign is None:
-            callsign, airline = self._new_callsign()
-            actype = self.rng.choice(FLEETS.get(airline, ("A320",)))
-        brg = self.rng.uniform(0.0, 360.0)
-        lat, lon = advance(self.airport["lat"], self.airport["lon"],
-                           brg, DESPAWN_NM - 4.0)
-        side = (brg + self.rng.choice((90.0, -90.0))) % 360.0
-        aim = advance(self.airport["lat"], self.airport["lon"], side,
-                      self.rng.uniform(0.0, 22.0))
-        hdg = bearing_to(lat, lon, aim[0], aim[1])
+            # no placeable through-flight: a nameless crossing in any
+            # direction — no route on the chip to contradict the path, and
+            # mainline jet metal only, never a regional or turboprop that
+            # would never be up here on a through-leg (the Pacific CRJ)
+            for _ in range(12):
+                callsign, airline = self._new_callsign()
+                jets = [t for t in FLEETS.get(airline, ("A320",))
+                        if t not in NOT_OVERFLIGHT]
+                if jets:
+                    actype = self.rng.choice(jets)
+                    break
+            else:
+                actype = "A320"
+            brg = self.rng.uniform(0.0, 360.0)
+            entry = advance(self.airport["lat"], self.airport["lon"],
+                            brg, DESPAWN_NM - 4.0)
+            side = (brg + self.rng.choice((90.0, -90.0))) % 360.0
+            aim = advance(self.airport["lat"], self.airport["lon"], side,
+                          self.rng.uniform(0.0, 22.0))
+            course = bearing_to(entry[0], entry[1], aim[0], aim[1])
+        lat, lon = entry
         # hemispheric flight levels, because someone will check
         alt = 1000.0 * (2 * self.rng.randint(14, 19)
-                        + (1 if hdg < 180.0 else 0))
-        ac = self._base(callsign, actype, lat, lon, alt, hdg,
+                        + (1 if course < 180.0 else 0))
+        ac = self._base(callsign, actype, lat, lon, alt, course,
                         float(self.rng.randint(255, 290)))
         # the real route rides along so the hover chip can say where this
-        # blip is going over you to (None for the synthesized country mix)
+        # blip is going over you to (None for the nameless crossing)
         ac.update(plan="overflight", dim=True, route=legs)
         self.aircraft.append(ac)
 
@@ -1035,7 +1136,8 @@ class Sim:
                 # enter where the STAR crosses into the scope, then fly the
                 # rest down to the field — a distant fix isn't a spawn point
                 inside = next((i for i, p in enumerate(pts)
-                               if haversine_nm(home[0], home[1], *p) <= edge),
+                               if haversine_nm(home[0], home[1],
+                                               p[0], p[1]) <= edge),
                               None)
                 if inside is None:
                     continue
@@ -1048,7 +1150,8 @@ class Sim:
                 cruise = 1000.0 * self.rng.randint(10, 13)
             else:
                 spawn, nav = pts[0], pts[1:]     # off the neighbour's runway
-                if haversine_nm(home[0], home[1], *spawn) > DESPAWN_NM:
+                if haversine_nm(home[0], home[1],
+                                spawn[0], spawn[1]) > DESPAWN_NM:
                     continue
                 cruise = 1000.0 * self.rng.randint(11, 15)
             if not nav:
@@ -1285,10 +1388,12 @@ class Sim:
         ac["fix_time"] = time.time()
 
     def _fly_nav(self, ac):
-        """Fly an ordered list of fixes: steer for the next one, drop it as
-        it's reached, and ride a plain descent or climb against the field the
-        route belongs to.  Both a neighbour's uncontrolled traffic and one of
-        your own cleared onto a procedure fly this."""
+        """Fly an ordered list of fixes, honouring the crossing restrictions
+        they carry — a real 'descend via'.  Steer for the next fix and drop
+        it as it's reached; descend no sooner than each altitude gate ahead
+        demands, hold above any floor, and fly the published speeds until you
+        assign one of your own.  Both a neighbour's uncontrolled traffic and
+        one of your own cleared onto a procedure fly this."""
         nav = ac["nav"]
         while nav and haversine_nm(ac["lat"], ac["lon"],
                                    nav[0][0], nav[0][1]) < 1.5:
@@ -1297,11 +1402,42 @@ class Sim:
             return
         ac["tgt_hdg"] = bearing_to(ac["lat"], ac["lon"], nav[0][0], nav[0][1])
         ac["turn_dir"] = None
-        flat, flon = ac["nav_field"]
-        dist = haversine_nm(ac["lat"], ac["lon"], flat, flon)
-        slope = 300.0 if ac["nav_kind"] == "arrival" else 450.0
-        ac["tgt_alt"] = max(ac["felev"],
-                            min(ac["cruise_alt"], ac["felev"] + dist * slope))
+        arriving = ac["nav_kind"] == "arrival"
+        slope = 300.0 if arriving else 450.0
+        # gather the restrictions still ahead, with the along-track distance
+        # to each — a ceiling you can be this much higher than now and still
+        # descend to meet, a floor you may not sink below, a speed to make
+        ceilings, floors, spd = [], [], None
+        cum, prev = 0.0, (ac["lat"], ac["lon"])
+        for p in nav:
+            cum += haversine_nm(prev[0], prev[1], p[0], p[1])
+            prev = p
+            lo, hi, s = p[2], p[3], p[4]
+            if hi is not None:
+                ceilings.append((hi, cum))
+            if lo is not None:
+                floors.append(lo)
+            if s is not None and spd is None:
+                spd = float(s)
+        if arriving:
+            if ceilings:
+                tgt = min(ac["cruise_alt"],
+                          min(hi + d * slope for hi, d in ceilings))
+            else:                       # no gates left: ride down to the field
+                flat, flon = ac["nav_field"]
+                dist = haversine_nm(ac["lat"], ac["lon"], flat, flon)
+                tgt = min(ac["cruise_alt"], ac["felev"] + dist * slope)
+            tgt = min(tgt, ac["alt"])   # a descend-via only ever descends
+            if floors:                  # and holds up for a floor still ahead
+                tgt = max(tgt, min(ac["alt"], max(floors)))
+            ac["tgt_alt"] = max(ac["felev"], tgt)
+        else:                           # climb via: hold under a ceiling ahead
+            tgt = ac["cruise_alt"]
+            if ceilings:
+                tgt = min(tgt, min(hi for hi, _ in ceilings))
+            ac["tgt_alt"] = max(ac["felev"], tgt)
+        if spd is not None and not ac.get("spd_manual"):
+            ac["tgt_ias"] = max(float(ac["perf"][1]), spd)
 
     def _fly_ils(self, ac):
         """Capture and ride the localizer, then the glideslope, then land."""
@@ -2032,6 +2168,7 @@ class Sim:
             return self._spoken(ac, ins)
         if kind == "speed":
             if ins["kt"] is None:
+                ac["spd_manual"] = False   # resume the procedure's own speeds
                 self._stage(ac, due, tgt_ias=float(ac["perf"][0]))
                 return self._spoken(ac, ins)
             lo = ac["perf"][2] if ac["phase"] in ("cleared", "established") \
@@ -2047,6 +2184,8 @@ class Sim:
             if ins["dir"] == "increase" and ins["kt"] < ac["ias"] - 5:
                 raise CommandError(f"unable increase — {me} is doing "
                                    f"{say_digits(round(ac['ias']))} knots")
+            if ac["phase"] == "nav":
+                ac["spd_manual"] = True   # your speed overrides the STAR's
             self._stage(ac, due, tgt_ias=float(ins["kt"]))
             return self._spoken(ac, ins)
         if kind == "direct":
@@ -2089,7 +2228,8 @@ class Sim:
             join = nav[0]
             to_join = bearing_to(ac["lat"], ac["lon"], join[0], join[1])
             if (abs(turn_delta(ac["hdg"], to_join)) > 135.0
-                    and haversine_nm(ac["lat"], ac["lon"], *join) > 6.0):
+                    and haversine_nm(ac["lat"], ac["lon"],
+                                     join[0], join[1]) > 6.0):
                 raise CommandError(f"unable — {me} isn't positioned to join "
                                    f"{ins['name']}, we'll take vectors")
             self._wx_check(ac, to_join)
@@ -2101,6 +2241,7 @@ class Sim:
                         nav_kind=plan, felev=float(self.sector["elev"]),
                         cruise_alt=float(cruise), via_name=proc["n"])
             ac["req"] = None
+            ac["spd_manual"] = False   # fly the procedure's speeds until told
             ac["wx_deviating"] = False
             verb = "descend" if plan == "arrival" else "climb"
             noun = "arrival" if plan == "arrival" else "departure"

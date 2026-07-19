@@ -243,13 +243,12 @@ def _sector_pins(sim, airport):
 def _procedure_overlay(sim, airport):
     """The named SIDs and STARs feeding today's runway, as dotted strokes
     with a name at each outer end — drawn dim, under the localizer, so the
-    approach picture still reads first.  Empty where no procedures are
-    vendored (outside the CIFP's coverage)."""
+    approach picture still reads first.  Every procedure that serves the
+    active runway is shown (and only those); it rebuilds on a flow change,
+    so a new runway redraws the flows that feed it.  Empty where no
+    procedures are vendored (outside the CIFP's coverage)."""
     sector = sim.sector
-    ov = overlay_for(
-        airport, sector["rwy"],
-        entry_gates=[sector["fixes"][n] for n in sector["entries"]],
-        exit_gates=[sector["fixes"][n] for n in sector["exits"]])
+    ov = overlay_for(airport, sector["rwy"])
     lines = []
     for kind, pts in ov["paths"]:
         color = STAR_COLOR if kind == "STAR" else SID_COLOR

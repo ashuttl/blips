@@ -115,11 +115,12 @@ class TrafficPool:
 
         ``role`` is "arrival", "departure" or "overflight".  Entries whose
         real route involves this airport are matched to the right role and
-        carry the far city for the check-in (``extra`` is its place name);
-        a flight whose known route passes this airport by is exactly what
-        belongs overhead at FL350 — for those ``extra`` is the route's
-        ``(origin_leg, dest_leg)``, each a ``(place, code)`` pair, so the
-        scope's hover chip can say where they're going over you to;
+        carry the far end for the check-in (``extra`` is its ``(place,
+        code)`` pair, so the spawner can both read it back and place it on
+        the map); a flight whose known route passes this airport by is
+        exactly what belongs overhead at FL350 — for those ``extra`` is the
+        route's ``(origin_leg, dest_leg)``, each a ``(place, code)`` pair, so
+        the scope's hover chip can say where they're going over you to;
         route-unknown entries fill in for any role anonymously (extra None).
         Wrong-direction entries never spawn.
         """
@@ -143,7 +144,7 @@ class TrafficPool:
             if here_end[1] in self._codes or here_end[0] in self._codes:
                 with self._lock:
                     self._used.add(e["cs"])
-                return e["cs"], e["actype"], far_end[0] or far_end[1]
+                return e["cs"], e["actype"], far_end
         if anonymous:
             # no route-confirmed flight to hand out: prefer a recognisable
             # airline over the bizjet soup that fills any 250 nm circle
