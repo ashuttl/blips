@@ -1059,7 +1059,12 @@ class Sim:
                 pick = self.pool.draw("overflight")
                 if pick is None:
                     break
-                cs, at, (origin, dest) = pick
+                cs, at, ends = pick
+                if ends is None:
+                    # a route-unknown flight: nothing to place a track from,
+                    # so leave it for the nameless-crossing block below
+                    continue
+                origin, dest = ends
                 if any(a["callsign"] == cs for a in self.aircraft):
                     continue
                 o, d = self._far(origin), self._far(dest)
