@@ -157,6 +157,11 @@ def _read_key(fd, raw=False):
     if b in (b'\x7f', b'\x08'):
         return 'key:backspace'
     if raw:
+        # desk controls: Ctrl-L/P/V/W reach the app as raw bytes under cbreak
+        # (Ctrl-C still signals; Ctrl-S/Q stay with flow control, so avoided)
+        ctrl = {b'\x0c': 'l', b'\x10': 'p', b'\x16': 'v', b'\x17': 'w'}.get(b)
+        if ctrl is not None:
+            return f'key:ctrl-{ctrl}'
         if len(b) == 1 and 32 <= b[0] < 127:
             return f"key:{b.decode('ascii')}"
         return None

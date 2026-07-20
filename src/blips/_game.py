@@ -23,8 +23,8 @@ from blips._live import live_loop
 from blips._location import get_location
 from blips._radar_sources import theme_id
 from blips._runtime import resolve_live
-from blips._commands import airline_name
-from blips._sim import SECTOR_NM, Sim
+from blips._commands import CommandError, airline_name, resolve_callsign
+from blips._sim import SECTOR_NM, Sim, _controlled
 from blips._procedures import overlay_for
 from blips._theme import ensure_contrast
 from blips._voice import Speaker
@@ -48,9 +48,14 @@ RADIO_COLORS = {
 }
 TERRAIN_TINT = (126, 96, 58)   # high ground, as a dim warm wash
 
-HINT = ("callsign then:  l/r hdg · c/d alt · rs/is spd · s resume · "
-        "dct FIX · via PROC · hold [FIX] · i [rwy] · tfc · ho · unable  —  "
-        "? help · log · voice · proc · pause · quit")
+# the bar carries only the radio language — what you say to an airplane after
+# a callsign.  Nothing here touches the app itself: pause, voice, the log, the
+# weather layer are desk controls, reached by a key, never keyed like a mic.
+RADIO_HINT = ("callsign then  l/r hdg · c/d alt · rs/is spd · s resume · "
+              "dct FIX · via PROC · hold [FIX] · i [rwy] · tfc · ho handoff")
+# `?` reveals the desk: control keys, shown as keys so they read apart from the
+# radio verbs above.  These run the station, not the airplanes.
+MORE_HINT = "desk:  ^L log · ^P pause · ^W weather · ^V voice · ^C quit"
 
 
 def _strip_card(ac):
@@ -133,6 +138,10 @@ class _Console:
             return True
         if action in ("back", "fwd"):
             return self._history(-1 if action == "back" else 1)
+        ctrl = {"key:ctrl-l": "log", "key:ctrl-p": "pause",
+                "key:ctrl-v": "voice", "key:ctrl-w": "weather"}.get(action)
+        if ctrl is not None:
+            return self.meta(ctrl)
         if action.startswith("key:"):
             ch = action[4:]
             if ch in "+-=" and not self.buffer:
@@ -165,14 +174,29 @@ class _Console:
         return True
 
     def click_hail(self):
-        """A click on a blip drops its callsign into an empty bar."""
-        if self.buffer or self.last_mouse is None:
+        """A click on a blip addresses it.  An empty bar takes the callsign;
+        a bar that already opens with a callsign gets that callsign swapped
+        for the new one, so misclicking a plane is one click to fix and any
+        command you'd started keying after it survives the retarget."""
+        if self.last_mouse is None:
             return False
         callsign = hit_test(*self.last_mouse)
-        if callsign:
+        if not callsign:
+            return False
+        if not self.buffer:
             self.buffer = callsign.lower() + " "
             return True
-        return False
+        # only retarget when the head is genuinely a callsign on frequency —
+        # otherwise the bar holds something else and we leave it be
+        head, _, rest = self.buffer.partition(" ")
+        on_freq = [a for a in self.sim.aircraft
+                   if a["phase"] != "handed" and _controlled(a)]
+        try:
+            resolve_callsign(head, on_freq)
+        except CommandError:
+            return False
+        self.buffer = callsign.lower() + " " + rest
+        return True
 
     # -- the bottom lines ----------------------------------------------------
     def footer(self, focused):
@@ -188,7 +212,12 @@ class _Console:
             bar = (f"{prompt}{fg(*TEXT)}{self.buffer}{RESET}"
                    f"{fg(*MARKER)}▌{RESET}")
         else:
-            bar = f"{prompt}{fg(*DIM)}{HINT}{RESET}"
+            # radio language first, then the desk-controls cluster: keys in a
+            # brighter tone so they read as pressable, labels kept quiet
+            desk = (f"{fg(*MUTED)}^L{fg(*DIM)} log   "
+                    f"{fg(*MUTED)}?{fg(*DIM)} help")
+            bar = (f"{prompt}{fg(*DIM)}{RADIO_HINT}"
+                   f"      {desk}{RESET}")
         if self.tape or self.log_open:
             # the tape: every call in order, oldest at the top — up while
             # paused (the busy moment you missed) or held open with `log`,
@@ -480,7 +509,7 @@ def main(args):
                 sim._last_tick = None    # resume without a time jump
             return True
         if word in ("?", "help", "h"):
-            sim.say(HINT, "help")
+            sim.say(MORE_HINT, "help")
             return True
         if word in ("w", "wx", "weather"):
             state["weather"] = not state["weather"]
@@ -600,7 +629,7 @@ def main(args):
         _sync_weather()
     weather.start()
     sim.say(f"you have the {airport['name']} sector — traffic inbound. "
-            "? for the phrase book", "atc")
+            "? for the desk controls", "atc")
     live_loop(render, interval=0.5, mouse=True, auto_play=True,
               play_interval=0.5, on_action=on_action, on_drag=on_drag,
               intercept=console.intercept, raw_keys=True)
