@@ -11,7 +11,8 @@ from blips._geo import (
     advance, bearing_to, cross_along_track, haversine_nm, turn_delta,
 )
 from blips.game.sim import (
-    PERF, WX_CLEAR, WX_DEVIATE, Sim, _controlled, build_sector,
+    PERF, SECTOR_NM, WX_CLEAR, WX_DEVIATE, Sim, _commandable, _controlled,
+    build_sector,
 )
 
 
@@ -465,7 +466,7 @@ def _pwm():
 
 def test_clearing_an_arrival_onto_a_star():
     s = _pwm()
-    s._spawn_arrival(allow_sat=False)
+    s._spawn_arrival(allow_sat=False, handin=False)
     a = s.aircraft[-1]
     line = s.command(f"{a['callsign']} via CDOGG4")     # a real KPWM STAR
     assert "descend via the cdogg four arrival" in line.lower()
@@ -480,9 +481,35 @@ def test_clearing_an_arrival_onto_a_star():
     assert a["alt"] < start_alt                         # it descends the STAR
 
 
+def test_arrivals_check_in_from_centre_at_the_boundary():
+    """An inbound spawns out past your ring on centre's frequency — grey,
+    and deaf to you — then checks in and turns controllable the instant it
+    crosses the boundary."""
+    s = _pwm()
+    s._spawn_arrival(allow_sat=False)          # a normal hand-in arrival
+    a = s.aircraft[-1]
+    ap = s.airport
+    # spawned beyond the ring, still with centre, not yet yours
+    assert a["pre_ho"] and a["dim"]
+    assert haversine_nm(a["lat"], a["lon"], ap["lat"], ap["lon"]) > SECTOR_NM
+    assert not _commandable(a)
+    assert "still with centre" in s.command(f"{a['callsign']} l 90")
+    # walk it in across the boundary
+    t = 0.0
+    s.tick(t)
+    for _ in range(600):
+        t += 3.0
+        s.tick(t)
+        if not a.get("pre_ho"):
+            break
+    assert not a["pre_ho"] and not a["dim"]     # centre handed it over
+    assert _commandable(a)                       # now yours to work
+    assert any("with you" in line for _, line, *_ in s.radio)
+
+
 def test_wrong_procedure_kind_and_unknown_are_refused():
     s = _pwm()
-    s._spawn_arrival(allow_sat=False)
+    s._spawn_arrival(allow_sat=False, handin=False)
     a = s.aircraft[-1]
     assert "is a departure" in s.command(f"{a['callsign']} via HSKEL4")
     assert "unfamiliar" in s.command(f"{a['callsign']} via NOPE9")
@@ -490,7 +517,7 @@ def test_wrong_procedure_kind_and_unknown_are_refused():
 
 def test_a_vector_cancels_the_procedure():
     s = _pwm()
-    s._spawn_arrival(allow_sat=False)
+    s._spawn_arrival(allow_sat=False, handin=False)
     a = s.aircraft[-1]
     s.command(f"{a['callsign']} via CDOGG4")
     assert a["phase"] == "nav"
@@ -537,7 +564,7 @@ def test_ex_cifp_field_declines_a_procedure():
     s._next_arrival = s._next_vfr = s._next_over = 1e9
     s._next_sat_dep = s._next_neighbor = s._next_departure = 1e9
     s.aircraft.clear()
-    s._spawn_arrival(allow_sat=False)
+    s._spawn_arrival(allow_sat=False, handin=False)
     a = s.aircraft[-1]
     assert "unfamiliar" in s.command(f"{a['callsign']} via CDOGG4")
 

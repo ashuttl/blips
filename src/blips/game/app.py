@@ -24,7 +24,7 @@ from blips._location import get_location
 from blips._radar_sources import theme_id
 from blips._runtime import resolve_live
 from blips._commands import CommandError, airline_name, resolve_callsign
-from blips.game.sim import SECTOR_NM, Sim, _controlled
+from blips.game.sim import SECTOR_NM, Sim, _commandable, _controlled
 from blips.game.procedures import overlay_for
 from blips._theme import ensure_contrast
 from blips.game.voice import Speaker
@@ -83,6 +83,8 @@ def _strip_card(ac):
     elif plan == "arrival":
         where = f"{ac['tag']} " if ac.get("tag") else ""
         job = f"arrival via {ac['fix']} → {where}rwy {ac['rwy']}"
+        if ac.get("pre_ho"):
+            job += " · with centre"
         if ac.get("from"):
             route = f"from {ac['from']}"
     else:
@@ -191,7 +193,7 @@ class _Console:
         # otherwise the bar holds something else and we leave it be
         head, _, rest = self.buffer.partition(" ")
         on_freq = [a for a in self.sim.aircraft
-                   if a["phase"] != "handed" and _controlled(a)]
+                   if a["phase"] != "handed" and _commandable(a)]
         try:
             resolve_callsign(head, on_freq)
         except CommandError:

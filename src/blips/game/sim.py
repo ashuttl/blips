@@ -92,6 +92,15 @@ def _controlled(ac):
     """Is this target on your frequency — yours to work, yours to lose?"""
     return ac["plan"] in ("arrival", "departure")
 
+
+def _commandable(ac):
+    """Yours to work *right now* — on your frequency and the handoff done.
+
+    An arrival still with centre paints on the scope and counts against
+    your flow, but won't take a clearance until it checks in with you.
+    """
+    return _controlled(ac) and not ac.get("pre_ho")
+
 # wake category by type — everything unlisted radar-separates at the
 # standard 3 nm.  The B757 is its own famous case: "large" on paper,
 # notorious enough on final to carry extra spacing in the real rules.
@@ -789,7 +798,7 @@ class Sim:
         for _ in range(6):
             if sum(a["plan"] == "arrival" for a in self.aircraft) >= 2:
                 break
-            self._spawn_arrival(allow_sat=False)
+            self._spawn_arrival(allow_sat=False, handin=False)
         arrivals = [a for a in self.aircraft if a["plan"] == "arrival"]
         if len(arrivals) > 1:
             # one of them is already partway in and part-descended — but
@@ -1054,9 +1063,10 @@ class Sim:
             "phase": "cruise",   # cruise | cleared | established | handed | nav
             "plan": "arrival", "fix": None, "rwy": None, "thr": None,
             "course": None, "delay": 0.0, "nav": None, "via_name": None,
+            "pre_ho": False,   # inbound but still with centre, not yet yours
         }
 
-    def _spawn_arrival(self, allow_sat=True):
+    def _spawn_arrival(self, allow_sat=True, handin=True):
         # the field picks the cast — satellite traffic is the satellite's
         # own, decided before the draw — and the origin picks the gate, so
         # a flight enters from the direction it really comes from.  A cast
@@ -1074,10 +1084,19 @@ class Sim:
         entry = self._gate_toward(self.sector["entries"],
                                   origin[1] if origin else None)
         elat, elon = self.sector["fixes"][entry]
-        lat, lon = advance(elat, elon,
-                           bearing_to(self.airport["lat"],
-                                      self.airport["lon"], elat, elon),
-                           self.rng.uniform(0, 4))  # just outside the fix
+        # centre works its inbounds well outside your ring — sometimes off
+        # the edge of the scope entirely — and hands them across as they
+        # reach the boundary.  The sector you inherit at start (handin=False)
+        # is already yours, spawned just outside its gate the old way.
+        out_brg = bearing_to(self.airport["lat"], self.airport["lon"],
+                             elat, elon)
+        if handin:
+            spawn_d = SECTOR_NM + self.rng.uniform(10.0, 22.0)
+            lat, lon = advance(self.airport["lat"], self.airport["lon"],
+                               out_brg, spawn_d)
+        else:
+            lat, lon = advance(elat, elon, out_brg,
+                               self.rng.uniform(0, 4))  # just outside the fix
         # each corner post owns an altitude band, staggered so unworked
         # streams don't conflict with each other — only with your plan
         base = 110 + 10 * self.sector["entries"].index(entry)
@@ -1124,10 +1143,21 @@ class Sim:
         self.aircraft.append(ac)
         where = f" for {sat['name']}" if sat is not None else ""
         tail = f", from {origin[0]}" if origin else ""
+        # the line they read you on first contact, kept for the moment
+        # centre turns them loose (see _handin_tick)
+        ac["checkin"] = f"inbound {entry}{where}{tail}"
+        if handin:
+            # centre's strip until it reaches your ring — grey, and deaf
+            # to you until it crosses and checks in (see _handin_tick)
+            ac.update(pre_ho=True, dim=True)
+        else:
+            self._check_in(ac)   # already yours — the sector you inherited
+
+    def _check_in(self, ac):
+        """An arrival's first call to you, the instant centre hands it over."""
         self.say(f"{self.airport['city'] or 'Approach'} approach, "
-                 f"{hail(ac)} with you, {say_altitude(alt)}, "
-                 f"inbound {entry}{where}{tail}", "checkin",
-                 voice=ac["callsign"])
+                 f"{hail(ac)} with you, {say_altitude(ac['alt'])}, "
+                 f"{ac['checkin']}", "checkin", voice=ac["callsign"])
 
     def _spawn_departure(self, sat=None):
         """A departure off the main runway — or, given ``sat``, off the
@@ -1762,6 +1792,7 @@ class Sim:
         self._weather_tick(dt)
         self._flow_tick(dt)
         self._center_tick(dt)
+        self._handin_tick(dt)
         self._emergency_tick(dt)
         self._nordo_tick(dt)
         self._wake_final()
@@ -1804,7 +1835,7 @@ class Sim:
             return
         for ac in self.aircraft:
             if (ac["phase"] not in ("cruise", "hold")
-                    or not _controlled(ac)       # VFR dodges its own cells
+                    or not _commandable(ac)      # VFR & centre's inbounds ask nobody
                     or ac["squawk"] == "7700"
                     or ac.get("nordo_until")):   # nobody to ask with
                 continue
@@ -1878,6 +1909,20 @@ class Sim:
                          f"clearance, fly present heading, expect runway "
                          f"{ac['rwy']}", "atc")
 
+    def _handin_tick(self, dt):
+        """Centre turns each inbound loose to you as it reaches your boundary:
+        the moment it crosses the ring the flight checks in and is yours.
+        """
+        for ac in self.aircraft:
+            if not ac.get("pre_ho"):
+                continue
+            dist = haversine_nm(ac["lat"], ac["lon"],
+                                self.airport["lat"], self.airport["lon"])
+            if dist > SECTOR_NM:
+                continue
+            ac.update(pre_ho=False, dim=False)
+            self._check_in(ac)
+
     # -- centre next door -------------------------------------------------------
     def _center_closed(self):
         return self._elapsed < self._center_until
@@ -1919,6 +1964,7 @@ class Sim:
         candidates = [ac for ac in self.aircraft
                       if ac["plan"] == "arrival" and ac["phase"] == "cruise"
                       and not ac.get("sat")     # the equipment is here
+                      and not ac.get("pre_ho")  # already on your frequency
                       and ac["alt"] > 6000.0]
         if candidates:
             self._declare_emergency(self.rng.choice(candidates))
@@ -1949,7 +1995,7 @@ class Sim:
         if self.rng.random() > dt / 2400.0:
             return
         candidates = [ac for ac in self.aircraft
-                      if _controlled(ac)
+                      if _commandable(ac)
                       and ac["phase"] in ("cruise", "hold")
                       and ac["squawk"] not in ("7600", "7700")
                       and not ac.get("mayday_t")]
@@ -1965,7 +2011,7 @@ class Sim:
         wanting = []
         for ac in self.aircraft:
             if (ac.get("asked") or ac["phase"] != "cruise"
-                    or ac.get("nordo_until")):
+                    or ac.get("nordo_until") or ac.get("pre_ho")):
                 continue
             if (ac["plan"] == "arrival" and ac["alt"] > 9000.0
                     and ac["tgt_alt"] >= ac["alt"]):
@@ -2043,7 +2089,9 @@ class Sim:
                 continue
             dist = haversine_nm(ac["lat"], ac["lon"],
                                 self.airport["lat"], self.airport["lon"])
-            if dist > DESPAWN_NM:
+            if dist > DESPAWN_NM and not ac.get("pre_ho"):
+                # centre's inbounds start out past the ring and fly in —
+                # they're never a diversion, so they don't count out here
                 if ac["phase"] == "handed":
                     self.departed += 1
                     self.offered += 50
@@ -2195,18 +2243,21 @@ class Sim:
             roster = [a for a in self.aircraft if a["phase"] != "handed"]
             try:
                 ac = resolve_callsign(query,
-                                      [a for a in roster if _controlled(a)])
+                                      [a for a in roster if _commandable(a)])
             except CommandError:
-                # maybe they keyed a target that was never theirs to call
+                # maybe they keyed a target that isn't theirs to call yet
                 try:
                     ghost = resolve_callsign(
-                        query, [a for a in roster if not _controlled(a)])
+                        query, [a for a in roster if not _commandable(a)])
                 except CommandError:
                     raise   # the original "nobody answers" stands
-                what = {"overflight": "they're with centre",
-                        "balloon": "that's a balloon",
-                        "vfr": "a VFR target squawking twelve hundred"
-                        }[ghost["plan"]]
+                if ghost.get("pre_ho"):
+                    what = "they're still with centre, stand by for the handoff"
+                else:
+                    what = {"overflight": "they're with centre",
+                            "balloon": "that's a balloon",
+                            "vfr": "a VFR target squawking twelve hundred"
+                            }[ghost["plan"]]
                 raise CommandError(f"{ghost['callsign']} isn't on your "
                                    f"frequency — {what}")
             if ac.get("nordo_until"):
