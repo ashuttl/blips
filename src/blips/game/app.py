@@ -345,13 +345,17 @@ def _shift_card(sim, airport, seed, live_cast, entry=None, prev=None):
     rating = _rating(sim)
     book = ""
     if entry is not None:
-        if prev is None:
-            note = "first shift in the book here"
-        elif rating != "—" and sim.score > prev["score"]:
+        if rating != "—" and prev is not None and sim.score > prev["score"]:
             note = (f"new personal best — previous "
                     f"{prev['score']:,} ({prev['rating']})")
-        else:
+        elif prev is not None:
             note = f"personal best here {prev['score']:,} ({prev['rating']})"
+        elif rating != "—":
+            note = "first rated shift — your record now"
+        elif entry["shifts"] == 1:
+            note = "first shift in the book here"
+        else:
+            note = "no rated shift yet"
         book = (f"\n  {note} · {entry['shifts']} shifts, "
                 f"{entry['landed']} landings all-time")
     lines = [
