@@ -82,7 +82,7 @@ def _strip_card(ac):
         job = "hot air balloon — going where the wind goes"
     elif plan == "arrival":
         where = f"{ac['tag']} " if ac.get("tag") else ""
-        job = f"arrival via {ac['fix']} → {where}rwy {ac['rwy']}"
+        job = f"arrival → {where}rwy {ac['rwy']}"
         if ac.get("pre_ho"):
             job += " · with centre"
         if ac.get("from"):

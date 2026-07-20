@@ -1081,22 +1081,27 @@ class Sim:
                        and self.rng.random() < 0.18)
             callsign, actype, origin = self._cast_flight(
                 "arrival", field=sat_apt if for_sat else None)
+        # the gate still sets the altitude band — converging streams from
+        # one direction stay vertically split — but it no longer pins where
+        # a flight appears.  Centre's inbounds come in from the rough bearing
+        # of their origin, scattered wide: a flight's turned a dozen times
+        # since it left, so the true radial is a hint, not a rail.
         entry = self._gate_toward(self.sector["entries"],
                                   origin[1] if origin else None)
-        elat, elon = self.sector["fixes"][entry]
+        if origin and origin[1]:
+            from_brg = bearing_to(self.airport["lat"], self.airport["lon"],
+                                  origin[1][0], origin[1][1])
+        else:
+            from_brg = self.rng.uniform(0.0, 360.0)   # no placeable origin
+        brg = (from_brg + self.rng.uniform(-40.0, 40.0)) % 360.0
         # centre works its inbounds well outside your ring — sometimes off
         # the edge of the scope entirely — and hands them across as they
-        # reach the boundary.  The sector you inherit at start (handin=False)
-        # is already yours, spawned just outside its gate the old way.
-        out_brg = bearing_to(self.airport["lat"], self.airport["lon"],
-                             elat, elon)
-        if handin:
-            spawn_d = SECTOR_NM + self.rng.uniform(10.0, 22.0)
-            lat, lon = advance(self.airport["lat"], self.airport["lon"],
-                               out_brg, spawn_d)
-        else:
-            lat, lon = advance(elat, elon, out_brg,
-                               self.rng.uniform(0, 4))  # just outside the fix
+        # reach it.  The sector you inherit at start (handin=False) is
+        # already yours, spawned inside the boundary and being worked.
+        spawn_d = (SECTOR_NM + self.rng.uniform(10.0, 22.0) if handin
+                   else SECTOR_NM - self.rng.uniform(2.0, 14.0))
+        lat, lon = advance(self.airport["lat"], self.airport["lon"],
+                           brg, spawn_d)
         # each corner post owns an altitude band, staggered so unworked
         # streams don't conflict with each other — only with your plan
         base = 110 + 10 * self.sector["entries"].index(entry)
@@ -1141,11 +1146,18 @@ class Sim:
         if origin:
             ac["from"] = origin[0]   # the far city, kept for the hover chip
         self.aircraft.append(ac)
-        where = f" for {sat['name']}" if sat is not None else ""
-        tail = f", from {origin[0]}" if origin else ""
-        # the line they read you on first contact, kept for the moment
-        # centre turns them loose (see _handin_tick)
-        ac["checkin"] = f"inbound {entry}{where}{tail}"
+        # the origin lead-in for first contact — no navaid, since they're no
+        # longer filed down one.  The live position is read off the scope
+        # when they actually call (see _check_in), so it's kept separate.
+        if sat is not None:
+            frm = f", from {origin[0]}" if origin else ""
+            ac["checkin"] = f"inbound for {sat['name']}{frm}"
+        elif origin:
+            ac["checkin"] = f"inbound from {origin[0]}"
+        else:
+            octant = ("north", "northeast", "east", "southeast", "south",
+                      "southwest", "west", "northwest")[round(brg / 45.0) % 8]
+            ac["checkin"] = f"inbound from the {octant}"
         if handin:
             # centre's strip until it reaches your ring — grey, and deaf
             # to you until it crosses and checks in (see _handin_tick)

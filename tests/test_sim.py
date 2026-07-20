@@ -507,6 +507,29 @@ def test_arrivals_check_in_from_centre_at_the_boundary():
     assert any("with you" in line for _, line, *_ in s.radio)
 
 
+def test_arrivals_enter_from_their_origin_direction():
+    """A flight comes in from the general bearing of its origin, scattered
+    but never from the wrong side of the field — a westerly origin enters
+    from the west, not snapped to a corner post."""
+    from blips._airports import find_airport
+    ap = find_airport("kpwm")
+    ord_ = find_airport("ord")
+    want = bearing_to(ap["lat"], ap["lon"], ord_["lat"], ord_["lon"])
+    s = Sim(ap, seed=3, schedule=[["UAL", "B738", "ORD", 30]])
+    s.aircraft.clear()
+    for _ in range(20):
+        s._spawn_arrival(allow_sat=False)
+    arrs = [a for a in s.aircraft if a["plan"] == "arrival" and not a.get("sat")]
+    assert arrs
+    for a in arrs:
+        got = bearing_to(ap["lat"], ap["lon"], a["lat"], a["lon"])
+        # within the scatter of the true origin bearing, and not on a gate
+        assert abs(turn_delta(got, want)) <= 45.0
+    spread = {round(bearing_to(ap["lat"], ap["lon"], a["lat"], a["lon"]))
+              for a in arrs}
+    assert len(spread) > 1                        # not all on one radial
+
+
 def test_wrong_procedure_kind_and_unknown_are_refused():
     s = _pwm()
     s._spawn_arrival(allow_sat=False, handin=False)
