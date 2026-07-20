@@ -55,7 +55,8 @@ RADIO_HINT = ("callsign then  l/r hdg · c/d alt · rs/is spd · s resume · "
               "dct FIX · via PROC · hold [FIX] · i [rwy] · tfc · ho handoff")
 # `?` reveals the desk: control keys, shown as keys so they read apart from the
 # radio verbs above.  These run the station, not the airplanes.
-MORE_HINT = "desk:  ^L log · ^P pause · ^W weather · ^V voice · ^C quit"
+MORE_HINT = ("desk:  +/− zoom · ^L log · ^P pause · ^W weather · "
+             "^V voice · ^C quit")
 
 
 def _strip_card(ac):
