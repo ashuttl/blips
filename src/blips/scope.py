@@ -936,6 +936,25 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
                        and (c, r) not in overlays for c, r in cells):
                     for (c, r), ch in zip(cells, label):
                         reticle[(c, r)] = (ch, RING)
+            # range: each ring wears its radius in miles, a dim scale marching
+            # down the south spoke, so after a zoom the picture still says how
+            # far apart things are — three miles has to mean something on sight.
+            # The number sits just outside its ring and yields to traffic.
+            spacing = _ring_spacing_nm(zoom)
+            for k in range(1, 8):
+                r_nm = spacing * k
+                if r_nm > zoom * 45:
+                    break
+                dlat, dlon = advance(rlat, rlon, 180.0, r_nm)
+                dx, dy = _project(dlon, dlat, bbox, graph_w, height_cells)
+                label = f"{int(round(r_nm))}"
+                col, row = int(dx) - len(label) // 2, int(dy) + 1
+                cells = [(col + i, row) for i in range(len(label))]
+                if all(0 <= c < graph_w and 0 <= row < height_cells
+                       and (c, row) not in overlays and (c, row) not in reticle
+                       for c, _r in cells):
+                    for (c, _r), ch in zip(cells, label):
+                        reticle[(c, row)] = (ch, RING)
     if 0 <= hcol < graph_w and 0 <= hrow < height_cells:
         reticle[(hcol, hrow)] = ("+", MARKER)
 
