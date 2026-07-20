@@ -639,6 +639,7 @@ class Sim:
         self.source = f"{airport['icao']} approach"
         self._bust_pairs = set()
         self._nmac_pairs = set()
+        self.conflicts = []      # (hex_a, hex_b, "loss"|"alert") for the scope
         self.nmacs = 0           # near-misses with traffic nobody controls
         self._counter = 0
         self._next_arrival = 45.0
@@ -1873,6 +1874,7 @@ class Sim:
         for ac in self.aircraft:
             ac["emergency"] = False
             ac["ca"] = False
+        self.conflicts = []
         for i, a in enumerate(yours):
             for b in yours[i + 1:]:
                 if abs(a["alt"] - b["alt"]) >= SEP_FT:
@@ -1883,6 +1885,7 @@ class Sim:
                 pair = tuple(sorted((a["hex"], b["hex"])))
                 current.add(pair)
                 a["emergency"] = b["emergency"] = True
+                self.conflicts.append((a["hex"], b["hex"], "loss"))
                 if pair not in self._bust_pairs:
                     self.busts += 1
                     self.score -= 500
@@ -1906,6 +1909,7 @@ class Sim:
                 pair = tuple(sorted((a["hex"], t["hex"])))
                 nmacs.add(pair)
                 a["emergency"] = t["emergency"] = True
+                self.conflicts.append((a["hex"], t["hex"], "loss"))
                 if pair not in self._nmac_pairs:
                     self.nmacs += 1
                     self.score -= 200
@@ -1934,6 +1938,7 @@ class Sim:
                              b["gs"] * CA_LOOK_S / 3600.0)
                 if haversine_nm(pa[0], pa[1], pb[0], pb[1]) < SEP_NM:
                     a["ca"] = b["ca"] = True
+                    self.conflicts.append((a["hex"], b["hex"], "alert"))
         # …and the same projection against the traffic nobody controls,
         # at hazard scale rather than separation scale
         for a in yours:
@@ -1950,6 +1955,7 @@ class Sim:
                              t["gs"] * CA_LOOK_S / 3600.0)
                 if haversine_nm(pa[0], pa[1], pt[0], pt[1]) < 1.5:
                     a["ca"] = t["ca"] = True
+                    self.conflicts.append((a["hex"], t["hex"], "alert"))
 
     @staticmethod
     def _proj_alt(ac):

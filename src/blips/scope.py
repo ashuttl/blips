@@ -470,6 +470,27 @@ def _draw_leader(fx, basemap, ac, lat, lon, color):
                  lerp(_fade_bg(basemap, int(x0), int(y0)), color, 0.55))
 
 
+def _cpa_nm(a, alat, alon, b, blat, blon):
+    """Predicted closest separation (nm) for two aircraft holding their
+    current tracks — the straight-line miss distance from here on.  None
+    when a target has no vector to project.  Positions come in already
+    dead-reckoned so the number matches the line drawn between the blips.
+    """
+    if a["track"] is None or b["track"] is None or not a["gs"] or not b["gs"]:
+        return None
+    latm = math.radians((alat + blat) / 2)
+    rx = (alon - blon) * 60.0 * math.cos(latm)   # a relative to b, in nm
+    ry = (alat - blat) * 60.0
+    ta, tb = math.radians(a["track"]), math.radians(b["track"])
+    vx = a["gs"] * math.sin(ta) - b["gs"] * math.sin(tb)   # closure, kt
+    vy = a["gs"] * math.cos(ta) - b["gs"] * math.cos(tb)
+    vv = vx * vx + vy * vy
+    if vv < 1e-6:
+        return math.hypot(rx, ry)                # parallel: the gap holds
+    t = max(0.0, -(rx * vx + ry * vy) / vv)      # hours until closest
+    return math.hypot(rx + vx * t, ry + vy * t)
+
+
 def _build_echo(rgba, pw, ph, graph_w, height_cells):
     """Reduce a sub-pixel radar frame to a per-cell (r, g, b, weight) grid.
 
@@ -820,6 +841,43 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
                     air[(c, row)] = (label[i],
                                      color if i < len(ac["callsign"])
                                      else MUTED)
+                break
+
+    # conflict pairs: a line tying the two blips the box is alarming about,
+    # so on a crowded scope you see which two at a glance — and, at the
+    # midpoint, the miles they're set to pass within.  It pulses with the
+    # blips before the loss and goes solid once the three miles are gone.
+    by = {ac["hex"]: (ac, alat, alon, col, row)
+          for _d2, ac, alat, alon, col, row in placed}
+    blink = int(now * 2) % 2
+    seen_pairs = set()
+    for ha, hb, sev in getattr(feed, "conflicts", ()):
+        if ha not in by or hb not in by or (ha, hb) in seen_pairs:
+            continue
+        seen_pairs.add((ha, hb))
+        if sev == "alert" and not blink:
+            continue                     # in step with the alerting blips
+        a, ala, alo, aco, aro = by[ha]
+        b, bla, blo, bco, bro = by[hb]
+        x0, y0 = _project(alo, ala, fx.bbox, fx.dw, fx.dh)
+        x1, y1 = _project(blo, bla, fx.bbox, fx.dw, fx.dh)
+        fx._dot_line(x0, y0, x1, y1,
+                     lerp(_fade_bg(basemap, int(x0), int(y0)), ALERT, 0.5))
+        gap = _cpa_nm(a, ala, alo, b, bla, blo)
+        if gap is None:
+            continue
+        text = f"{gap:.1f}"
+        mc = (aco + bco) // 2 - len(text) // 2   # centred on the midpoint
+        mrow = (aro + bro) // 2
+        # a same-altitude pair shares a row with its data blocks, so drop the
+        # readout to a neighbouring row when the midpoint itself is taken
+        for mr in (mrow, mrow - 1, mrow + 1, mrow - 2, mrow + 2):
+            span = [(mc + i, mr) for i in range(len(text))]
+            if all(0 <= c < graph_w and 0 <= mr < height_cells
+                   and (c, mr) not in air and (c, mr) not in blip_cells
+                   for c, _r in span):
+                for i, (c, _r) in enumerate(span):
+                    air[(c, mr)] = (text[i], ALERT)
                 break
 
     # blips last: never covered, even by another aircraft's data block

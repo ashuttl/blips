@@ -1,5 +1,6 @@
 """The sim: honest kinematics, ILS geometry, separation, sector rules."""
 
+import math
 import re
 
 import pytest
@@ -861,6 +862,43 @@ def test_conflict_alert_blinks_before_the_bust(sim):
     assert a["ca"] and b["ca"]
     assert sim.busts == 0
     assert not a["emergency"]           # an alert is not yet a loss
+
+
+def test_conflict_alert_is_exposed_as_a_pair(sim):
+    # the scope draws the tie-line between the two blips it's alarming about,
+    # so the pair the box flags has to reach the renderer, not just the flags
+    a = _arrival(sim, callsign="DAL100", alt=8000.0, hdg=180.0)
+    b = _arrival(sim, callsign="SWA200", alt=8000.0, hdg=360.0,
+                 lat=a["lat"] - 8.0 / 60.0, lon=a["lon"])
+    _run(sim, 2)
+    pairs = {(frozenset((h1, h2)), sev) for h1, h2, sev in sim.conflicts}
+    assert (frozenset((a["hex"], b["hex"])), "alert") in pairs
+
+
+def test_separation_loss_is_exposed_as_a_pair(sim):
+    a = _arrival(sim, callsign="DAL100", alt=5000.0, hdg=90.0)
+    b = _arrival(sim, callsign="SWA200", alt=5400.0, hdg=90.0,
+                 lat=a["lat"], lon=a["lon"] + 0.02)
+    _run(sim, 3)
+    assert (a["hex"], b["hex"], "loss") in sim.conflicts \
+        or (b["hex"], a["hex"], "loss") in sim.conflicts
+
+
+def test_cpa_reads_the_miss_distance():
+    from blips.scope import _cpa_nm
+    # ten miles apart on one line, closing head-on → they pass through ~0
+    lat, lon = 43.0, -70.0
+    east = lon + 10.0 / (60.0 * math.cos(math.radians(lat)))
+    a = {"track": 90.0, "gs": 300}       # west aircraft, flying east
+    b = {"track": 270.0, "gs": 300}      # east aircraft, flying west
+    assert _cpa_nm(a, lat, lon, b, lat, east) < 0.1
+    # parallel, same track, four miles abeam → the gap simply holds
+    c = {"track": 360.0, "gs": 250}
+    d = {"track": 360.0, "gs": 250}
+    gap = _cpa_nm(c, lat, lon, d, lat + 4.0 / 60.0, lon)
+    assert abs(gap - 4.0) < 0.05
+    # a target with no vector can't be projected
+    assert _cpa_nm({"track": None, "gs": 0}, lat, lon, b, lat, east) is None
 
 
 def test_no_conflict_alert_when_diverging(sim):
