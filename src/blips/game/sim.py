@@ -1858,14 +1858,25 @@ class Sim:
         self._set_wind()         # the wind that turned the airport
         self._say_atis(update=True)
         for ac in self.aircraft:
-            if ac["plan"] == "arrival" and ac["phase"] == "cleared":
+            if ac["plan"] != "arrival":
+                continue
+            # already committed to the old runway — land them out
+            if ac["phase"] in ("established", "landed"):
+                continue
+            # everyone still inbound turns with the airport: their
+            # expected runway follows the new flow (satellite arrivals
+            # keep to the satellite's end)
+            if ac.get("sat"):
+                sat = self.sector["sat"]
+                ac.update(rwy=sat["rwy"], thr=sat["thr"], course=sat["course"])
+            else:
+                ac.update(rwy=ident, thr=thr, course=course)
+            if ac["phase"] == "cleared":
                 # not yet established: their clearance dies with the flow
                 ac["phase"] = "cruise"
-                expect = (self.sector["sat"]["rwy"] if ac.get("sat")
-                          else ident)
                 self.say(f"{hail(ac)}, cancel approach "
                          f"clearance, fly present heading, expect runway "
-                         f"{expect}", "atc")
+                         f"{ac['rwy']}", "atc")
 
     # -- centre next door -------------------------------------------------------
     def _center_closed(self):
