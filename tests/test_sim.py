@@ -567,6 +567,65 @@ def test_departure_handoff_rules(sim):
     assert sim.score == 50
 
 
+def test_traffic_profile_reads_the_signals():
+    """The vendored signals shape a field's traffic: scheduled service
+    casts airlines, 'Executive' plus a keywords column that remembers the
+    Navy casts bizjets, GA and the odd Reach mission."""
+    from blips.game.sim import traffic_profile
+    pwm = traffic_profile(find_airport("kpwm"))
+    assert pwm == {"airline": 1.0}                 # scheduled service
+    bxm = traffic_profile(find_airport("kbxm"))    # Brunswick Executive
+    assert "airline" not in bxm                    # never an airline arrival
+    assert bxm["bizjet"] >= 0.4                    # the Executive part
+    assert bxm["mil"] >= 0.2                       # the NAS the keywords keep
+    assert bxm["ga"] >= 0.2
+    base = traffic_profile({"icao": "XXXX", "name": "Whiteman Air Force Base",
+                            "svc": False, "kw": "", "country": "US",
+                            "rwys": [{"len": 12000}]})
+    assert base["mil"] >= 0.7                      # an active base
+    teb = traffic_profile(find_airport("kteb"))
+    assert teb["bizjet"] >= 0.7                    # the curated overrides
+
+
+def test_satellite_casts_as_itself():
+    """A satellite with no schedule casts from its own profile — bizjets,
+    GA and military metal with reg or wing callsigns — never a repainted
+    main-field airline flight."""
+    s = Sim(find_airport("kpwm"), seed=5)
+    sat = s.sector["sat_apt"]
+    assert sat["icao"] == "KBXM"                   # Brunswick, as in life
+    allowed = {"C56X", "GLF5", "PC12", "B350", "SR22", "C182",
+               "C130", "C17", "K35R"}
+    kinds = set()
+    for _ in range(40):
+        callsign, actype, origin = s._cast_flight("arrival", field=sat)
+        assert actype in allowed, (callsign, actype)
+        assert origin is None                      # no borrowed schedule
+        prefix = callsign[:3]
+        if prefix in ("EJA", "LXJ", "VJT"):
+            kinds.add("bizjet")
+        elif prefix in ("RCH", "CNV"):
+            kinds.add("mil")
+        elif callsign[0] == "N":
+            kinds.add("reg")
+    assert kinds >= {"bizjet", "mil", "reg"}       # the whole cast shows up
+
+
+def test_slow_types_spawn_at_their_own_speed():
+    """A nine-seater never spawns doing 250 knots, and its par time is
+    paced by its own cruise, not a jet's."""
+    sched = [["KAP", "C402", "BOS", 1]]
+    s = Sim(find_airport("kpwm"), seed=2, schedule=sched)
+    s.aircraft.clear()
+    s._spawn_arrival(allow_sat=False)
+    ac = s.aircraft[-1]
+    assert ac["actype"] == "C402"
+    assert ac["ias"] <= 175.0
+    dist = haversine_nm(ac["lat"], ac["lon"],
+                        s.airport["lat"], s.airport["lon"])
+    assert ac["par"] == pytest.approx(dist * (4500.0 / 175.0) + 300.0)
+
+
 def test_feed_compatible_snapshot(sim):
     _arrival(sim)
     _run(sim, 5)
@@ -639,7 +698,10 @@ def test_schedule_drives_real_routes_with_origin():
     s = Sim(find_airport("kpwm"), seed=7, schedule=sched)
     for _ in range(12):
         s._spawn_arrival()
-    arrs = [ac for ac in s.aircraft if ac.get("plan") == "arrival"]
+    # satellite arrivals cast as the satellite's own traffic, not the
+    # main schedule's — so only the main field's arrivals are checked
+    arrs = [ac for ac in s.aircraft
+            if ac.get("plan") == "arrival" and not ac.get("sat")]
     assert arrs
     for ac in arrs:
         assert ac["callsign"][:3] in ("MXY", "RPA")

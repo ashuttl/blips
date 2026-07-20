@@ -33,7 +33,11 @@ TELEPHONY = {
     "SKW": "SkyWest", "RPA": "Brickyard", "EDV": "Endeavor", "ENY": "Envoy",
     "PDT": "Piedmont", "JIA": "Blue Streak", "AWI": "Wisconsin",
     # bizjet fleets
-    "EJA": "ExecJet", "LXJ": "Flexjet",
+    "EJA": "ExecJet", "LXJ": "Flexjet", "VJT": "Vistajet",
+    # military transport/tanker wings — the lifters a TRACON actually
+    # works, not the fast movers
+    "RCH": "Reach", "CNV": "Convoy", "RRR": "Ascot", "CFC": "Canforce",
+    "ASY": "Aussie", "GAF": "German Air Force", "CTM": "Cotam",
     # Canada + Latin America
     "ACA": "Air Canada", "WJA": "WestJet", "POE": "Porter", "JZA": "Jazz",
     "TSC": "Transat", "ROU": "Rouge", "AMX": "Aeromexico", "VOI": "Volaris",
@@ -264,6 +268,25 @@ TELEPHONY = {
 _DIGITS = {"0": "zero", "1": "one", "2": "two", "3": "three", "4": "four",
            "5": "five", "6": "six", "7": "seven", "8": "eight", "9": "niner"}
 
+_NATO = {"A": "alfa", "B": "bravo", "C": "charlie", "D": "delta",
+         "E": "echo", "F": "foxtrot", "G": "golf", "H": "hotel",
+         "I": "india", "J": "juliett", "K": "kilo", "L": "lima",
+         "M": "mike", "N": "november", "O": "oscar", "P": "papa",
+         "Q": "quebec", "R": "romeo", "S": "sierra", "T": "tango",
+         "U": "uniform", "V": "victor", "W": "whiskey", "X": "x-ray",
+         "Y": "yankee", "Z": "zulu"}
+
+
+def _reg_shaped(cs):
+    """Does this look like a registration rather than an airline flight?
+    The shapes the spawner issues: N-numbers (N423TB), all-letter regs
+    (GBKLX — G-ABCD undashed), and letters-then-digits (JA8231)."""
+    if cs[:1] == "N" and cs[1:2].isdigit():
+        return cs.isalnum()
+    if cs.isalpha():
+        return 4 <= len(cs) <= 6
+    return len(cs) >= 4 and cs[:2].isalpha() and cs[2:].isdigit()
+
 TRANSITION_FT = 18000  # FL above, thousands below (US convention)
 
 
@@ -302,11 +325,17 @@ def say_altitude(alt_ft):
 
 
 def telephony(callsign):
-    """'RPA5655' → 'Brickyard 5655'; unknown prefixes read back as typed."""
+    """'RPA5655' → 'Brickyard 5655'; a registration reads phonetically —
+    'N423TB' → 'november four two three tango bravo'; anything else as
+    typed."""
     prefix, flight = callsign[:3], callsign[3:]
     name = TELEPHONY.get(prefix.upper())
     if name and flight:
         return f"{name} {flight}"
+    cs = callsign.upper()
+    if _reg_shaped(cs):
+        words = " ".join(_NATO[c] if c in _NATO else _DIGITS[c] for c in cs)
+        return words[0].upper() + words[1:]
     return callsign
 
 

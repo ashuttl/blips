@@ -112,7 +112,11 @@ def test_exact_match_beats_suffix():
 def test_telephony():
     assert telephony("RPA5655") == "Brickyard 5655"
     assert telephony("BAW38W") == "Speedbird 38W"
-    assert telephony("N429SP") == "N429SP"       # GA reads back as typed
+    # a registration reads phonetically, the way a pilot would say it
+    assert telephony("N429SP") == "November four two niner sierra papa"
+    assert telephony("GBKLX") == "Golf bravo kilo lima x-ray"
+    assert telephony("JA8231") == "Juliett alfa eight two three one"
+    assert telephony("RCH412") == "Reach 412"    # the military lifters
 
 
 def test_radio_numbers():

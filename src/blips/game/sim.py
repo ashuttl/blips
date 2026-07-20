@@ -70,6 +70,11 @@ PERF = {
     # 9-seat commuter piston twins — Cape Air's metal, slower finals than a
     # turboprop (Cessna 402, Tecnam P2012 Traveller)
     "C402": (175, 110, 95, 1200, 1000), "P212": (160, 100, 90, 1100, 900),
+    # turboprop singles and twins — the IFR end of general aviation
+    "PC12": (230, 130, 100, 1600, 1300), "B350": (245, 150, 110, 2200, 1600),
+    # military transports and tankers — the Guard and the reach missions
+    "C130": (260, 150, 125, 1900, 1800), "C17": (280, 200, 140, 2600, 2200),
+    "K35R": (280, 210, 145, 2300, 2000), "A400": (270, 165, 130, 2200, 1900),
 }
 
 # the sky that isn't yours: GA types that wander the sector VFR, squawking
@@ -93,6 +98,7 @@ def _controlled(ac):
 WAKE = {"A388": "super",
         "B77W": "heavy", "B763": "heavy", "B788": "heavy",
         "A359": "heavy", "A339": "heavy",
+        "C17": "heavy", "K35R": "heavy", "A400": "heavy",
         "B752": "b757"}
 WAKE_NM = {"super": 6.0, "heavy": 5.0, "b757": 4.0}   # in-trail behind one
 _WAKE_WORD = {"super": "super", "heavy": "heavy", "b757": "seven five seven"}
@@ -109,6 +115,7 @@ MIN_RWY = {
     "DH8D": 4500, "AT76": 4500, "C56X": 5000, "GLF5": 5500,
     "B763": 8000, "B788": 8500, "A339": 8500, "A359": 9000,
     "B77W": 9000, "A388": 10000,
+    "K35R": 7000,   # the C-17 and C-130 were built for short fields
 }
 
 
@@ -141,7 +148,7 @@ FLEETS = {
     "AWI": ("CRJ7",), "QXE": ("E175",), "GJS": ("CRJ7",), "UCA": ("CRJ7",),
     "VTE": ("CRJ7",), "JZA": ("CRJ9", "DH8D"),
     # bizjet fractional
-    "EJA": ("C56X", "GLF5"), "LXJ": ("C56X", "GLF5"),
+    "EJA": ("C56X", "GLF5"), "LXJ": ("C56X", "GLF5"), "VJT": ("GLF5", "C56X"),
     # Canada
     "ACA": ("A223", "A320", "A321", "B738", "B788", "B77W"),
     "WJA": ("B738", "B788"), "POE": ("E290",), "FLE": ("B738",),
@@ -429,6 +436,95 @@ POOLS = {
 }
 WORLD_POOL = ("BAW", "DLH", "AFR", "KLM", "UAE", "QTR", "SIA", "AAL",
               "DAL", "UAL", "THY", "CPA", "ANA")
+
+# A field with no airline schedule still sees traffic — whose, exactly, is
+# written in the signals vendored with the airport: scheduled service or
+# not, the name, the keywords column (which remembers former names —
+# "Brunswick NAS" still knows the Navy), and the runway.  traffic_profile
+# turns those into weights over the casting strata, so Brunswick Executive
+# fills with bizjets, GA and the odd Reach mission instead of wearing the
+# main field's airline schedule.
+
+MIL_OPS = {
+    # country → the military operators that call at its fields: transport
+    # and tanker wings, the traffic a TRACON actually vectors
+    "US": (("RCH", ("C17", "K35R", "C130")), ("CNV", ("C130",))),
+    "GB": (("RRR", ("A400", "C17")),),
+    "CA": (("CFC", ("C130", "C17")),),
+    "AU": (("ASY", ("C17", "C130")),),
+    "DE": (("GAF", ("A400",)),),
+    "FR": (("CTM", ("A400", "C130")),),
+}
+BIZ_OPS = ("EJA", "EJA", "LXJ", "VJT")     # fractionals; NetJets is everywhere
+GA_IFR = ("SR22", "C182", "PC12", "PC12", "B350")   # the IFR end of GA
+
+# words that say military, checked against name (an active base) and
+# keywords (a former one) — token-bounded, so Nassau never reads as an NAS
+_MIL_WORDS = ("afb", "air force base", "air base", "airbase",
+              "naval air station", "nas", "mcas", "army airfield", "aaf",
+              "raf", "joint base", "air national guard", "military")
+
+_PROFILE_OVERRIDE = {
+    # famous business-aviation fields the raw signals misread: Teterboro
+    # carries a scheduled-service flag (charters), Van Nuys and
+    # Farnborough read as plain no-service fields
+    "KTEB": {"bizjet": 0.75, "ga": 0.20, "mil": 0.05},
+    "KVNY": {"bizjet": 0.70, "ga": 0.28, "mil": 0.02},
+    "EGLF": {"bizjet": 0.80, "ga": 0.18, "mil": 0.02},
+}
+
+
+def _has_words(text, words):
+    """Token-bounded phrase search: 'brunswick nas' has 'nas', 'nassau'
+    doesn't."""
+    norm = " " + "".join(c if c.isalnum() else " "
+                         for c in text.lower()) + " "
+    return any(f" {w} " in norm for w in words)
+
+
+def traffic_profile(ap):
+    """Weights over the casting strata — airline, bizjet, ga, mil — for a
+    field, from its vendored signals.  A field with airline service casts
+    the airline mix it always did; one without casts what its name, its
+    keywords and its runway say it really sees."""
+    override = _PROFILE_OVERRIDE.get(ap.get("icao"))
+    if override:
+        return dict(override)
+    name, kw = ap.get("name", ""), ap.get("kw", "")
+    if _has_words(name, _MIL_WORDS):
+        if ap.get("svc", True):          # joint use, Charleston-style
+            return {"airline": 0.60, "mil": 0.35, "ga": 0.05}
+        return {"mil": 0.70, "bizjet": 0.15, "ga": 0.15}   # an active base
+    if ap.get("svc", True):
+        return {"airline": 1.0}          # scheduled service: the usual mix
+    mix = {"ga": 0.60, "bizjet": 0.35, "mil": 0.05}
+    if "executive" in name.lower() or "business" in name.lower():
+        mix["bizjet"] += 0.15
+        mix["ga"] -= 0.15
+    rwys = ap.get("rwys") or ()
+    if rwys and rwys[0]["len"] >= 7000:  # a runway this long expects metal
+        mix["bizjet"] += 0.05
+        mix["mil"] += 0.05
+        mix["ga"] -= 0.10
+    if _has_words(kw, _MIL_WORDS):       # the keywords remember a base
+        mix["mil"] += 0.20
+        mix["ga"] -= 0.10
+        mix["bizjet"] -= 0.10
+    return mix
+
+
+# registration shapes by country, for the GA and private-bizjet strata:
+# (prefix, letters after it).  The US and Japan have their own shapes,
+# handled specially; anywhere unlisted gets an N-number — the world's
+# most common registration, and what a visiting bizjet likely wears.
+REG_SHAPE = {
+    "CA": ("C", 4), "GB": ("G", 4), "IE": ("EI", 3), "AU": ("VH", 3),
+    "NZ": ("ZK", 3), "DE": ("D", 4), "FR": ("F", 4), "NL": ("PH", 3),
+    "BE": ("OO", 3), "CH": ("HB", 3), "AT": ("OE", 3), "IT": ("I", 4),
+    "ES": ("EC", 3), "PT": ("CS", 3), "SE": ("SE", 3), "NO": ("LN", 3),
+    "DK": ("OY", 3), "FI": ("OH", 3), "BR": ("PT", 3), "MX": ("XB", 3),
+    "ZA": ("ZS", 3), "IN": ("VT", 3),
+}
 
 _VOWELS = "AEIOU"
 _CONSONANTS = "BCDFGHJKLMNPRSTVWZ"
@@ -750,10 +846,10 @@ class Sim:
                 return callsign, airline
         return f"SIM{self._counter}", "SIM"
 
-    def _runway_ok(self, actype):
+    def _runway_ok(self, actype, field=None):
         """Will the field's longest runway take this type?  Missing runway
         data never restricts; unlisted types (GA, bizjets) always fit."""
-        rwys = self.airport.get("rwys") or ()
+        rwys = (field if field is not None else self.airport).get("rwys") or ()
         longest = max((r["len"] for r in rwys), default=99999)
         return MIN_RWY.get(actype, 0) <= longest
 
@@ -769,22 +865,25 @@ class Sim:
                 return callsign
         return f"{prefix}{self._counter}"
 
-    def _draw_schedule(self, role):
+    def _draw_schedule(self, role, field=None):
         """A real (callsign, actype, (place, code)) from the vendored
         schedule, or None.  ``code`` is the far end's IATA/name as stored,
         kept so the spawner can place it on the map; ``place`` is its
         display city.  The route's own metal flies unless the field's runway
         can't take it, in which case the carrier's next-best fitting type
-        stands in (a guard against a bad equipment guess in the data)."""
-        routes = self.schedule
+        stands in (a guard against a bad equipment guess in the data).
+        Given ``field`` (a satellite's airport record), that field's own
+        schedule and runway rule instead of the main airport's."""
+        routes = (self.schedule if field is None
+                  else schedule_for(field["icao"]))
         if not routes:
             return None
         weights = [r[3] for r in routes]
         for _ in range(8):
             prefix, actype, far, _w = self.rng.choices(routes, weights)[0]
-            if not self._runway_ok(actype):
+            if not self._runway_ok(actype, field):
                 fits = [t for t in FLEETS.get(prefix, ())
-                        if self._runway_ok(t)]
+                        if self._runway_ok(t, field)]
                 if not fits:
                     continue
                 actype = self.rng.choice(fits)
@@ -817,7 +916,7 @@ class Sim:
         return min(gates, key=lambda g: abs(turn_delta(
             bearing_to(lat, lon, *self.sector["fixes"][g]), want)))
 
-    def _cast_flight(self, role):
+    def _cast_flight(self, role, field=None):
         """(callsign, actype, far) — a real flight when we can.  ``far`` is
         ``(display, (lat, lon) | None)`` for the origin (arrivals) or
         destination (departures), or None when the cast carries no route.
@@ -826,10 +925,21 @@ class Sim:
         carriers, metal and routes that serve this field, so the check-in
         and the hover chip carry a true origin/destination.  Failing that
         (no schedule for this field) the live pool casts whoever's actually
-        in the air nearby, and last the synthesized country mix.  Arrivals
+        in the air nearby, and last the synthesized profile mix.  Arrivals
         and departures are gated to what the field's runway can take — a
         widebody never lands on a short strip.
+
+        Given ``field`` (a satellite's airport record), the flight is cast
+        as that field's own: its schedule when it has one, else whatever
+        its signals say it really sees — never a repainted main-field
+        flight, and never the live pool, which samples the main flow.
         """
+        if field is not None:
+            pick = self._draw_schedule(role, field=field)
+            if pick is not None:
+                cs, actype, end = pick
+                return cs, actype, self._far(end)
+            return self._cast_profile(field, role)
         pick = self._draw_schedule(role)
         if pick is not None:
             cs, actype, end = pick
@@ -846,11 +956,53 @@ class Sim:
                 fits = [t for t in FLEETS.get(cs[:3], ()) if self._runway_ok(t)]
                 if fits:
                     return cs, self.rng.choice(fits), self._far(end)
+        return self._cast_profile(self.airport, role)
+
+    def _cast_profile(self, ap, role):
+        """(callsign, actype, None) — synthesized in the shape the field's
+        signals call for (see ``traffic_profile``).  The airline stratum is
+        the country mix the last resort always was; the rest is who really
+        calls at a field with no schedule: fractionals and private regs,
+        IFR singles and King Airs, and the reach missions where the name
+        (or the keywords' memory of an old one) says military."""
+        weights = traffic_profile(ap)
+        for _ in range(8):
+            if role == "overflight":
+                break                    # FL350 belongs to the airlines
+            strata = list(weights)
+            stratum = self.rng.choices(
+                strata, [weights[s] for s in strata])[0]
+            if stratum == "bizjet":
+                if self.rng.random() < 0.6:
+                    prefix = self.rng.choice(BIZ_OPS)
+                    fleet = [t for t in FLEETS[prefix]
+                             if self._runway_ok(t, ap)]
+                    if fleet:
+                        return (self._prefix_callsign(prefix),
+                                self.rng.choice(fleet), None)
+                fleet = [t for t in ("C56X", "C56X", "GLF5")
+                         if self._runway_ok(t, ap)]
+                if fleet:
+                    return (self._reg_callsign(ap["country"]),
+                            self.rng.choice(fleet), None)
+            elif stratum == "ga":
+                return (self._reg_callsign(ap["country"]),
+                        self.rng.choice(GA_IFR), None)
+            elif stratum == "mil":
+                ops = MIL_OPS.get(ap["country"])
+                if ops:                  # no wing on file: reroll a stratum
+                    prefix, fleet = self.rng.choice(ops)
+                    fleet = [t for t in fleet if self._runway_ok(t, ap)]
+                    if fleet:
+                        return (self._prefix_callsign(prefix),
+                                self.rng.choice(fleet), None)
+            else:
+                break                    # airline: the country mix below
         callsign, airline = self._new_callsign()
         fleet = FLEETS.get(airline, ("A320",))
         if role != "overflight":
             for _ in range(8):    # re-roll past airlines with no fitting metal
-                fits = [t for t in fleet if self._runway_ok(t)]
+                fits = [t for t in fleet if self._runway_ok(t, ap)]
                 if fits:
                     fleet = fits
                     break
@@ -860,6 +1012,29 @@ class Sim:
                 fleet = ("E175",)   # nothing fit: a regional always does
         actype = self.rng.choice(fleet)
         return callsign, actype, None
+
+    def _reg_callsign(self, country):
+        """A registration for the GA and private-bizjet strata, shaped the
+        way the country's tail numbers really are.  Unlisted countries get
+        an N-number — the world's most common registration, and what a
+        visiting bizjet likely wears anyway."""
+        letters = "ABCDEFGHJKLMNPQRSTUVWXYZ"   # real regs avoid I and O
+        for _ in range(20):
+            if country == "JP":                # JA-numbers: JA8231
+                cs = "JA" + "".join(str(self.rng.randint(0, 9))
+                                    for _ in range(4))
+            elif country in REG_SHAPE:         # G-ABCD and kin, undashed
+                prefix, n = REG_SHAPE[country]
+                cs = prefix + "".join(self.rng.choice(letters)
+                                      for _ in range(n))
+            else:                              # N423TB
+                cs = ("N" + str(self.rng.randint(1, 9))
+                      + "".join(str(self.rng.randint(0, 9))
+                                for _ in range(self.rng.randint(1, 2)))
+                      + "".join(self.rng.choice(letters) for _ in range(2)))
+            if not any(ac["callsign"] == cs for ac in self.aircraft):
+                return cs
+        return f"N{self._counter}XX"
 
     def _base(self, callsign, actype, lat, lon, alt, hdg, ias):
         self._counter += 1
@@ -882,15 +1057,20 @@ class Sim:
         }
 
     def _spawn_arrival(self, allow_sat=True):
-        # cast first: the origin picks the gate, so a flight enters from the
-        # direction it really comes from.  A cast held over an aborted spawn
-        # is reused rather than redrawn, so a conflict never burns a real
-        # flight from the pool.
+        # the field picks the cast — satellite traffic is the satellite's
+        # own, decided before the draw — and the origin picks the gate, so
+        # a flight enters from the direction it really comes from.  A cast
+        # held over an aborted spawn is reused rather than redrawn, so a
+        # conflict never burns a real flight from the pool.
+        sat_apt = self.sector["sat_apt"]
         if self._held_arrival is not None:
-            callsign, actype, origin = self._held_arrival
+            (callsign, actype, origin), for_sat = self._held_arrival
             self._held_arrival = None
         else:
-            callsign, actype, origin = self._cast_flight("arrival")
+            for_sat = (allow_sat and sat_apt is not None
+                       and self.rng.random() < 0.18)
+            callsign, actype, origin = self._cast_flight(
+                "arrival", field=sat_apt if for_sat else None)
         entry = self._gate_toward(self.sector["entries"],
                                   origin[1] if origin else None)
         elat, elon = self.sector["fixes"][entry]
@@ -916,27 +1096,29 @@ class Sim:
             if (abs(other["alt"] - alt) < SEP_FT * 1.5
                     and haversine_nm(other["lat"], other["lon"],
                                      lat, lon) < SEP_NM * 3):
-                self._held_arrival = (callsign, actype, origin)
+                self._held_arrival = ((callsign, actype, origin), for_sat)
                 self._next_arrival = 25.0   # try again shortly
                 return
         hdg = bearing_to(lat, lon, self.airport["lat"], self.airport["lon"])
-        ias = float(self.rng.choice((250, 270, 280)))
+        perf = PERF.get(actype) or GA_PERF[actype]
+        ias = min(float(self.rng.choice((250, 270, 280))), float(perf[0]))
         ac = self._base(callsign, actype, lat, lon, alt, hdg, ias)
-        # par: the straight-in distance at working speeds plus room for a
+        # par: the straight-in distance at the type's own working speeds
+        # (16 s/nm for a jet, honest for a King Air) plus room for a
         # civilised pattern — beat it and nothing happens, dawdle past it
         # (laps, forgotten holds) and the landing pays less
-        sat = (self.sector["sat"] if allow_sat and self.sector["sat"]
-               and self.rng.random() < 0.18 else None)
+        pace = 4500.0 / float(perf[0])
+        sat = self.sector["sat"] if for_sat else None
         if sat is not None:
             sat_d = haversine_nm(lat, lon, sat["thr"][0], sat["thr"][1])
             ac.update(plan="arrival", fix=entry, sat=True, tag=sat["code"],
                       rwy=sat["rwy"], thr=sat["thr"], course=sat["course"],
-                      felev=float(sat["elev"]), par=sat_d * 16.0 + 300.0)
+                      felev=float(sat["elev"]), par=sat_d * pace + 300.0)
         else:
             ac.update(plan="arrival", fix=entry, rwy=self.sector["rwy"],
                       thr=self.sector["thr"], course=self.sector["course"],
                       felev=float(self.airport["elev"]),
-                      par=dist * 16.0 + 300.0)
+                      par=dist * pace + 300.0)
         if origin:
             ac["from"] = origin[0]   # the far city, kept for the hover chip
         self.aircraft.append(ac)
@@ -949,8 +1131,11 @@ class Sim:
 
     def _spawn_departure(self, sat=None):
         """A departure off the main runway — or, given ``sat``, off the
-        satellite field, low in the middle of your airspace."""
-        callsign, actype, dest = self._cast_flight("departure")
+        satellite field, low in the middle of your airspace, cast as that
+        field's own traffic."""
+        callsign, actype, dest = self._cast_flight(
+            "departure",
+            field=self.sector["sat_apt"] if sat is not None else None)
         src = sat or self.sector
         course = src["course"]
         thr = src["thr"]
@@ -959,16 +1144,18 @@ class Sim:
         exit_fix = self._gate_toward(self.sector["exits"],
                                      dest[1] if dest else None)
         initial = float(round((elev + 3000) / 1000) * 1000)
+        perf = PERF.get(actype) or GA_PERF[actype]
         ac = self._base(callsign, actype, lat, lon, elev + 1200.0,
-                        course, 170.0)
+                        course, min(170.0, float(perf[0])))
         ac.update(plan="departure", fix=exit_fix, tgt_alt=initial,
-                  tgt_ias=250.0, phase="cruise")
+                  tgt_ias=min(250.0, float(perf[0])), phase="cruise")
         if sat is not None:
             ac.update(sat=True, tag=sat["code"])
         # centre's letter of agreement: some departures carry a crossing
-        # restriction, and centre won't take a handoff assigned below it
+        # restriction, and centre won't take a handoff assigned below it —
+        # the LOA's jet routes; a piston pottering to its exit is exempt
         note = ""
-        if self.rng.random() < 0.35:
+        if self.rng.random() < 0.35 and perf[0] >= 200:
             ac["xr"] = 1000.0 * round(
                 (self.airport["elev"]
                  + self.rng.choice((7000.0, 9000.0, 11000.0))) / 1000.0)

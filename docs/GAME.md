@@ -168,7 +168,16 @@ localizer,
 and some of the traffic is theirs: an arrival checks in "inbound ENE
 for Brunswick" and wears the destination on its data block the way a
 STARS scratchpad would, because the wrong airport should never sneak up
-on you. Clear them for "the ILS" and they fly *their* field's approach;
+on you. And it's *their* traffic in the honest sense: a satellite casts
+its own flights, not repainted main-field ones. A field with airline
+service flies its real schedule; one without is read from its vendored
+signals — the name, the runway, and the keywords column, which
+remembers former names — so Brunswick Executive (né NAS Brunswick)
+fills with NetJets Citations, November-something Cirruses and King
+Airs, and the odd Reach or Convoy mission heavy off the 8,000-foot
+runway the Navy left behind. Registrations read back the way a pilot
+would say them — "November four two three tango bravo, descend and
+maintain four thousand" — and any unique suffix still keys them up. Clear them for "the ILS" and they fly *their* field's approach;
 their final is wherever their runway points, and so is the sequencing
 problem. Satellite departures pop up low in the middle of your airspace
 wanting an exit fix like anybody else. When the flow turns, the
@@ -183,7 +192,11 @@ spawner draws from that pool: a session at TPA is Southwest 737s and
 Breeze E-Jets, arrivals check in "with you, one three thousand, inbound
 LAL, **from Baltimore**", departures want their gate "**for Denver**".
 Flights whose real route runs the other way never spawn in the wrong
-direction. Offline it degrades to a country-plausible airline mix.
+direction. Offline it degrades to a country-plausible airline mix — and
+a field with no airline service at all (play Brunswick itself, or any
+executive field) degrades instead to its own **traffic profile**:
+bizjets, IFR general aviation and military metal in the proportions
+its vendored signals call for, never a phantom airline.
 
 ## How they fly
 

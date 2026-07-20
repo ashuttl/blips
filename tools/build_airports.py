@@ -104,6 +104,11 @@ def main(airports_csv, runways_csv):
                 "lon": round(lon, 5),
                 "elev": int(_f(row["elevation_ft"]) or 0),
                 "large": row["type"] == "large_airport",
+                # what kind of traffic really calls here: airline service
+                # (or not), and the keywords column, which keeps former
+                # names — "Brunswick NAS" still remembers the Navy
+                "svc": row["scheduled_service"] == "yes",
+                "kw": row["keywords"].lower(),
                 "rwys": sorted(rwys, key=lambda r: -r["len"]),
             })
 
