@@ -274,8 +274,12 @@ FL350 in dim data blocks (drawn from the same live pool — flights whose
 real route passes your airport by are exactly what belongs overhead),
 and 1200-code VFR targets wander the practice areas below 6,000 ft in
 limited blocks — altitude readout only, because nobody's tagged them
-up. None of them are on your frequency; key one up and you'll be told
-whose they are. They cost you nothing to carry and everything to
+up, their blips washed toward grey so the altitude hue still reads but
+the saturation doesn't lie. Full colour on this scope means exactly one
+thing: a flight on your frequency. A departure you've handed off greys
+out the same way centre's traffic does — still climbing across your
+airspace, no longer your problem, drawn accordingly. None of the grey
+sky is on your frequency; key one up and you'll be told whose they are. They cost you nothing to carry and everything to
 ignore: a Skyhawk has every right to cross your final at 2,500 ft, and
 vectoring the RJ around traffic that won't move for you is half the
 job. There's no three-mile rule against an aircraft nobody controls —

@@ -2575,6 +2575,7 @@ class Sim:
                 raise CommandError(f"centre won't take {me} yet — "
                                    f"get them out toward {ac['fix']}")
             ac["phase"] = "handed"
+            ac["dim"] = True     # centre's strip now — it greys like theirs
             # centre's first call is silent on your frequency but visible
             # on the scope: resume own navigation, climb, normal speed —
             # the system carries on without you.  The hands move a beat
@@ -2584,11 +2585,16 @@ class Sim:
                 "tgt_alt": max(ac["tgt_alt"], float(ac.get("xr") or 0.0),
                                23000.0 if ac["perf"][0] >= 230 else 12000.0),
                 "tgt_ias": max(ac["tgt_ias"], float(ac["perf"][0])),
+                # a SID flier comes off the procedure and its gates too:
+                # with centre, climb-via becomes climb-and-maintain and
+                # the dogleg goes direct — the published restrictions
+                # were yours, and you just gave the aircraft away
+                "nav": None, "via_name": None,
+                "tgt_hdg": bearing_to(self.airport["lat"],
+                                      self.airport["lon"],
+                                      spot[0], spot[1]),
+                "turn_dir": None,
             }
-            if not ac.get("nav"):        # a SID flier already navigates
-                fields.update(tgt_hdg=bearing_to(
-                    self.airport["lat"], self.airport["lon"],
-                    spot[0], spot[1]), turn_dir=None)
             self._stage(ac, due, **fields)
             self.score += 50
             return "switching, good day"

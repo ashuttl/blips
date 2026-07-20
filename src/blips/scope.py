@@ -122,7 +122,13 @@ def blip_color(ac):
         return GROUND
     if ac["alt"] is None:
         return MUTED
-    return interp_stops(list(ALT_STOPS), ac["alt"])
+    color = interp_stops(list(ALT_STOPS), ac["alt"])
+    if ac.get("limited"):
+        # an uncorrelated 1200 target: the altitude hue survives — a
+        # hazard is still judged by colour — but washed toward grey, so
+        # full saturation means on your frequency and nothing else does
+        return lerp(DIM, color, 0.4)
+    return color
 
 
 def blip_glyph(ac):
@@ -831,16 +837,21 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
         if ac["ground"]:
             continue  # ground targets: dim blip only, no data block
         # declutter: a data block draws only where it fits whole — try the
-        # right of the blip, then flip left; otherwise the blip stands alone
+        # right of the blip, then flip left, then the rows above and below
+        # (the way a STARS leader swings through the quadrants), so a knot
+        # of traffic sheds labels outward instead of just going mute
         label = data_block(ac)
-        for cells in ([(col + 1 + i, row) for i in range(len(label))],
-                      [(col - len(label) + i, row) for i in range(len(label))]):
-            if all(0 <= c < graph_w and (c, row) not in air
-                   and (c, row) not in blip_cells for c, _r in cells):
-                for i, (c, _r) in enumerate(cells):
-                    air[(c, row)] = (label[i],
-                                     color if i < len(ac["callsign"])
-                                     else MUTED)
+        for c0, r0 in ((col + 1, row), (col - len(label), row),
+                       (col + 1, row - 1), (col - len(label), row - 1),
+                       (col + 1, row + 1), (col - len(label), row + 1)):
+            cells = [(c0 + i, r0) for i in range(len(label))]
+            if all(0 <= c < graph_w and 0 <= r < height_cells
+                   and (c, r) not in air and (c, r) not in blip_cells
+                   for c, r in cells):
+                for i, (c, r) in enumerate(cells):
+                    air[(c, r)] = (label[i],
+                                   color if i < len(ac["callsign"])
+                                   else MUTED)
                 break
 
     # conflict pairs: a line tying the two blips the box is alarming about,
@@ -932,8 +943,10 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
                 col, row = int(cx), int(cy)
                 label = f"{(deg or 360) // 10:02d}"
                 cells = [(col, row), (col + 1, row)]
-                if all(0 <= c < graph_w and 0 <= r < height_cells
-                       and (c, r) not in overlays for c, r in cells):
+                pad = [(col - 1, row), (col + 2, row)]
+                if (all(0 <= c < graph_w and 0 <= r < height_cells
+                        and (c, r) not in overlays for c, r in cells)
+                        and all(p not in overlays for p in pad)):
                     for (c, r), ch in zip(cells, label):
                         reticle[(c, r)] = (ch, RING)
             # range: each ring wears its radius in miles, a dim scale marching
@@ -950,9 +963,16 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
                 label = f"{int(round(r_nm))}"
                 col, row = int(dx) - len(label) // 2, int(dy) + 1
                 cells = [(col + i, row) for i in range(len(label))]
-                if all(0 <= c < graph_w and 0 <= row < height_cells
-                       and (c, row) not in overlays and (c, row) not in reticle
-                       for c, _r in cells):
+                # a scale number is the quietest thing on the scope: it
+                # yields not just to text on its own cells but to text one
+                # cell away in any direction, so it never brushes a fix name
+                pad = ([(col - 1, row), (col + len(label), row)]
+                       + [(c, row - 1) for c, _r in cells]
+                       + [(c, row + 1) for c, _r in cells])
+                if (all(0 <= c < graph_w and 0 <= row < height_cells
+                        and (c, row) not in overlays
+                        and (c, row) not in reticle for c, _r in cells)
+                        and all(p not in overlays for p in pad)):
                     for (c, _r), ch in zip(cells, label):
                         reticle[(c, row)] = (ch, RING)
     if 0 <= hcol < graph_w and 0 <= hrow < height_cells:

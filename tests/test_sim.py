@@ -509,6 +509,28 @@ def test_an_altitude_amends_a_procedure_without_cancelling():
     assert d["cruise_alt"] == 23000.0                   # ceiling amended
 
 
+def test_handoff_takes_a_sid_flier_off_the_procedure():
+    """Centre doesn't fly your SID: a departure handed off mid-procedure
+    sheds the nav and its gates, turns loose toward its exit fix, and the
+    climb-via becomes a climb — no more levelling at a chart altitude
+    while droning around a dogleg that stopped being anyone's problem."""
+    s = _pwm()
+    s._spawn_departure()
+    d = s.aircraft[-1]
+    d.pop("xr", None)
+    s.command(f"{d['callsign']} via HSKEL4")
+    assert d["phase"] == "nav" and d["nav"]
+    spot = s.sector["fixes"][d["fix"]]
+    d["lat"], d["lon"] = spot            # out at the boundary, still on it
+    assert "switching" in s.command(f"{d['callsign']} ho").lower()
+    s._flush_pend(d)                     # the beat passes; centre has them
+    assert not d["nav"] and not d["via_name"]
+    out = bearing_to(s.airport["lat"], s.airport["lon"], *spot)
+    assert abs(turn_delta(d["tgt_hdg"], out, None)) < 0.5
+    want = 23000.0 if d["perf"][0] >= 230 else 12000.0
+    assert d["tgt_alt"] >= want          # gates cancelled, climbing away
+
+
 def test_ex_cifp_field_declines_a_procedure():
     s = Sim(find_airport("egll"), seed=1)
     s.hearback_p = 0.0

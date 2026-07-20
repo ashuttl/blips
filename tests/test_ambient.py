@@ -271,3 +271,26 @@ def test_scratchpad_tag_rides_the_block():
     ac = {"ground": False, "alt": 11000.0, "tgt_alt": 11000.0,
           "callsign": "JIA72", "vrate": 0, "tag": "PIE"}
     assert data_block(ac) == "JIA72 110 PIE"
+
+def test_saturation_means_on_your_frequency():
+    """Full colour is reserved for traffic you're talking to: a 1200
+    target washes toward grey (the altitude hue survives, faded), and a
+    handed-off strip greys all the way to centre's shade."""
+    from blips.scope import DIM, blip_color
+    base = {"emergency": False, "squawk": "2345", "ground": False,
+            "alt": 1700.0, "track": 90.0}
+    own = blip_color(dict(base))
+    vfr = blip_color(dict(base, squawk="1200", limited=True))
+    ceded = blip_color(dict(base, dim=True))
+    assert ceded == DIM
+    assert vfr != own and vfr != DIM
+    # washed means between the two: dimmer than yours, warmer than grey
+    assert sum(vfr) < sum(own)
+    assert all(min(o, d) - 1 <= v <= max(o, d) + 1
+               for v, o, d in zip(vfr, own, DIM))
+
+def test_handoff_greys_the_strip(sim):
+    dep = _departure_at_fix(sim)
+    assert not dep.get("dim")
+    assert "switching" in sim.command(f"{dep['callsign']} ho").lower()
+    assert dep["dim"]      # centre's traffic now, drawn like centre's
