@@ -7,8 +7,9 @@ the vendored Natural Earth data, rasterises a land/sea mask, and produces the
 per-cell sea grid + braille dot masks/colours plus city label overlays for a
 given geographic window.
 
-Data: Natural Earth (public domain, 1:50m), simplified globally by
-prototype/build_basemap_data.py → data/basemap.json.gz.  Per view we clip to
+Data: Natural Earth (public domain; 1:10m coast and lakes, 1:50m borders),
+simplified globally by prototype/build_basemap_data.py → data/basemap.json.gz.
+Per view we clip to
 the visible bounding box so a whole-world dataset stays cheap to rasterise.
 """
 
