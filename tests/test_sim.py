@@ -530,6 +530,26 @@ def test_arrivals_enter_from_their_origin_direction():
     assert len(spread) > 1                        # not all on one radial
 
 
+def test_check_in_gives_a_position_off_a_named_point():
+    """The first call carries a rough position read off the nearest thing the
+    controller can see named — a gate, the field, a neighbour — so the blip is
+    easy to find: 'over SZO' on top of one, else 'N miles <dir> of X'."""
+    s = _pwm()
+    ap = s.airport
+    # right on top of a named gate → "over <gate>"
+    name, (glat, glon) = next(iter(s.sector["fixes"].items()))
+    assert s._position_phrase(glat, glon) == f"over {name}"
+    # well away from everything → "<n> miles <compass> of <named point>"
+    phrase = s._position_phrase(ap["lat"] + 0.6, ap["lon"])
+    assert re.match(r"\d+ miles (north|south|east|west|northeast|northwest"
+                    r"|southeast|southwest) of \S+", phrase), phrase
+    # and it actually reaches the radio on check-in
+    s.aircraft.clear(); s.radio.clear()
+    s._spawn_arrival(allow_sat=False, handin=False)   # checks in at once
+    call = [line for _, line, *_ in s.radio if "with you" in line][-1]
+    assert (" of " in call) or (" over " in call)
+
+
 def test_wrong_procedure_kind_and_unknown_are_refused():
     s = _pwm()
     s._spawn_arrival(allow_sat=False, handin=False)

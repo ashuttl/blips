@@ -1155,9 +1155,7 @@ class Sim:
         elif origin:
             ac["checkin"] = f"inbound from {origin[0]}"
         else:
-            octant = ("north", "northeast", "east", "southeast", "south",
-                      "southwest", "west", "northwest")[round(brg / 45.0) % 8]
-            ac["checkin"] = f"inbound from the {octant}"
+            ac["checkin"] = ""       # nothing to name but where they are
         if handin:
             # centre's strip until it reaches your ring — grey, and deaf
             # to you until it crosses and checks in (see _handin_tick)
@@ -1165,11 +1163,43 @@ class Sim:
         else:
             self._check_in(ac)   # already yours — the sector you inherited
 
+    def _named_points(self):
+        """(name, lat, lon) for everything the scope labels — the gates, the
+        field, the satellite, the neighbouring majors — so a position can be
+        read off something the controller can actually see."""
+        pts = [(n, la, lo) for n, (la, lo) in self.sector["fixes"].items()]
+        pts.append((self.airport["iata"] or self.airport["icao"],
+                    self.airport["lat"], self.airport["lon"]))
+        if self.sector["sat_apt"] is not None:
+            apt = self.sector["sat_apt"]
+            pts.append((self.sector["sat"]["code"], apt["lat"], apt["lon"]))
+        for nb in self.sector["neighbors"]:
+            pts.append((nb["end"]["code"], nb["apt"]["lat"], nb["apt"]["lon"]))
+        return pts
+
+    def _position_phrase(self, lat, lon):
+        """'over SZO' right on top of a named point, else a rounded 'fifteen
+        miles northeast of RKD' off the nearest one — enough to find the blip."""
+        name, plat, plon = min(
+            self._named_points(),
+            key=lambda p: haversine_nm(lat, lon, p[1], p[2]))
+        d = haversine_nm(lat, lon, plat, plon)
+        if d < 5.0:
+            return f"over {name}"
+        octant = ("north", "northeast", "east", "southeast", "south",
+                  "southwest", "west", "northwest")[
+                      round(bearing_to(plat, plon, lat, lon) / 45.0) % 8]
+        return f"{round(d / 5.0) * 5} miles {octant} of {name}"
+
     def _check_in(self, ac):
-        """An arrival's first call to you, the instant centre hands it over."""
+        """An arrival's first call to you, the instant centre hands it over —
+        with a rough position off the nearest named point on the scope, so
+        you can pick the blip out."""
+        where = self._position_phrase(ac["lat"], ac["lon"])
+        lead = f"{ac['checkin']}, {where}" if ac["checkin"] else where
         self.say(f"{self.airport['city'] or 'Approach'} approach, "
                  f"{hail(ac)} with you, {say_altitude(ac['alt'])}, "
-                 f"{ac['checkin']}", "checkin", voice=ac["callsign"])
+                 f"{lead}", "checkin", voice=ac["callsign"])
 
     def _spawn_departure(self, sat=None):
         """A departure off the main runway — or, given ``sat``, off the
