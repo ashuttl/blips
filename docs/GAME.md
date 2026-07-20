@@ -314,7 +314,12 @@ in a field and the caution is cancelled.
 **Centre is a character too.** Departures sometimes check in carrying a
 crossing restriction from the letter of agreement — "centre wants one
 one thousand crossing it" — and a handoff assigned below that altitude
-comes straight back: *climb them first*. And once in a while centre's
+comes straight back: *climb them first*. And a departure you switch
+doesn't freeze on its last clearance: a beat after the handoff, centre
+turns it loose — own navigation to the fix, climbing away, back up to
+speed — silent on your frequency but right there on the scope, the
+system carrying on without you. Hand one off out of a hold and you'll
+see it finish the turn, swing outbound, and go. And once in a while centre's
 own sector fills: for a couple of minutes nothing gets handed off, the
 boundary you normally throw departures over becomes a wall, and `hold`
 earns its keep at the exit fixes until they call back.

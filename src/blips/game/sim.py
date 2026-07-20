@@ -2575,6 +2575,21 @@ class Sim:
                 raise CommandError(f"centre won't take {me} yet — "
                                    f"get them out toward {ac['fix']}")
             ac["phase"] = "handed"
+            # centre's first call is silent on your frequency but visible
+            # on the scope: resume own navigation, climb, normal speed —
+            # the system carries on without you.  The hands move a beat
+            # later, like any other readback, so a flight handed off out
+            # of a hold finishes its turn before swinging on course.
+            fields = {
+                "tgt_alt": max(ac["tgt_alt"], float(ac.get("xr") or 0.0),
+                               23000.0 if ac["perf"][0] >= 230 else 12000.0),
+                "tgt_ias": max(ac["tgt_ias"], float(ac["perf"][0])),
+            }
+            if not ac.get("nav"):        # a SID flier already navigates
+                fields.update(tgt_hdg=bearing_to(
+                    self.airport["lat"], self.airport["lon"],
+                    spot[0], spot[1]), turn_dir=None)
+            self._stage(ac, due, **fields)
             self.score += 50
             return "switching, good day"
         raise CommandError("say again?")

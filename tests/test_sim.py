@@ -7,7 +7,9 @@ import pytest
 
 from blips._airports import find_airport
 from blips._commands import CommandError
-from blips._geo import advance, cross_along_track, haversine_nm, turn_delta
+from blips._geo import (
+    advance, bearing_to, cross_along_track, haversine_nm, turn_delta,
+)
 from blips.game.sim import (
     PERF, WX_CLEAR, WX_DEVIATE, Sim, _controlled, build_sector,
 )
@@ -624,6 +626,52 @@ def test_slow_types_spawn_at_their_own_speed():
     dist = haversine_nm(ac["lat"], ac["lon"],
                         s.airport["lat"], s.airport["lon"])
     assert ac["par"] == pytest.approx(dist * (4500.0 / 175.0) + 300.0)
+
+
+def test_handoff_resumes_own_navigation(sim):
+    """A departure handed off out of a hold doesn't roll out on a random
+    tangent of the orbit — centre silently turns it loose on the outbound
+    radial and climbs it, and the scope watches it happen."""
+    sim._next_departure = 0.0
+    sim._spawn_departure()
+    dep = sim.aircraft[-1]
+    dep.pop("xr", None)
+    spot = sim.sector["fixes"][dep["fix"]]
+    dep["lat"], dep["lon"] = spot        # out at the exit fix
+    suffix = dep["callsign"][3:]
+    sim.command(f"{suffix} hold")
+    _run(sim, 90)                        # well into the orbit
+    assert dep["phase"] == "hold"
+    sim.command(f"{suffix} ho")
+    assert dep["phase"] == "handed"      # the strip is centre's now
+    _run(sim, 5)
+    out = bearing_to(sim.airport["lat"], sim.airport["lon"], *spot)
+    assert abs(turn_delta(dep["tgt_hdg"], out, None)) < 0.5
+    want = 23000.0 if dep["perf"][0] >= 230 else 12000.0
+    assert dep["tgt_alt"] >= want        # centre climbs them away
+
+
+def test_handoff_own_nav_waits_out_the_beat(sim):
+    """Centre's 'resume own navigation' takes effect a pilot beat after
+    the switch, not on the keystroke."""
+    sim._next_departure = 0.0
+    sim._spawn_departure()
+    dep = sim.aircraft[-1]
+    dep.pop("xr", None)
+    spot = sim.sector["fixes"][dep["fix"]]
+    dep["lat"], dep["lon"] = spot
+    suffix = dep["callsign"][3:]
+    sim.command(f"{suffix} hold")
+    _run(sim, 90)
+    sim.react_s = (4.0, 4.0)             # pilots take their time again
+    before = dep["tgt_alt"]
+    sim.command(f"{suffix} ho")
+    _run(sim, 1)
+    assert dep["tgt_alt"] == before      # still flying the old clearance
+    _run(sim, 6)                         # ...until the beat passes
+    out = bearing_to(sim.airport["lat"], sim.airport["lon"], *spot)
+    assert abs(turn_delta(dep["tgt_hdg"], out, None)) < 0.5
+    assert dep["tgt_alt"] > before
 
 
 def test_feed_compatible_snapshot(sim):
