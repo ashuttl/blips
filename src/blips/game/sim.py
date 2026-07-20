@@ -29,8 +29,8 @@ from blips._airports import find_airport
 from blips._geo import (
     advance, bearing_to, cross_along_track, haversine_nm, turn_delta,
 )
-from blips._procedures import build_join, find_named, flow_path
-from blips._schedules import far_city, schedule_for
+from blips.game.procedures import build_join, find_named, flow_path
+from blips.game.schedules import far_city, schedule_for
 
 SECTOR_NM = 45.0          # boundary ring radius
 DESPAWN_NM = 60.0         # grace past the farthest gate (arrivals spawn

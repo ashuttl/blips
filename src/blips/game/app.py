@@ -24,10 +24,10 @@ from blips._location import get_location
 from blips._radar_sources import theme_id
 from blips._runtime import resolve_live
 from blips._commands import CommandError, airline_name, resolve_callsign
-from blips._sim import SECTOR_NM, Sim, _controlled
-from blips._procedures import overlay_for
+from blips.game.sim import SECTOR_NM, Sim, _controlled
+from blips.game.procedures import overlay_for
 from blips._theme import ensure_contrast
-from blips._voice import Speaker
+from blips.game.voice import Speaker
 from blips.scope import (
     ALERT, CHIP_BG, DIM, MARKER, MUTED, RING, WeatherFeed, _route_leg,
     hit_test, render_scope,
@@ -403,18 +403,18 @@ def main(args):
     from blips._terrain import Terrain
     terrain = Terrain(airport["lat"], airport["lon"])
     if live:
-        from blips._sim import PERF
+        from blips.game.sim import PERF
         terrain.start()   # real elevation → MVAs; flat until it lands
         if args.seed is None:
             # live cast breaks determinism, so seeded shifts skip it
-            from blips._fleet import TrafficPool
+            from blips.game.fleet import TrafficPool
             pool = TrafficPool(airport, PERF)
             pool.start()  # the real traffic near this airport, filling in
     else:
         terrain._fetch(retries=1)  # a screenshot is worth a short wait
     # vendored real routes for this field — deterministic, so seeded shifts
     # keep them too; the check-in and hover chip get a true origin/dest
-    from blips._schedules import schedule_for
+    from blips.game.schedules import schedule_for
     sim = Sim(airport, seed=seed, pool=pool, terrain=terrain,
               schedule=schedule_for(airport["icao"]))
     center = [airport["lat"], airport["lon"]]
@@ -637,7 +637,7 @@ def main(args):
     if sim.speaker is not None:
         sim.speaker.close()
     # back on the normal screen: how the shift went, and how it compares
-    from blips._records import record_shift
+    from blips.game.records import record_shift
     entry, prev = record_shift(
         airport["icao"], score=sim.score, rating=_rating(sim),
         minutes=int(sim._elapsed) // 60, landed=sim.landed,

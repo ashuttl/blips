@@ -1,6 +1,6 @@
 """The shift book: tallies always, personal bests only when earned."""
 
-from blips import _records
+from blips.game import records as _records
 
 
 def _shift(**kw):

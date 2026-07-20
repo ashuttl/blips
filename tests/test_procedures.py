@@ -5,11 +5,11 @@ import random
 
 from blips._airports import find_airport
 from blips._geo import haversine_nm
-from blips._procedures import flow_path, overlay_for, procedures_for
+from blips.game.procedures import flow_path, overlay_for, procedures_for
 
 
 def _gates(icao):
-    from blips._sim import build_sector
+    from blips.game.sim import build_sector
     ap = find_airport(icao)
     s = build_sector(ap)
     return (ap, s, [s["fixes"][n] for n in s["entries"]],

@@ -5,7 +5,7 @@ logic, both pure. The Speaker's worker thread and macOS `say` calls stay out
 of the tests.
 """
 
-from blips._voice import Speaker, _spoken_text
+from blips.game.voice import Speaker, _spoken_text
 
 
 def test_flight_numbers_are_spoken_as_digits():

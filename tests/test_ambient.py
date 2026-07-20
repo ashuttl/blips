@@ -11,7 +11,7 @@ import pytest
 
 from blips._airports import find_airport
 from blips._geo import advance, haversine_nm
-from blips._sim import DESPAWN_NM, GA_PERF, Sim, build_sector
+from blips.game.sim import DESPAWN_NM, GA_PERF, Sim, build_sector
 from blips.scope import data_block
 
 

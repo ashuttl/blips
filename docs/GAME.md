@@ -333,17 +333,21 @@ weather, drag, zoom — works untouched. The sim ticks on the live loop's
 animation cadence; `fix_time` is stamped to the present so the scope's
 dead-reckoning glide becomes a no-op.
 
-| module          | job                                                       |
-| --------------- | --------------------------------------------------------- |
-| `_airports.py`  | vendored airports/runways/navaids/fixes (`data/*.json.gz`) |
-| `_procedures.py`| vendored SIDs/STARs/approaches, the gate-decluttered overlay |
-| `_sim.py`       | kinematics, wind, ILS, wake, sector, satellite, spawner, ambient sky, separation, conflict alert, hearback, scoring |
-| `_commands.py`  | parser, callsign matching, phraseology readback           |
-| `_fleet.py`     | live-sampled traffic pool with real routes                |
-| `_terrain.py`   | real-elevation MVA grid                                   |
-| `_records.py`   | the shift book (`~/.cache/blips/records.json`)            |
-| `_voice.py`     | macOS `say` speech: one voice per flight, accent by airline |
-| `_game.py`      | command bar, radio log, tape, HUD, `--game` wiring        |
+The game-only modules live in the `blips.game` subpackage; the rest is
+shared with the live scope (`blips`), which reuses the same renderer.
+
+| module                | job                                                       |
+| --------------------- | --------------------------------------------------------- |
+| `game/app.py`         | command bar, radio log, tape, HUD, `--game` wiring        |
+| `game/sim.py`         | kinematics, wind, ILS, wake, sector, satellite, spawner, ambient sky, separation, conflict alert, hearback, scoring |
+| `game/procedures.py`  | vendored SIDs/STARs/approaches, the gate-decluttered overlay |
+| `game/schedules.py`   | vendored per-airport arrival/departure schedules          |
+| `game/fleet.py`       | live-sampled traffic pool with real routes                |
+| `game/voice.py`       | macOS `say` speech: one voice per flight, accent by airline |
+| `game/records.py`     | the shift book (`~/.cache/blips/records.json`)            |
+| `_airports.py`        | vendored airports/runways/navaids/fixes (`data/*.json.gz`) *(shared)* |
+| `_commands.py`        | parser, callsign matching, phraseology readback *(shared)* |
+| `_terrain.py`         | real-elevation MVA grid *(shared)*                        |
 
 Scoring: +100 landing less a point per six seconds over par (floored at
 20), +50 handoff, −500 separation bust (debounced), −200 traffic alert

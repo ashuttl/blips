@@ -8,7 +8,7 @@ import pytest
 from blips._airports import find_airport
 from blips._commands import CommandError
 from blips._geo import advance, cross_along_track, haversine_nm, turn_delta
-from blips._sim import (
+from blips.game.sim import (
     PERF, WX_CLEAR, WX_DEVIATE, Sim, _controlled, build_sector,
 )
 
@@ -581,14 +581,14 @@ def test_feed_compatible_snapshot(sim):
 
 
 def test_all_fleet_types_have_performance():
-    from blips._sim import FLEETS
+    from blips.game.sim import FLEETS
     for airline, types in FLEETS.items():
         for t in types:
             assert t in PERF, f"{airline} flies {t} but PERF doesn't know it"
 
 
 def test_type_aliases_land_in_perf():
-    from blips._fleet import TYPE_ALIAS
+    from blips.game.fleet import TYPE_ALIAS
     for real, alias in TYPE_ALIAS.items():
         assert alias in PERF, f"{real} → {alias} but PERF doesn't know it"
 
@@ -597,7 +597,7 @@ def test_runway_gate_keeps_widebodies_off_short_fields():
     """A 7,200 ft field (PWM) never casts a widebody arrival or departure;
     a long field (JFK) can take anything.  The gate reads each airport's
     own runways, so it's airport-agnostic, not a KPWM special case."""
-    from blips._sim import Sim
+    from blips.game.sim import Sim
     wide = {"B763", "B788", "B77W", "A388", "A359", "A339"}
     pwm = Sim(find_airport("kpwm"), seed=3)
     assert not any(pwm._runway_ok(t) for t in wide)   # 7,200 ft can't take one
@@ -612,7 +612,7 @@ def test_runway_gate_keeps_widebodies_off_short_fields():
 def test_hover_chip_shows_origin_and_destination():
     """Arrivals carry 'from <city>' in the hover chip and departures 'to
     <city>' — the game's parity with the live scope's route line."""
-    from blips._game import _strip_card
+    from blips.game.app import _strip_card
 
     def plain(lines):
         return " ".join(re.sub(r"\x1b\[[0-9;]*m", "", ln) for ln in lines)
@@ -692,7 +692,7 @@ def test_emergency_exempt_from_weather(sim):
 
 
 def test_wx_sampler_reads_intensity_not_coverage():
-    from blips._game import _wx_sampler
+    from blips.game.app import _wx_sampler
     # a 2×1 frame: opaque light-blue echo | opaque heavy-red core
     blue = [0, 94, 182, 255]      # bright blue — light stratiform rain
     red = [252, 83, 112, 255]     # salmon-red — a convective core
@@ -1119,7 +1119,7 @@ def test_spawned_arrivals_carry_a_reachable_par(sim):
 
 
 def test_rating_is_score_against_offered(sim):
-    from blips._game import _rating
+    from blips.game.app import _rating
     sim._elapsed = 900.0
     sim.offered, sim.score = 1000, 990
     assert _rating(sim) == "A+"

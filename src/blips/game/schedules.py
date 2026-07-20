@@ -30,7 +30,8 @@ _CITY = None
 def _load():
     global _DATA
     if _DATA is None:
-        path = os.path.join(os.path.dirname(__file__), "data",
+        # data lives in the package root (blips/data), one level up from game/
+        path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data",
                             "schedules.json.gz")
         try:
             with gzip.open(path, "rt", encoding="utf-8") as fh:

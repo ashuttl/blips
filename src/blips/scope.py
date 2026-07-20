@@ -1086,7 +1086,7 @@ def main():
         set_debug(True)
 
     if args.game is not None:
-        from blips._game import main as game_main
+        from blips.game.app import main as game_main
         game_main(args)
         return
 
