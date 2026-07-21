@@ -56,7 +56,7 @@ RADIO_HINT = ("callsign then  l/r hdg · c/d alt · rs/is spd · s resume · "
 # `?` reveals the desk: control keys, shown as keys so they read apart from the
 # radio verbs above.  These run the station, not the airplanes.
 MORE_HINT = ("desk:  +/− zoom · ^L log · ^O procedures · ^P pause · "
-             "^W weather · ^V voice · ^C quit")
+             "^W weather · ^B labels · ^V voice · ^C quit")
 
 
 def _strip_card(ac):
@@ -114,6 +114,7 @@ def _strip_card(ac):
 
 
 TAPE_LINES = 9                # transmissions shown while paused
+DESK_HOLD = 4.0               # seconds a desk-status note lingers in the top bar
 
 
 class _Console:
@@ -143,7 +144,7 @@ class _Console:
             return self._history(-1 if action == "back" else 1)
         ctrl = {"key:ctrl-l": "log", "key:ctrl-p": "pause",
                 "key:ctrl-o": "proc", "key:ctrl-v": "voice",
-                "key:ctrl-w": "weather"}.get(action)
+                "key:ctrl-w": "weather", "key:ctrl-b": "labels"}.get(action)
         if ctrl is not None:
             return self.meta(ctrl)
         if action.startswith("key:"):
@@ -504,11 +505,18 @@ def main(args):
         return grid
     weather = WeatherFeed(airport["lat"], airport["lon"],
                           theme=theme_id(args.wx_theme), nudge=live)
-    state = {"paused": False, "weather": bool(args.weather), "procs": False}
+    state = {"paused": False, "weather": bool(args.weather), "procs": False,
+             "labels": True, "desk": None}
 
     def clock():
         m, s = divmod(int(sim._elapsed), 60)
         return f"{m:02d}:{s:02d}"
+
+    def desk(msg):
+        """A brief station-status note for the top bar.  Desk actions live
+        here, beside PAUSED — never on the radio tape, so a toggle can never
+        crowd a real transmission out of a tape slot."""
+        state["desk"] = (msg, time.time() + DESK_HOLD)
 
     def hud():
         wd, wk = sim.wind
@@ -517,6 +525,13 @@ def main(args):
                 f"score {sim.score:,} · busts {sim.busts} · {clock()}")
         if state["paused"]:
             note += " · PAUSED"
+        toast = state["desk"]
+        if toast is not None:
+            msg, expiry = toast
+            if time.time() < expiry:
+                note += "   " + msg
+            else:
+                state["desk"] = None
         return note
 
     def _sync_weather():
@@ -546,22 +561,27 @@ def main(args):
         if word in ("log", "r", "radio", "tape"):
             console.log_open = not console.log_open
             return True
+        if word in ("labels", "b", "blocks", "tags"):
+            state["labels"] = not state["labels"]
+            desk("data blocks shown" if state["labels"]
+                 else "data blocks hidden")
+            return True
         if word in ("proc", "procs", "procedures", "sid", "sids", "star",
                     "stars"):
             state["procs"] = not state["procs"]
-            sim.say("procedures shown" if state["procs"]
-                    else "procedures hidden", "help")
+            desk("procedures shown" if state["procs"]
+                 else "procedures hidden")
             return True
         if word in ("voice", "voices", "tts", "sound"):
             if sim.speaker is not None:
                 sim.speaker.close()
                 sim.speaker = None
-                sim.say("voices off", "help")
+                desk("voices off")
             elif not Speaker.available():
-                sim.say("text-to-speech needs macOS 'say' — not here", "help")
+                desk("voices need macOS ‘say’")
             else:
                 sim.speaker = Speaker()
-                sim.say("voices on — pilots speak, one at a time", "help")
+                desk("voices on")
             return True
         return False
 
@@ -593,7 +613,8 @@ def main(args):
         frame = render_scope(
             center, zoom[0], sim, playing=not state["paused"],
             mouse_pos=mouse_pos, show_ground=False, weather=weather,
-            show_weather=state["weather"], drag_offset=drag_preview[0],
+            show_weather=state["weather"], show_labels=state["labels"],
+            drag_offset=drag_preview[0],
             pins=pins, lines_geo=lines_geo, ground=ground,
             game_footer=((TAPE_LINES + 1)
                          if (state["paused"] or console.log_open) else 2,

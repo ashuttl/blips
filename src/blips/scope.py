@@ -819,6 +819,7 @@ _last_frame = {}  # cached clean render, shifted for live drag-pan preview
 
 def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
                  show_trails=True, show_rings=True, show_ground=True,
+                 show_labels=True,
                  weather=None, show_weather=False, drag_offset=None,
                  routes=None, pins=None, lines_geo=None, game_footer=None,
                  header_note=None, rings_at=None, ground=None,
@@ -944,6 +945,8 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
         _draw_leader(fx, basemap, ac, alat, alon, color)
         if ac["ground"]:
             continue  # ground targets: dim blip only, no data block
+        if not show_labels:
+            continue  # labels off: bare glyphs, the scope stripped to blips
         # declutter: a data block draws only where it fits whole — try the
         # right of the blip, then flip left, then the rows above and below
         # (the way a STARS leader swings through the quadrants), so a knot
