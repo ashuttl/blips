@@ -55,8 +55,8 @@ RADIO_HINT = ("callsign then  l/r hdg · c/d alt · rs/is spd · s resume · "
               "dct FIX · via PROC · hold [FIX] · i [rwy] · tfc · ho handoff")
 # `?` reveals the desk: control keys, shown as keys so they read apart from the
 # radio verbs above.  These run the station, not the airplanes.
-MORE_HINT = ("desk:  +/− zoom · ^L log · ^P pause · ^W weather · "
-             "^V voice · ^C quit")
+MORE_HINT = ("desk:  +/− zoom · ^L log · ^O procedures · ^P pause · "
+             "^W weather · ^V voice · ^C quit")
 
 
 def _strip_card(ac):
@@ -127,7 +127,7 @@ class _Console:
         self.hist_idx = None
         self.last_mouse = None
         self.tape = False         # paused: the footer replays the frequency
-        self.log_open = False     # `log`: keep the tape up while you work
+        self.log_open = True      # `log`: keep the tape up while you work
 
     # -- keyboard (live_loop raw mode: every printable is ours) -------------
     def intercept(self, action):
@@ -142,7 +142,8 @@ class _Console:
         if action in ("back", "fwd"):
             return self._history(-1 if action == "back" else 1)
         ctrl = {"key:ctrl-l": "log", "key:ctrl-p": "pause",
-                "key:ctrl-v": "voice", "key:ctrl-w": "weather"}.get(action)
+                "key:ctrl-o": "proc", "key:ctrl-v": "voice",
+                "key:ctrl-w": "weather"}.get(action)
         if ctrl is not None:
             return self.meta(ctrl)
         if action.startswith("key:"):
@@ -201,34 +202,53 @@ class _Console:
         self.buffer = callsign.lower() + " " + rest
         return True
 
+    def _age_alpha(self, t):
+        """How opaque a call is by age: a spell at full strength, then it
+        dissolves into the scope, so a frequency quiet for a couple of minutes
+        clears the log back to bare map. Frozen while paused — the replay you
+        paused to read stays fully legible however long you sit on it.
+        """
+        if self.tape:
+            return 1.0
+        age = time.time() - t
+        hold, gone = 15.0, 180.0     # full for 15s, gone by three minutes
+        if age <= hold:
+            return 1.0
+        if age >= gone:
+            return 0.0
+        return 1.0 - (age - hold) / (gone - hold)
+
     # -- the bottom lines ----------------------------------------------------
     def footer(self, focused):
-        # hover detail floats on the scope as a chip now (hover_card), so
-        # the bar keeps its own jobs: the radio line and the command line
+        # the log floats over the map now: the renderer composites these lines
+        # into the bottom rows, so each is (segments, alpha) — segments carry
+        # colour as data, (text, rgb[, bold]), not baked ANSI, and alpha lets a
+        # call fade with age; the renderer knocks the braille out under the
+        # glyphs and shows terrain in the gaps. hover detail floats on the scope
+        # as a chip (hover_card), so the bar keeps its own jobs: radio + command
         if self.sim.radio:
-            _t, line, kind = self.sim.radio[-1]
-            top = f"{fg(*RADIO_COLORS.get(kind, MUTED))}{line}{RESET}"
+            t, line, kind = self.sim.radio[-1]
+            top = ([(line, RADIO_COLORS.get(kind, MUTED))], self._age_alpha(t))
         else:
-            top = ""
-        prompt = f"{fg(*MARKER)}{BOLD}▸{RESET} "
+            top = ([], 1.0)
+        prompt = ("▸ ", MARKER, True)
         if self.buffer:
-            bar = (f"{prompt}{fg(*TEXT)}{self.buffer}{RESET}"
-                   f"{fg(*MARKER)}▌{RESET}")
+            bar = [prompt, (self.buffer, TEXT), ("▌", MARKER)]
         else:
             # radio language first, then the desk-controls cluster: keys in a
             # brighter tone so they read as pressable, labels kept quiet
-            desk = (f"{fg(*MUTED)}^L{fg(*DIM)} log   "
-                    f"{fg(*MUTED)}?{fg(*DIM)} help")
-            bar = (f"{prompt}{fg(*DIM)}{RADIO_HINT}"
-                   f"      {desk}{RESET}")
+            bar = [prompt, (RADIO_HINT + "      ", DIM),
+                   ("^L", MUTED), (" log   ", DIM),
+                   ("?", MUTED), (" help", DIM)]
+        bar = (bar, 1.0)              # the command line never ages out
         if self.tape or self.log_open:
             # the tape: every call in order, oldest at the top — up while
             # paused (the busy moment you missed) or held open with `log`,
             # where your own keyed transmissions show above each readback so
             # a misheard number is there to be read, not just remembered
-            tape = [f"{fg(*RADIO_COLORS.get(kind, MUTED))}{line}{RESET}"
-                    for _t, line, kind in self.sim.radio[-TAPE_LINES:]]
-            tape = [""] * (TAPE_LINES - len(tape)) + tape
+            tape = [([(line, RADIO_COLORS.get(kind, MUTED))], self._age_alpha(t))
+                    for t, line, kind in self.sim.radio[-TAPE_LINES:]]
+            tape = [([], 1.0) for _ in range(TAPE_LINES - len(tape))] + tape
             return tape + [bar]
         return [top, bar]
 

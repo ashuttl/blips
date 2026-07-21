@@ -157,9 +157,10 @@ def _read_key(fd, raw=False):
     if b in (b'\x7f', b'\x08'):
         return 'key:backspace'
     if raw:
-        # desk controls: Ctrl-L/P/V/W reach the app as raw bytes under cbreak
+        # desk controls: Ctrl-L/O/P/V/W reach the app as raw bytes under cbreak
         # (Ctrl-C still signals; Ctrl-S/Q stay with flow control, so avoided)
-        ctrl = {b'\x0c': 'l', b'\x10': 'p', b'\x16': 'v', b'\x17': 'w'}.get(b)
+        ctrl = {b'\x0c': 'l', b'\x10': 'p', b'\x0f': 'o',
+                b'\x16': 'v', b'\x17': 'w'}.get(b)
         if ctrl is not None:
             return f'key:ctrl-{ctrl}'
         if len(b) == 1 and 32 <= b[0] < 127:
@@ -272,6 +273,13 @@ def live_loop(render_fn, interval=60, mouse=False, on_open=None, scroll_step=15,
     sys.stdout.flush()
     try:
         tty.setcbreak(fd)
+        # cbreak leaves IEXTEN on, which keeps Ctrl-V as the terminal's
+        # `lnext` ("quote next key") — it swallows our Ctrl-V and waits for
+        # another keystroke.  Drop IEXTEN so every control key we listen for
+        # reaches the app as a plain byte instead of being intercepted.
+        mode = termios.tcgetattr(fd)
+        mode[3] &= ~termios.IEXTEN
+        termios.tcsetattr(fd, termios.TCSANOW, mode)
 
         while True:
             kwargs = {}

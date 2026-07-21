@@ -537,24 +537,33 @@ def compose(basemap, fx, overlays, graph_w, height_cells, echo=None):
 
     The sea, land and (when present) weather echo all resolve to a per-cell
     background colour; braille strokes and text glyphs are drawn on top of it.
-    Returns a per-cell grid (one self-contained ANSI snippet per cell) so a
-    live drag can shift the frame whole; ``_render_lines`` turns it into lines.
+    Returns ``(grid, bg_grid)``: the per-cell grid (one self-contained ANSI
+    snippet per cell) so a live drag can shift the frame whole, and a parallel
+    grid of each cell's background RGB so the log overlay can knock its glyphs
+    onto the terrain and fade the upper lines into it. ``_render_lines`` turns
+    the grid into lines.
     """
     base_bg = bg(*BG_PRIMARY)
     sea_bg = bg(*SEA_FILL)
     sea = basemap.sea
     grid = []
+    bg_grid = []
     for cy in range(height_cells):
         srow = sea[cy]
         erow = echo[cy] if echo is not None else None
         row = []
+        bgrow = []
         for cx in range(graph_w):
             e = erow[cx] if erow is not None else None
             if e is not None:
                 base_rgb = SEA_FILL if srow[cx] else BG_PRIMARY
-                cell_bg = bg(*lerp(base_rgb, (e[0], e[1], e[2]), e[3]))
+                bg_rgb = lerp(base_rgb, (e[0], e[1], e[2]), e[3])
+                cell_bg = bg(*bg_rgb)
+            elif srow[cx]:
+                bg_rgb, cell_bg = SEA_FILL, sea_bg
             else:
-                cell_bg = sea_bg if srow[cx] else base_bg
+                bg_rgb, cell_bg = BG_PRIMARY, base_bg
+            bgrow.append(bg_rgb)
             ov = overlays.get((cx, cy))
             if ov is not None:
                 ch, color = ov
@@ -573,7 +582,8 @@ def compose(basemap, fx, overlays, graph_w, height_cells, echo=None):
             else:
                 row.append(f"{cell_bg} ")
         grid.append(row)
-    return grid
+        bg_grid.append(bgrow)
+    return grid, bg_grid
 
 
 def _bg_prefix(cell):
@@ -586,18 +596,107 @@ def _bg_prefix(cell):
     return cell[:i + 1] if i != -1 else ""
 
 
-def _render_lines(grid, reticle=None):
-    """Flatten a per-cell grid into ANSI lines, stamping the reticle on top.
+def _footer_alpha(i, n):
+    """How opaque log line ``i`` (0 = top) is, of ``n`` lines.
+
+    The command bar and the latest calls sit at full strength; the upper
+    lines ramp down so the oldest calls dissolve into the radar. A two-line
+    footer (latest call + bar) never fades — there's nothing old up there.
+    """
+    if n <= 2:
+        return 1.0
+    span = 5
+    return 1.0 if i >= span else (i + 1) / (span + 1)
+
+
+def _line_overlay(overlay, segs, cy, graph_w, alpha):
+    """Add one footer/header line of coloured segments to ``overlay`` at ``cy``.
+
+    ``segs`` is a list of ``(text, rgb[, bold])``. Every glyph and every
+    interior space knocks the map out (a clean band, so text never reads as
+    speckled with radar or garbled by a blip label the full-height map drew
+    underneath); only the gap past the last glyph is left to the map, so the
+    line still floats over the scope on the right. The whole line carries
+    ``alpha`` — ``_render_lines`` fades its text toward the map background.
+    """
+    if cy < 0:
+        return
+    # lay the whole line out first, so we know where the text ends and can
+    # clear the interior spaces without touching the trailing gap
+    cells = []            # (cx, char, rgb, bold, wide)
+    cx = 0
+    for seg in segs:
+        text, rgb = seg[0], seg[1]
+        bold = seg[2] if len(seg) > 2 else False
+        for ch in text:
+            if cx >= graph_w:
+                break
+            w = visible_len(ch)
+            cells.append((cx, ch, rgb, bold, w == 2))
+            cx += w
+        if cx >= graph_w:
+            break
+    last = max((k for k, c in enumerate(cells) if c[1] != " "), default=-1)
+    for k, (cxx, ch, rgb, bold, wide) in enumerate(cells):
+        if ch == " " and k > last:
+            continue  # trailing gap past the text: keep the map here
+        overlay[(cxx, cy)] = (ch, rgb, bold, alpha)
+        if wide and cxx + 1 < graph_w:
+            overlay[(cxx + 1, cy)] = ("", rgb, bold, alpha)
+
+
+def _footer_overlay(lines, graph_w, height_cells):
+    """Lay the game's log over the bottom map rows as a per-cell overlay.
+
+    Each line is ``(segments, alpha)`` (or a bare segment list, alpha 1.0),
+    anchored to the bottom of the map. Its opacity is that line alpha — the
+    game fades a call by age there — times ``_footer_alpha`` for its distance
+    from the bottom, so old and scrolled-away calls both dissolve into the
+    radar. Returns {(cx, cy): (char, rgb, bold, alpha)}.
+    """
+    n = len(lines)
+    y0 = height_cells - n
+    overlay = {}
+    for i, line in enumerate(lines):
+        segs, line_alpha = line if isinstance(line, tuple) else (line, 1.0)
+        alpha = _footer_alpha(i, n) * line_alpha
+        if alpha < 0.08:
+            # faded to nothing (an old call aged out): drop the line entirely
+            # so the scope shows through where it was, braille and all — a knocked
+            # -out band of near-invisible text would just be a hole in the map
+            continue
+        _line_overlay(overlay, segs, y0 + i, graph_w, alpha)
+    return overlay
+
+
+def _render_lines(grid, reticle=None, text=None, bg_grid=None):
+    """Flatten a per-cell grid into ANSI lines, stamping overlays on top.
 
     ``reticle`` is {(cx, cy): (char, color)} for the range rings and crosshair.
     Each glyph is drawn over its cell's existing background, so the reticle
     stays fixed at the view centre while the map (the grid) shifts beneath it
     during a live drag — panning slews the scope head, it doesn't drag it off.
+
+    ``text`` (the game's floating top bar and log, with the matching
+    ``bg_grid`` from ``compose``) draws each cell over its own map background —
+    knocking the braille out from under the glyphs while the gaps keep the
+    terrain — fading toward that background by its alpha, and it outranks the
+    reticle so a ring dot never eats a letter.
     """
     lines = []
     for cy, row in enumerate(grid):
         parts = []
         for cx, cell in enumerate(row):
+            fo = text.get((cx, cy)) if text else None
+            if fo is not None:
+                ch, rgb, bold, alpha = fo
+                if ch == "":
+                    continue  # trailing column of a double-width glyph
+                base = bg_grid[cy][cx]
+                col = rgb if alpha >= 1.0 else lerp(base, rgb, alpha)
+                weight = BOLD if bold else ""
+                parts.append(f"{bg(*base)}{weight}{fg(*col)}{ch}{RESET}")
+                continue
             rc = reticle.get((cx, cy)) if reticle else None
             if rc is not None:
                 ch, color = rc
@@ -747,7 +846,11 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
     """
     cols, rows = get_terminal_size()
     graph_w = max(20, cols)
-    height_cells = max(8, rows - 1 - (game_footer[0] if game_footer else 1))
+    # in the game the top bar and the log both float over the map (their glyphs
+    # knock the braille out from under them, terrain shows through the gaps), so
+    # the map fills the whole screen and they're composited into its top and
+    # bottom rows; the live feed keeps a header row and one footer row of its own
+    height_cells = max(8, rows if game_footer is not None else rows - 2)
 
     # live drag: slide the last map under the cursor now; the true re-render
     # (fresh geography, blips) lands on release. The reticle (rings+crosshair)
@@ -763,10 +866,15 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
             # rings pinned to a place, not the screen: they ride the drag
             reticle_prev = {(cx + dcol, cy + drow): v
                             for (cx, cy), v in reticle_prev.items()}
-        return "\n".join([
-            _last_frame["header"],
-            *_render_lines(shifted, reticle_prev),
-            _last_frame["footer"]])
+        # the top bar and log stay put while the map slides beneath them
+        lines = _render_lines(shifted, reticle_prev,
+                              text=_last_frame.get("text_overlay"),
+                              bg_grid=_last_frame.get("bg_grid"))
+        head, foot = _last_frame.get("header"), _last_frame.get("footer")
+        parts = ([head] if head is not None else []) + list(lines)
+        if foot is not None:
+            parts.append(foot)
+        return "\n".join(parts)
 
     now = time.time()
     lat, lon = center
@@ -987,8 +1095,7 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
         if abs(best[4] - mcol) <= 4 and abs(best[5] - mrow) <= 2:
             focused = best[1]
 
-    grid = compose(basemap, fx, overlays, graph_w, height_cells, echo)
-    map_lines = _render_lines(grid, reticle)
+    grid, bg_grid = compose(basemap, fx, overlays, graph_w, height_cells, echo)
 
     airborne = sum(1 for ac in aircraft if not ac["ground"])
     ground = len(aircraft) - airborne
@@ -1016,26 +1123,36 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
         elif fetching and fetch_started and now - fetch_started > 5:
             status += f" · still fetching… {now - fetch_started:.0f}s"
 
-    def _header(place_str):
-        return (f"{fg(*MARKER)}{BOLD}⬤ blips{RESET}  {fg(*MUTED)}{place_str}"
-                f"{RESET}  {fg(*DIM)}{counts} · {status}{RESET}")
-
     place = header_note if header_note else _place(lat, lon)
-    header = _header(place)
-    over = visible_len(header) - cols
-    if over > 0 and len(place) > over + 1:
-        header = _header(place[:len(place) - over - 1] + "…")
-    header += " " * max(0, cols - visible_len(header))
-
     if game_footer is not None:
-        # the game supplies the bottom lines (radio log + command bar);
-        # clip before padding — a wrapped footer line would shove the whole
-        # frame down a row on every repaint
-        foot = "\n".join(
-            (lambda ln: ln + " " * max(0, cols - visible_len(ln)))(
-                _clip_ansi(line, cols))
-            for line in game_footer[1](focused))
+        # the top bar floats over the map too: build it as coloured segments
+        # and knock it into the top row alongside the log, so the scope shows
+        # edge to edge and only the gap past the text keeps its braille
+        header = None
+        text_overlay = _footer_overlay(game_footer[1](focused),
+                                       graph_w, height_cells)
+        _line_overlay(text_overlay,
+                      [("⬤ blips", MARKER, True),
+                       (f"  {place}", MUTED),
+                       (f"  {counts} · {status}", DIM)],
+                      0, graph_w, 1.0)
     else:
+        text_overlay = None
+
+        def _header(place_str):
+            return (f"{fg(*MARKER)}{BOLD}⬤ blips{RESET}  {fg(*MUTED)}"
+                    f"{place_str}{RESET}  {fg(*DIM)}{counts} · {status}{RESET}")
+
+        header = _header(place)
+        over = visible_len(header) - cols
+        if over > 0 and len(place) > over + 1:
+            header = _header(place[:len(place) - over - 1] + "…")
+        header += " " * max(0, cols - visible_len(header))
+
+    # the game floats its top bar and log over the map (text_overlay), so it
+    # has no header or footer row of its own — only the live feed builds those
+    foot = None
+    if game_footer is None:
         if updated is None:
             src_note = f"Contacting {trying or 'adsb.lol'}…"
         else:
@@ -1058,16 +1175,22 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
     if game_footer is None:
         foot += " " * max(0, cols - visible_len(foot))
 
+    map_lines = _render_lines(grid, reticle, text=text_overlay, bg_grid=bg_grid)
+
     # cache this clean frame so a live drag can shift the map whole and
     # re-stamp the (fixed) reticle over it (see the drag fast-path up top);
     # blip screen positions ride along so a click can name its aircraft
     _last_frame.clear()
     _last_frame.update(grid=grid, reticle=reticle, header=header, footer=foot,
+                       text_overlay=text_overlay, bg_grid=bg_grid,
                        gw=graph_w, hc=height_cells,
                        geo_reticle=rings_at is not None,
                        hits=[(p[4], p[5], p[1]["callsign"]) for p in placed])
 
-    out = "\n".join([header, *map_lines, foot])
+    parts = ([header] if header is not None else []) + list(map_lines)
+    if foot is not None:
+        parts.append(foot)
+    out = "\n".join(parts)
     # hover chip: flight detail floats beside the pointer instead of living
     # in the footer, so the eye never leaves the blip it's asking about
     if focused is not None and mouse_pos is not None:
