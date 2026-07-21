@@ -16,6 +16,7 @@ nothing changes.
 import math
 import threading
 import time
+import urllib.error
 
 from blips import USER_AGENT
 from blips._cache import CACHE_ROOT, location_cache_key, read_stale, write_cache
@@ -24,13 +25,17 @@ from blips._http import fetch_json
 from blips._runtime import debug_log
 
 URL = "https://api.open-meteo.com/v1/elevation"
-GRID_N = 48               # cells per side (~2.7 nm/cell over the span)
+GRID_N = 24               # cells per side (~5.4 nm/cell over the span)
 SPAN_NM = 130.0           # grid coverage, comfortably past the gates
 BUFFER_FT = 2000.0        # obstacle clearance over the highest terrain
 BATCH = 100               # points per API call (the documented max)
-# GRID_N=48 → 2,304 samples → 24 batches, ~12 s on the background thread
-# once per shift.  Fine enough to separate ridgelines from valleys instead
-# of smearing a whole island into one dome.
+# GRID_N=24 → 576 samples → 6 batches, a couple of seconds once per shift.
+# Open-Meteo's free elevation tier bills one call per coordinate and caps
+# the minute at 600, so the whole grid fits inside a single window with a
+# little headroom.  GRID_N=48 (2,304 samples) blew four minutes' worth of
+# budget in one burst and the load 429'd partway every time — never landing.
+# Still fine enough to separate ridgelines from valleys instead of smearing
+# a whole island into one dome.
 
 
 class Terrain:
@@ -111,11 +116,16 @@ class Terrain:
         return elev_m
 
     def _fetch_batch(self, lats, lons, tries=4):
-        """One batch of ≤BATCH points, retried with exponential backoff
-        (1, 2, 4 s) to ride out a transient timeout or rate-limit."""
+        """One batch of ≤BATCH points, retried with backoff.
+
+        A transient timeout gets a short exponential wait (1, 2, 4 s).  A 429
+        means we've spent Open-Meteo's per-minute coordinate budget — that
+        clears only when the minute rolls over, so a few-second backoff can't
+        touch it; we wait out most of a minute instead.  The grid should stay
+        under the cap on its own, but this keeps a load that races the
+        geocoder for the same budget from stalling for good."""
         for attempt in range(tries):
-            if attempt:
-                time.sleep(min(8.0, 2.0 ** (attempt - 1)))
+            wait = min(8.0, 2.0 ** attempt)   # transient default; may grow below
             try:
                 data = fetch_json(
                     URL + "?latitude=" + ",".join(f"{v:.4f}" for v in lats)
@@ -125,8 +135,14 @@ class Terrain:
                 if len(elev) == len(lats):
                     return elev
                 debug_log("terrain batch came back short; retrying")
+            except urllib.error.HTTPError as exc:
+                debug_log(f"terrain batch failed (try {attempt + 1}): {exc}")
+                if exc.code == 429:
+                    wait = 25.0   # ride out the per-minute rate-limit window
             except Exception as exc:
                 debug_log(f"terrain batch failed (try {attempt + 1}): {exc}")
+            if attempt < tries - 1:
+                time.sleep(wait)
         return None
 
     def _install(self, elev_m):
@@ -167,7 +183,7 @@ class Terrain:
         mva_at() stays nearest-cell: the safety floor a pilot quotes is the
         conservative per-sector maximum and must not soften near a peak.
         This is only the underlay tint, so the terrain reads as a smooth
-        relief instead of the raw 18×18 fetch grid.
+        relief instead of the raw 24×24 fetch grid.
         """
         with self._lock:
             mva = self._mva
