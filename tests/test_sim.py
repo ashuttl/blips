@@ -960,6 +960,46 @@ def test_flow_change_flips_the_runway(sim):
     assert est["phase"] in ("established", "landed")   # grandfathered
 
 
+def test_flow_change_holds_departures_for_the_old_final(sim):
+    # an arrival established when the airport turns lands out the old way —
+    # tower must not release a new-end departure into that head-on final
+    thr, course = sim.sector["thr"], sim.sector["course"]
+    lat, lon = advance(*thr, (course + 180.0) % 360.0, 8.0)
+    est = _arrival(sim, lat=lat, lon=lon, alt=2500.0, hdg=course, ias=180.0)
+    sim.command("100 i")
+    _run(sim, 30)
+    assert est["phase"] == "established"
+    sim._next_flow = 0.0
+    _run(sim, 2)
+    assert est["phase"] in ("established", "landed")   # grandfathered
+    sim._next_departure = 0.0           # tower has one ready to roll
+    _run(sim, 2)
+    assert not any(ac["plan"] == "departure" for ac in sim.aircraft)
+    sim._next_departure = 1e9           # park it while the arrival lands out
+    _run(sim, 480)
+    assert sim.landed == 1
+    sim._next_departure = 0.0           # now the release is clean
+    _run(sim, 2)
+    assert any(ac["plan"] == "departure" for ac in sim.aircraft)
+
+
+def test_flow_change_go_around_gets_the_new_runway(sim):
+    # a grandfathered arrival that balks its approach comes back for the
+    # runway everyone else is using now, not yesterday's
+    thr, course = sim.sector["thr"], sim.sector["course"]
+    lat, lon = advance(*thr, (course + 180.0) % 360.0, 8.0)
+    est = _arrival(sim, lat=lat, lon=lon, alt=2500.0, hdg=course, ias=180.0)
+    sim.command("100 i")
+    _run(sim, 30)
+    assert est["phase"] == "established"
+    sim._next_flow = 0.0
+    _run(sim, 2)
+    sim._go_around(est, "test")
+    assert est["rwy"] == sim.sector["rwy"]
+    assert est["course"] == sim.sector["course"]
+    assert est["thr"] == sim.sector["thr"]
+
+
 def test_emergency_priority_bonus(sim):
     thr, course = sim.sector["thr"], sim.sector["course"]
     lat, lon = advance(*thr, (course + 180.0) % 360.0, 10.0)
@@ -1445,3 +1485,18 @@ def test_ils_descends_below_mva(hilly):
     hilly.command("100 i")
     _run(hilly, 900)
     assert hilly.landed == 1            # rode the slope down regardless
+
+
+def test_a_landed_flight_never_calls_terrain(hilly):
+    # the tick that touches down used to fall through to the terrain guard —
+    # a flight already off the scope announcing it was leveling at the MVA
+    hilly.terrain = _Hills(hilly.airport["lon"] - 10.0)  # 7,300 everywhere
+    thr = hilly.sector["thr"]
+    course = hilly.sector["course"]
+    lat, lon = advance(*thr, (course + 180.0) % 360.0, 12.0)
+    _arrival(hilly, lat=lat, lon=lon, alt=8000.0, hdg=course, ias=200.0)
+    hilly.command("100 i")
+    _run(hilly, 900)
+    assert hilly.landed == 1
+    assert not any("terrain below us" in line
+                   for _t, line, _k in hilly.radio)

@@ -1508,6 +1508,17 @@ class Sim:
     def _rwy_closed(self):
         return self._elapsed < self._rwy_closed_until
 
+    def _opposing_final(self, course, sat=False):
+        """An arrival still committed to yesterday's flow — established on
+        the reciprocal of this runway end after the airport turned.  Tower
+        won't release a departure into a head-on final; the roll waits
+        until the last of them is down."""
+        return any(
+            ac["plan"] == "arrival" and ac["phase"] == "established"
+            and bool(ac.get("sat")) == sat
+            and abs(turn_delta(ac["course"], course)) > 90.0
+            for ac in self.aircraft)
+
     def _spawn_tick(self, dt):
         self._next_arrival -= dt
         self._next_departure -= dt
@@ -1533,12 +1544,15 @@ class Sim:
             self._next_departure = max(self._next_departure, 15.0)
         if self._next_departure <= 0 and active < 16:
             # tower meters releases: nobody rolls while the previous
-            # departure is still climbing out close-in on runway heading
+            # departure is still climbing out close-in on runway heading,
+            # or while an arrival caught by a flow change is still landing
+            # out the old way — a new-end takeoff meets that final head-on
             blocked = any(
                 ac["plan"] == "departure" and ac["phase"] == "cruise"
                 and haversine_nm(ac["lat"], ac["lon"], self.airport["lat"],
                                  self.airport["lon"]) < 7.0
-                for ac in self.aircraft)
+                for ac in self.aircraft) or self._opposing_final(
+                    self.sector["course"])
             if blocked:
                 self._next_departure = 20.0
             else:
@@ -1548,8 +1562,13 @@ class Sim:
                     45.0, self.rng.expovariate(base * 0.7 / 3600.0))
         self._next_sat_dep -= dt
         if self._next_sat_dep <= 0 and active < 16:
-            self._spawn_departure(sat=self.sector["sat"])
-            self._next_sat_dep = self.rng.uniform(300.0, 600.0)
+            sat = self.sector["sat"]
+            src = sat or self.sector
+            if self._opposing_final(src["course"], sat=sat is not None):
+                self._next_sat_dep = 20.0
+            else:
+                self._spawn_departure(sat=sat)
+                self._next_sat_dep = self.rng.uniform(300.0, 600.0)
 
     # -- flying -------------------------------------------------------------
     def _stage(self, ac, due, **fields):
@@ -1602,11 +1621,12 @@ class Sim:
             ac["hdg"] = (ac["hdg"] + math.copysign(step, delta)) % 360.0
 
         # altitude — descents respect the terrain under them (the ILS is a
-        # surveyed path, so a coupled approach may go below the grid's MVA)
+        # surveyed path, so a coupled approach may go below the grid's MVA,
+        # and a landed flight is on the ground, past caring)
         tgt_alt = ac["tgt_alt"]
         if (self.terrain is not None and tgt_alt < ac["alt"]
                 and _controlled(ac)
-                and ac["phase"] not in ("cleared", "established")):
+                and ac["phase"] not in ("cleared", "established", "landed")):
             floor = self.terrain.mva_at(ac["lat"], ac["lon"])
             if floor is not None and tgt_alt < floor:
                 tgt_alt = floor
@@ -1771,6 +1791,12 @@ class Sim:
         ac["tgt_alt"] = float(
             round((ac.get("felev", self.sector["elev"]) + 3000.0)
                   / 1000.0) * 1000.0)
+        # a go-around that was landing out the old flow climbs straight
+        # ahead, but comes back for the runway everyone else is using now
+        src = self.sector["sat"] if ac.get("sat") else self.sector
+        if src is not None and abs(turn_delta(ac["course"],
+                                              src["course"])) > 90.0:
+            ac.update(rwy=src["rwy"], thr=src["thr"], course=src["course"])
         self.score -= cost
         self.go_arounds += 1
         self.say(f"{hail(ac)} going around — {reason}", "alert",
