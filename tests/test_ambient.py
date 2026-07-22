@@ -25,6 +25,7 @@ def sim():
     s._center_events = 1
     s.hearback_p = 0.0
     s.wind = (360.0, 0.0)
+    s._aloft = (0.0, 1.0)       # one wind at every altitude unless layered
     s.react_s = (0.0, 0.0)
     s.aircraft.clear()
     s.trails.clear()

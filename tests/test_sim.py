@@ -26,6 +26,7 @@ def sim():
     s._center_events = 1        # centre never saturates unless a test says
     s.hearback_p = 0.0          # pilots hear perfectly unless a test says
     s.wind = (360.0, 0.0)       # calm air unless a test brings weather
+    s._aloft = (0.0, 1.0)       # one wind at every altitude unless layered
     s.react_s = (0.0, 0.0)      # and their hands are instant
     s.aircraft.clear()          # drop the pre-populated shift traffic
     s.trails.clear()
@@ -1245,6 +1246,39 @@ def test_headwind_costs_groundspeed(sim):
     assert ac["track"] == 360.0         # straight into it: no drift
 
 
+def test_wind_aloft_strengthens_and_turns(sim):
+    sim.wind = (270.0, 10.0)
+    sim._aloft = (30.0, 3.0)            # veers 30°, triples, by the top
+    elev = sim.airport["elev"]
+    assert sim.wind_at(elev) == (270.0, 10.0)      # the ATIS number
+    d_top, k_top = sim.wind_at(elev + 18000.0)
+    assert abs(d_top - 300.0) < 0.1 and abs(k_top - 30.0) < 0.1
+    d_mid, k_mid = sim.wind_at(elev + 4000.0)
+    assert 270.0 < d_mid < d_top        # turning on the way up...
+    assert 10.0 < k_mid < k_top         # ...and building the whole way
+
+
+def test_calm_day_is_calm_all_the_way_up(sim):
+    sim._aloft = (30.0, 3.5)            # a gradient with nothing to grade
+    assert sim.wind_at(sim.airport["elev"] + 18000.0)[1] == 0.0
+
+
+def test_wind_aloft_backs_south_of_the_equator():
+    assert Sim(find_airport("tpa"), seed=3)._aloft[0] > 0.0    # veers
+    assert Sim(find_airport("syd"), seed=3)._aloft[0] < 0.0    # backs
+
+
+def test_headwind_bites_harder_at_altitude(sim):
+    sim.wind = (360.0, 20.0)            # 20 on the nose at the surface...
+    sim._aloft = (0.0, 3.0)             # ...and 60 at the top of the climb
+    low = _arrival(sim, "DAL1", hdg=360.0, alt=2000.0, ias=250.0)
+    high = _arrival(sim, "DAL2", lat=sim.airport["lat"] + 1.0,
+                    hdg=360.0, alt=14000.0, ias=250.0)
+    _run(sim, 5)
+    deficit = lambda ac: ac["ias"] * (1.0 + ac["alt"] * 2e-5) - ac["gs"]
+    assert deficit(high) > deficit(low) + 15.0
+
+
 def test_ils_lands_in_a_crosswind(sim):
     course = sim.sector["course"]
     sim.wind = ((course + 90.0) % 360.0 or 360.0, 14.0)
@@ -1353,11 +1387,13 @@ def test_prompt_landing_keeps_the_hundred(sim):
 def test_spawned_arrivals_carry_a_reachable_par(sim):
     sim._spawn_arrival(allow_sat=False)    # the main-field par formula
     ac = sim.aircraft[-1]
-    # par ≈ 16 s/nm plus five minutes of slack: a straight-in at working
-    # speeds beats it comfortably, a couple of laps does not
+    # par is the straight-in at the type's own working speed plus five
+    # minutes of slack: flown direct it's beaten comfortably, a couple
+    # of laps is not — whatever the cast happened to send
     dist = haversine_nm(ac["lat"], ac["lon"],
                         sim.airport["lat"], sim.airport["lon"])
-    assert dist * 14.0 < ac["par"] < dist * 16.0 + 320.0
+    straight_in = dist * 4500.0 / float(ac["perf"][0])
+    assert 240.0 < ac["par"] - straight_in < 360.0
 
 
 def test_rating_is_score_against_offered(sim):

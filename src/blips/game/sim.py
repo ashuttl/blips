@@ -37,6 +37,7 @@ DESPAWN_NM = 60.0         # grace past the farthest gate (arrivals spawn
                           # a few nm outside their fix; never despawn there)
 TURN_RATE = 3.0           # deg/s, standard rate
 ACCEL_KT_S = 1.2          # speed change rate
+ALOFT_FT = 18000.0        # the wind gradient tops out this far above the field
 GS_FT_PER_NM = 318.0      # 3° glideslope
 SEP_NM, SEP_FT = 3.0, 1000.0
 # a VFR target isn't separation traffic — it's a hazard.  you owe them a
@@ -785,6 +786,29 @@ class Sim:
         direction = round((course + self.rng.uniform(-40.0, 40.0))
                           % 360.0 / 10.0) * 10 % 360
         self.wind = (float(direction or 360), float(self.rng.randint(6, 16)))
+        # aloft the wind turns and strengthens — veering with height in the
+        # northern hemisphere, backing in the southern, two to three-and-a-
+        # half times the surface speed by the top of the gradient
+        turn = 1.0 if self.airport["lat"] >= 0.0 else -1.0
+        self._aloft = (turn * self.rng.uniform(15.0, 40.0),
+                       self.rng.uniform(2.0, 3.5))
+
+    def wind_at(self, alt):
+        """The wind at altitude.  The ATIS reads the surface number; up
+        high the air moves harder and from somewhere else, easing between
+        the two the way the real friction layer does — fast in the first
+        few thousand feet, gently after.  The groundspeeds tell the story:
+        spacing built on the downwind at 11,000 shrinks as the line
+        descends into slower air, and compression on final is yours to
+        pay for."""
+        wdir, wkt = self.wind
+        if not wkt:
+            return wdir, wkt     # a calm day is calm all the way up
+        veer, factor = self._aloft
+        f = math.sqrt(max(0.0, min(1.0,
+                                   (alt - self.airport["elev"]) / ALOFT_FT)))
+        return ((wdir + veer * f) % 360.0 or 360.0,
+                wkt * (1.0 + (factor - 1.0) * f))
 
     def _say_atis(self, update=False):
         head = ("ATIS update, information" if update else "information")
@@ -1656,7 +1680,7 @@ class Sim:
 
         # the wind triangle: they point where you said, the air moves —
         # heading and track diverge, and the scope draws the truth
-        wdir, wkt = self.wind
+        wdir, wkt = self.wind_at(ac["alt"])
         if wkt:
             rad_h = math.radians(ac["hdg"])
             rad_w = math.radians(wdir + 180.0)   # blowing toward

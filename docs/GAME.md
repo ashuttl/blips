@@ -213,6 +213,18 @@ slightly else, so heading and track diverge, the downwind gets pushed,
 and every intercept is a little different. The header carries the wind
 readout a controller glances at before every clearance.
 
+And it doesn't stop at the surface. Aloft the air moves harder and from
+somewhere else — by the mid-teens two to three times the ATIS number,
+veered a few tens of degrees (backed, south of the equator) — easing
+down through the friction layer the way the real atmosphere does. The
+ATIS reads the surface; the groundspeeds tell the rest. An arrival
+riding a 40-knot push on the downwind at 11,000 descends into slower
+air, the trail spacing you built up high concertinas on the way down,
+and **compression on final** — the defining tax of approach control —
+is yours to pay for. Watch the overflights hustle across the top of the
+scope; that's the same wind your next arrival is about to descend out
+of.
+
 **Heavies are heavy.** The 777s, 767s and 787s carry the suffix on
 every call — "Speedbird 12 heavy" — and on final it matters: three
 miles is legal behind a 737 and dangerous behind a heavy. Five behind
@@ -310,7 +322,9 @@ quieter.
 **On a calm morning, balloons.** Wind under ten knots and somebody's
 aloft: two or three hot-air balloons drift near the field for a few
 minutes, near-stationary ○ targets moving at exactly the speed and
-heading the ATIS read out — the one aircraft that renders the wind.
+heading of the wind at their height — a touch brisker and turned from
+the ATIS number, because the wind aloft is its own weather — the one
+aircraft that renders it.
 The frequency gets a caution; the balloons get wherever the wind is
 going; pilots spot them easily when you call them. Then they're down
 in a field and the caution is cancelled.
