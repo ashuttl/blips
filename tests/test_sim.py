@@ -6,7 +6,6 @@ import re
 import pytest
 
 from blips._airports import find_airport
-from blips._commands import CommandError
 from blips._geo import (
     advance, bearing_to, cross_along_track, haversine_nm, turn_delta,
 )
@@ -369,21 +368,46 @@ def test_sector_is_deterministic_per_airport():
     s1, s2 = build_sector(ap), build_sector(ap)
     assert s1["fixes"] == s2["fixes"]   # TPA's corner posts never move
     assert s1["rwy"] == s2["rwy"]
-    assert len(s1["fixes"]) == 8
+    assert 6 <= len(s1["fixes"]) <= 10
+    assert 3 <= len(s1["entries"]) and 3 <= len(s1["exits"])
     for lat, lon in s1["fixes"].values():
         d = haversine_nm(lat, lon, ap["lat"], ap["lon"])
-        assert 21.0 < d < 53.0          # the real-navaid gate band
+        assert 11.0 < d < 76.0          # searched band, or a published post
 
 
 def test_sector_gates_are_real_navaids_where_possible():
-    # London is ringed with famous VORs; all eight gates should be real
+    # London is off the CIFP, so it still gates the old way: eight famous
+    # VORs picked one per octant, no procedures involved.
     s = build_sector(find_airport("egll"))
     real = [n for n in s["fixes"] if len(n) <= 3]
     assert len(real) == 8
     assert "BKY" in s["fixes"]          # Barkway, the classic north gate
-    # Tampa has thinner coverage: real where possible, synthesized elsewhere
-    s = build_sector(find_airport("tpa"))
-    assert "LAL" in s["fixes"] and "SRQ" in s["fixes"]
+
+
+def test_us_gates_come_from_the_published_procedures():
+    # A gate should be the fix the procedures actually use, so the name under
+    # a corner post and the name in a `via` clearance are the same word.
+    from blips.game.procedures import plans_for
+    for code, want in (("kpwm", {"CDOGG", "SCOGS", "RBELA", "HSKEL"}),
+                       ("ksea", {"CHINS", "HAWKZ", "MARNR"}),
+                       ("kjfk", {"PUCKY"})):
+        s = build_sector(find_airport(code))
+        assert want <= set(s["fixes"]), f"{code}: {sorted(s['fixes'])}"
+    # ...and every entry gate is the outer end of some real arrival
+    ap = find_airport("kpwm")
+    s = build_sector(ap)
+    heads = {p["gate"][2] for p in plans_for(ap, s["rwy"])}
+    assert heads & set(s["entries"])
+
+
+def test_gates_survive_a_flow_change():
+    # Real corner posts don't move when the wind turns; the procedures over
+    # them change.  Anything else would strand a hold or a departure's exit.
+    sim = Sim(find_airport("ksea"), seed=4)
+    before = dict(sim.sector["fixes"])
+    sim._next_flow = 0.0
+    sim._flow_tick(1.0)
+    assert sim.sector["fixes"] == before
 
 
 def test_us_gates_are_all_real_fixes_or_navaids():
@@ -480,6 +504,73 @@ def test_clearing_an_arrival_onto_a_star():
         t += 3.0
         s.tick(t)
     assert a["alt"] < start_alt                         # it descends the STAR
+
+
+def _sea():
+    s = Sim(find_airport("ksea"), seed=99)
+    s.hearback_p = 0.0
+    s.react_s = (0.0, 0.0)
+    s._next_arrival = s._next_departure = s._next_request = 1e9
+    s._next_vfr = s._next_over = s._next_sat_dep = s._next_neighbor = 1e9
+    s._balloon_event = 2
+    s.aircraft.clear()
+    return s
+
+
+def test_a_gate_name_in_a_via_clearance_names_its_procedure():
+    """RADDY is a Seattle corner post *and* a fix on the CHINS FIVE arrival,
+    so "via RADDY" is the first thing anyone tries.  "Unfamiliar with RADDY"
+    taught nothing about why; naming the procedure teaches the field."""
+    s = _sea()
+    s._spawn_arrival(allow_sat=False, handin=False)
+    a = s.aircraft[-1]
+    msg = s.command(f"{a['callsign']} via RADDY")
+    assert "RADDY is a fix on the CHINS five arrival" in msg
+    assert "via CHINS5" in msg
+
+
+def test_an_unknown_procedure_lists_the_real_ones():
+    s = _sea()
+    s._spawn_arrival(allow_sat=False, handin=False)
+    a = s.aircraft[-1]
+    msg = s.command(f"{a['callsign']} via NOTAFIX")
+    assert "CHINS5" in msg and "HAWKZ8" in msg
+
+
+def test_a_refusal_names_a_procedure_that_would_work():
+    # "Unable" teaches nothing; "HAWKZ8 would work from here" teaches the
+    # shape of the sector, which is the thing worth learning.
+    s = _sea()
+    for _ in range(8):
+        s._spawn_arrival(allow_sat=False, handin=False)
+    seen = [s.command(f"{a['callsign']} via {name}")
+            for a in list(s.aircraft)
+            for name in ("CHINS5", "SKYKO1", "MARNR8", "OLM2", "HAWKZ8")]
+    assert any("would work from here" in m for m in seen), seen[:4]
+
+
+def test_a_direct_can_name_any_fix_on_a_procedure():
+    # The radio now suggests "direct HUMPP and we can pick it up", so `dct`
+    # has to accept more than the four corner posts.
+    s = _sea()
+    s._spawn_arrival(allow_sat=False, handin=False)
+    a = s.aircraft[-1]
+    assert "HUMPP" in s.command(f"{a['callsign']} dct HUMPP")
+
+
+def test_clearing_an_arrival_names_the_fix_it_joins_at():
+    s = _sea()
+    s._spawn_arrival(allow_sat=False, handin=False)
+    a = s.aircraft[-1]
+    for name in ("SKYKO1", "MARNR8", "HAWKZ8", "OLM2", "CHINS5"):
+        line = s.command(f"{a['callsign']} via {name}")
+        if line.startswith("unable"):
+            continue
+        assert "descend via the" in line.lower()
+        assert line.lower().startswith("direct ")   # names the join fix
+        assert a["via_name"] == name
+        return
+    pytest.fail("no arrival was joinable from a spawn inside the sector")
 
 
 def test_arrivals_check_in_from_centre_at_the_boundary():

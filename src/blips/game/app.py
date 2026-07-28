@@ -18,7 +18,7 @@ import time
 from blips._airports import find_airport, nearest_airport
 from blips._color import BOLD, RESET, fg
 from blips._framebuffer import get_terminal_size
-from blips._geo import advance
+from blips._geo import advance, bearing_to, haversine_nm
 from blips._live import live_loop
 from blips._location import get_location
 from blips._radar_sources import theme_id
@@ -29,8 +29,8 @@ from blips.game.procedures import overlay_for
 from blips._theme import ensure_contrast
 from blips.game.voice import Speaker
 from blips.scope import (
-    ALERT, CHIP_BG, DIM, MARKER, MUTED, RING, WeatherFeed, _route_leg,
-    hit_test, render_scope,
+    ALERT, CHIP_BG, COMPASS, DIM, MARKER, MUTED, RING, WeatherFeed,
+    _route_leg, hit_test, render_scope,
 )
 
 TEXT = (214, 219, 233)
@@ -39,6 +39,8 @@ WARN = (240, 190, 80)
 TX = (120, 175, 225)      # your own key: the controller's side of the exchange
 STAR_COLOR = (72, 122, 134)   # arrivals: a cool teal, dim under the localizer
 SID_COLOR = (150, 108, 66)    # departures: a warm amber, the other flow
+STAR_LABEL = (112, 176, 190)  # ...and the names, which have to be read, not
+SID_LABEL = (198, 152, 98)    # merely noticed — the strokes stay quiet
 GAME_ZOOM = 1.9           # degrees of latitude: the sector ring plus margin
 
 RADIO_COLORS = {
@@ -55,7 +57,7 @@ RADIO_HINT = ("callsign then  l/r hdg · c/d alt · rs/is spd · s resume · "
               "dct FIX · via PROC · hold [FIX] · i [rwy] · tfc · ho handoff")
 # `?` reveals the desk: control keys, shown as keys so they read apart from the
 # radio verbs above.  These run the station, not the airplanes.
-MORE_HINT = ("desk:  +/− zoom · ^L log · ^O procedures · ^P pause · "
+MORE_HINT = ("desk:  +/− zoom · ^L log · ^O procs (arr/dep/both) · ^P pause · "
              "^W weather · ^B labels · ^V voice · ^C quit")
 
 
@@ -110,6 +112,98 @@ def _strip_card(ac):
     if route:
         lines.append(f"{mut}{route}")
     lines.append(f"{mut}{state}{phase}")
+    return lines
+
+
+def _hundreds(ft):
+    """3,000 ft → '030', the way every data block on this scope writes it."""
+    return f"{ft / 100:03.0f}"
+
+
+def _proc_card(plan, rwy, spoken):
+    """Chip lines for a procedure the pointer is resting on: what it is, the
+    fixes it strings together with the restrictions that ride on them, and
+    the clearance that puts an aeroplane on it.
+
+    This is the answer to "what does that label refer to".  A name on a scope
+    is only worth having if it can be asked, and the plate is the one thing a
+    controller reads that the radio can't tell them.
+    """
+    star = plan["kind"] == "STAR"
+    accent = STAR_LABEL if star else SID_LABEL
+    mut = fg(*ensure_contrast(MUTED, CHIP_BG, 3.0))
+    dim = fg(*ensure_contrast(DIM, CHIP_BG, 2.0))
+    noun = "arrival" if star else "departure"
+    head = (f"{fg(*ensure_contrast(accent, CHIP_BG, 3.0))}{plan['name']}"
+            f" {mut}{spoken(plan['name'])} {noun}")
+    lines = [head]
+
+    # the fix chain, each with whatever it has to be crossed at
+    legs = []
+    for _lat, _lon, ident, lo, hi, spd in plan["spine"]:
+        if not ident:
+            continue
+        bits = ""
+        if lo is not None and lo == hi:
+            bits = f" {_hundreds(lo)}"
+        elif lo is not None:
+            bits = f" {_hundreds(lo)}+"
+        elif hi is not None:
+            bits = f" {_hundreds(hi)}−"
+        if spd:
+            bits += f" {spd}kt"
+        legs.append(ident + (f"{dim}{bits}{mut}" if bits else ""))
+    if plan["vectors"]:
+        legs.append(f"{dim}vectors{mut}")
+    if legs:
+        lines.append(mut + f" {dim}→{mut} ".join(legs))
+
+    state = [f"rwy {rwy}"]
+    if plan["branches"]:
+        entries = ", ".join(v for v, _p in plan["branches"][:4] if v)
+        if entries:
+            state.append(f"from {entries}"
+                         + ("…" if len(plan["branches"]) > 4 else ""))
+    lines.append(mut + " · ".join(state))
+    lines.append(f"{dim}type {mut}‹callsign› via {plan['name']}")
+    return lines
+
+
+def _gate_card(sim, name, plans):
+    """Chip lines for a corner post: which way it flows, how far out it is,
+    and — the thing that makes the sector learnable — which published
+    procedure crosses it, so ``via`` and the scope agree."""
+    from blips.game.procedures import plans_for, procedures_through
+    sector = sim.sector
+    lat, lon = sector["fixes"][name]
+    entry = name in sector["entries"]
+    accent = STAR_LABEL if entry else SID_LABEL
+    mut = fg(*ensure_contrast(MUTED, CHIP_BG, 3.0))
+    dim = fg(*ensure_contrast(DIM, CHIP_BG, 2.0))
+    kind = "entry gate — arrivals" if entry else "exit gate — departures"
+    d = haversine_nm(sim.airport["lat"], sim.airport["lon"], lat, lon)
+    brg = bearing_to(sim.airport["lat"], sim.airport["lon"], lat, lon)
+    lines = [f"{fg(*ensure_contrast(accent, CHIP_BG, 3.0))}{name} "
+             f"{mut}{kind}",
+             f"{mut}{d:.0f} nm {COMPASS[round(brg / 45) % 8]} of the field"]
+    # what actually crosses here on today's runway, not merely on the plate:
+    # a corner post the reciprocal flow uses is real but not yours right now,
+    # and saying "via" for it would be a clearance nobody could fly
+    want = "STAR" if entry else "SID"
+    today = [p["name"] for p in plans_for(sim.airport, sector["rwy"])
+             if p["kind"] == want
+             and any(f[2] == name for f in p["spine"])]
+    if today:
+        lines.append(f"{mut}on the {', '.join(today[:3])}")
+        lines.append(f"{dim}type {mut}‹callsign› via {today[0]}")
+        return lines
+    other = [n for n, k in procedures_through(sim.airport["icao"], name)
+             if k == want]
+    if other:
+        lines.append(f"{mut}on the {', '.join(other[:3])} "
+                     f"{dim}— not in today's flow")
+    else:
+        lines.append(f"{dim}no published procedure — vectors")
     return lines
 
 
@@ -255,15 +349,21 @@ class _Console:
 
 
 def _sector_pins(sim, airport):
-    """Geo-anchored decorations: fixes, the field, runway and localizer."""
+    """Geo-anchored decorations: fixes, the field, runway and localizer.
+
+    A corner post wears the direction it works: ``∇`` for a gate traffic
+    comes down through, ``∆`` for one it climbs out over, tinted with the
+    same cool-teal and warm-amber the procedure strokes use — so which way a
+    gate flows is legible before you read its name.
+    """
     sector = sim.sector
     pins = []
     for name in sector["entries"]:
         lat, lon = sector["fixes"][name]
-        pins.append((lat, lon, "∆", MUTED, name))
+        pins.append((lat, lon, "∇", STAR_COLOR, name, {"key": ("gate", name)}))
     for name in sector["exits"]:
         lat, lon = sector["fixes"][name]
-        pins.append((lat, lon, "∇", MUTED, name))
+        pins.append((lat, lon, "∆", SID_COLOR, name, {"key": ("gate", name)}))
     pins.append((airport["lat"], airport["lon"], "⊕", MARKER,
                  airport["iata"] or airport["icao"]))
 
@@ -293,23 +393,46 @@ def _sector_pins(sim, airport):
     return pins, lines
 
 
-def _procedure_overlay(sim, airport):
+PROC_MODES = ("off", "arr", "dep", "both")
+PROC_KINDS = {"arr": ("STAR",), "dep": ("SID",), "both": ("STAR", "SID")}
+PROC_SAID = {"off": "procedures hidden", "arr": "procedures: arrivals",
+             "dep": "procedures: departures", "both": "procedures: both"}
+
+
+def _procedure_overlay(sim, airport, kinds, declutter):
     """The named SIDs and STARs feeding today's runway, as dotted strokes
     with a name at each outer end — drawn dim, under the localizer, so the
-    approach picture still reads first.  Every procedure that serves the
-    active runway is shown (and only those); it rebuilds on a flow change,
-    so a new runway redraws the flows that feed it.  Empty where no
-    procedures are vendored (outside the CIFP's coverage)."""
+    approach picture still reads first.  It rebuilds on a flow change, so a
+    new runway redraws the flows that feed it.  Empty where no procedures
+    are vendored (outside the CIFP's coverage).
+
+    The name is painted in its own flow's colour rather than the grey every
+    other label wears, and it hangs a row *under* the corner post it leaves
+    from, so a procedure and the gate it uses read as one thing.  ``⇣``/``⇡``
+    lead the name where a flow ends in radar vectors rather than at a fix,
+    because "then vectors" is the plate talking, not missing data.
+
+    Returns ``(pins, lines, plans)``; ``plans`` is what the pointer asks.
+    """
     sector = sim.sector
-    ov = overlay_for(airport, sector["rwy"])
+    gates = sector["fixes"]
+    ov = overlay_for(
+        airport, sector["rwy"], kinds=kinds, declutter=declutter,
+        entry_gates=[gates[n] for n in sector["entries"]],
+        exit_gates=[gates[n] for n in sector["exits"]])
     lines = []
-    for kind, pts in ov["paths"]:
+    for kind, _name, pts in ov["paths"]:
         color = STAR_COLOR if kind == "STAR" else SID_COLOR
         for (la1, lo1), (la2, lo2) in zip(pts, pts[1:]):
             lines.append((la1, lo1, la2, lo2, color))
-    pins = [(lat, lon, "·", STAR_COLOR if kind == "STAR" else SID_COLOR, name)
-            for lat, lon, name, kind in ov["labels"]]
-    return pins, lines
+    pins = []
+    for lat, lon, name, kind, vectors in ov["labels"]:
+        star = kind == "STAR"
+        tail = ("⇣" if star else "⇡") if vectors else ""
+        pins.append((lat, lon, "", MUTED, f"{name}{tail}",
+                     {"label_color": STAR_LABEL if star else SID_LABEL,
+                      "row": 1, "key": ("proc", name)}))
+    return pins, lines, {p["name"]: p for p in ov["plans"]}
 
 
 def _wx_sampler(rgba, pw, ph, fbbox):
@@ -446,21 +569,45 @@ def main(args):
               schedule=schedule_for(airport["icao"]))
     center = [airport["lat"], airport["lon"]]
     zoom = [GAME_ZOOM]
-    scenery = {"rev": -1, "pins": None, "lines": None, "proc": None}
+    scenery = {"rev": -1, "pins": None, "lines": None,
+               "key": None, "proc": None}
     _ground_cache = {}
 
     def sector_scenery():
         """Pins and strokes for the current sector, rebuilt on flow change.
-        The procedure overlay rides along, shown only when toggled on."""
+        The procedure overlay rides along, shown only when toggled on, and
+        recompiled when the toggle changes what it's asking for."""
         if scenery["rev"] != sim.sector_rev:
             scenery["pins"], scenery["lines"] = _sector_pins(sim, airport)
-            scenery["proc"] = _procedure_overlay(sim, airport)
             scenery["rev"] = sim.sector_rev
+            scenery["key"] = None
         pins, lines = scenery["pins"], scenery["lines"]
-        if state["procs"]:
-            ppins, plines = scenery["proc"]
-            return pins + ppins, lines + plines
-        return pins, lines
+        mode = state["procs"]
+        if mode == "off":
+            return pins, lines
+        key = (sim.sector_rev, mode, state["plate"])
+        if scenery["key"] != key:
+            scenery["proc"] = _procedure_overlay(
+                sim, airport, PROC_KINDS[mode], not state["plate"])
+            scenery["key"] = key
+        ppins, plines, _plans = scenery["proc"]
+        return pins + ppins, lines + plines
+
+    def shown_plans():
+        """The compiled procedures currently on the scope, for the chip."""
+        if state["procs"] == "off" or not scenery["proc"]:
+            return {}
+        return scenery["proc"][2]
+
+    def pin_card(key):
+        """What the scenery under the pointer has to say for itself."""
+        from blips.game.sim import say_proc
+        what, name = key
+        if what == "gate":
+            return _gate_card(sim, name, shown_plans())
+        plan = shown_plans().get(name)
+        return (_proc_card(plan, sim.sector["rwy"], say_proc)
+                if plan else None)
 
     def ground(bbox, gw, hc, sea=None):
         """Terrain as a per-cell underlay tint: MVA above the field glows.
@@ -505,8 +652,8 @@ def main(args):
         return grid
     weather = WeatherFeed(airport["lat"], airport["lon"],
                           theme=theme_id(args.wx_theme), nudge=live)
-    state = {"paused": False, "weather": bool(args.weather), "procs": False,
-             "labels": True, "desk": None}
+    state = {"paused": False, "weather": bool(args.weather), "procs": "off",
+             "plate": False, "labels": True, "desk": None}
 
     def clock():
         m, s = divmod(int(sim._elapsed), 60)
@@ -567,10 +714,25 @@ def main(args):
                  else "data blocks hidden")
             return True
         if word in ("proc", "procs", "procedures", "sid", "sids", "star",
-                    "stars"):
-            state["procs"] = not state["procs"]
-            desk("procedures shown" if state["procs"]
-                 else "procedures hidden")
+                    "stars", "arr", "arrivals", "dep", "deps", "departures",
+                    "plate"):
+            # ^O thumbs through the states; a word goes straight to one, so
+            # "star" mutes the departures without cycling past them
+            if word in ("star", "stars", "arr", "arrivals"):
+                state["procs"] = "arr"
+            elif word in ("sid", "sids", "dep", "deps", "departures"):
+                state["procs"] = "dep"
+            elif word == "plate":
+                state["plate"] = not state["plate"]
+                if state["procs"] == "off":
+                    state["procs"] = "both"
+            else:
+                state["procs"] = PROC_MODES[
+                    (PROC_MODES.index(state["procs"]) + 1) % len(PROC_MODES)]
+            note = PROC_SAID[state["procs"]]
+            if state["procs"] != "off" and state["plate"]:
+                note += " · full plate"
+            desk(note)
             return True
         if word in ("voice", "voices", "tts", "sound"):
             if sim.speaker is not None:
@@ -620,7 +782,7 @@ def main(args):
                          if (state["paused"] or console.log_open) else 2,
                          console.footer),
             header_note=hud(), rings_at=(airport["lat"], airport["lon"]),
-            hover_card=_strip_card)
+            hover_card=_strip_card, pin_card=pin_card)
         if sim.bell:
             sim.bell = False
             frame = "\a" + frame   # something on frequency needs you

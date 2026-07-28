@@ -97,7 +97,8 @@ nonsense gets a pilot's "say again". Airline telephony comes from a
 vendored table — `RPA` reads back as Brickyard, `BAW` as Speedbird.
 
 Words the sim understands without a callsign: `pause`, `q`/`quit`,
-`w`/`weather`, `log`/`r` (hold the tape open), `voice` (speak the
+`w`/`weather`, `log`/`r` (hold the tape open), `proc` (and `arr`/`star`,
+`dep`/`sid`, `plate` — the procedure overlay), `voice` (speak the
 frequency aloud — macOS only), `?` for help. `+`/`-` zoom while the bar
 is empty; Esc clears it; up-arrow recalls history.
 
@@ -117,39 +118,92 @@ System Settings → Accessibility → Spoken Content.)
 
 A ~45 nm ring around one real airport (vendored, trimmed
 [OurAirports](https://ourairports.com/data/) data, public domain: 4,472
-fields with real runways). The corner posts are **real radio navaids** —
-the best VOR/NDB in each 45° octant of the gate band, from the same
-public-domain dataset — so Heathrow's gates are Barkway, Mayfield,
-Southampton and Daventry, and learning a sector means learning its actual
-geography. Where no navaid stands, a **real named waypoint** takes the
-gate (the FAA's [CIFP](https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/)
-fixes, public domain), so a US sector's gates are its true fixes end to
-end. Only an octant off the CIFP's coverage — outside the US — falls back
-to a synthesized five-letter fix. Deterministic per airport, always.
+fields with real runways). The corner posts are **the fixes the field
+actually uses**: where the FAA's
+[CIFP](https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/)
+has published procedures, a gate *is* the fix a procedure is named for.
+Seattle's inbounds cross CHINS, HAWKZ, MARNR and SKYKO because that is
+precisely what the CHINS FIVE, HAWKZ EIGHT, MARNR EIGHT and SKYKO ONE
+arrivals do; Boston's are JFUND, OOSHN, ROBUC and WOONS; JFK's are CAMRN
+and PUCKY. So the name under a corner post and the name in a `via`
+clearance are the same word, and a sector can be learned once. Where a
+plate's eponymous fix is absurdly far out — Kennedy files PARCH eighty
+miles away — the post falls back to where that flow crosses into the
+terminal area instead. Gates come off both directions of the runway and
+hold still for the shift: real corner posts don't move when the wind
+turns, the procedures over them change. An *exit* gate additionally has to
+be out near the boundary, since that's where you throw a departure over
+it; a short SID that ends in vectors twelve miles off the field still
+draws, it just isn't a gate.
 
-The named procedures are real too. Type `proc` and the SIDs and STARs that
-feed today's runway draw as dotted fans through their actual fixes — CDOGG
-FOUR and SCOGS FOUR into Portland, the arrival's own waypoints strung
-between the gate and the field — arrivals in cool teal, departures in warm
-amber, so the two flows read apart at a glance. A busy field would drown in
-plates, so the picture is held to the flows through your own gates: the
-nearest arrival to each entry, the nearest departure to each exit. Off by
-default; the localizer and the traffic always read first.
+Octants the plates leave empty top up the old way: the best **real radio
+navaid** in the gate band, VORs first, then a real named waypoint. A field
+off the CIFP entirely gets that search for all eight, so Heathrow's gates
+are still Barkway, Mayfield, Southampton and Daventry, and only an octant
+the real world left with neither falls back to a synthesized five-letter
+fix. Deterministic per airport, always.
 
-And you can fly them. Once a plane is positioned so it could pick one up —
-the way you point one at the localizer before clearing the approach — `via
-CDOGG4` clears it onto that arrival (or a departure onto its SID) and it
-flies the fixes itself, descending or climbing on the procedure while you
-work the rest of the room. The name has to be real and the right kind
-(`via HSKEL4` to an arrival gets *"HSKEL4 is a departure"*), and it has to
-be joinable — pointed the wrong way, the pilot asks for vectors first. The
-scratchpad on the data block wears the procedure (`EJA925 093 CDOGG4`) so
-you can see who's flying themselves. An altitude *amends* the clearance
-(`c 230` = "climb via the SID, then maintain FL230") without dropping it; a
-heading or a `dct` is you taking it back by hand, and cancels the
-procedure; the ILS clearance picks up naturally where the arrival ends. A
-field off the CIFP has no procedures to join, so there it's vectors as
-ever.
+None of this pre-positions anybody. Inbounds still enter from the true
+bearing of their origin, scattered wide, and check in with a rough
+position off the nearest named point — never "ready for the SCOGS four".
+Getting a flight onto a procedure is your work, not the spawner's.
+
+The named procedures are real too. `^O` thumbs through the picture —
+**arrivals**, then **departures**, then **both**, then off — and the top bar
+says which you're looking at, so on a busy scope you can mute the flow
+you're not working. Typed words go straight to a state (`star`/`arr`,
+`sid`/`dep`, `proc`); `plate` swaps the decluttered picture for the whole
+published set. Off by default; the localizer and the traffic always read
+first.
+
+What draws is one stroke per procedure, ordered the way an aeroplane flies
+it — arrivals in cool teal, departures in warm amber, and the **name in its
+own flow's colour** rather than the grey every other label wears, hung a row
+under the corner post it leaves from, so a procedure and its gate read as
+one thing. A departure's stroke starts **on the runway**, where the climb-out
+does. An arrival that ends on a downwind fix and hands you the aeroplane to
+vector says so, with a `⇣` on the name — "then vectors to final" is what
+almost every STAR really does, and a stroke that just stopped dead read as
+broken data instead. A departure that ends in vectors wears `⇡`.
+A busy field would drown in plates (LAX publishes 36 that serve a given
+runway), so the picture is held to the flows through your own gates: the
+nearest arrival to each entry, the nearest departure to each exit. That's
+nine procedures at LAX instead of thirty-six.
+
+**Hover anything and it answers.** A procedure name gives you the plate: the
+fix chain with the crossing restrictions that ride on it
+(`HAWKZ 120+ 270kt → LIINE → FOOTT 120 250kt → …`), the runway, the entries
+that feed it, and the clearance to type. A corner post tells you which way it
+flows, how far out it is, and which procedure crosses it *today* — the thing
+that makes `via` and the scope agree.
+
+And you can fly them. `via CDOGG4` clears an arrival onto that arrival (or a
+departure onto its SID) and it flies the fixes itself, descending or climbing
+on the procedure while you work the rest of the room. It joins at the
+**earliest fix it hasn't already passed**, and the readback names it —
+*"direct RADDY, descend via the CHINS FIVE arrival"* — so you can hear
+whether you caught the whole procedure or only its last few miles. Position
+the aeroplane first and it flies more of the plate; that's the skill, and
+it's what lets a mastered field carry more traffic.
+
+**The refusals teach.** The name has to be real and the right kind (`via
+HSKEL4` to an arrival gets *"HSKEL4 is a departure"*). Name a fix instead of
+a procedure — the honest mistake, since a corner post is both — and you're
+told which procedure owns it: *"RADDY is a fix on the CHINS five arrival, say
+via CHINS5"*. Name nothing real and you get the list of what does serve the
+runway. Ask for one you can't reach and the pilot says why *and* what would
+work: *"unable CHINS5 — AUBRN is 49 miles from us, MARNR8 would work from
+here"*. A revision number is forgiven, the way a controller forgives it —
+`via CDOGG` finds CDOGG4.
+
+`dct` reaches any fix on a procedure, not just the corner posts, so the
+advice on the radio is advice you can take. The scratchpad on the data block
+wears the procedure (`EJA925 093 CDOGG4`) so you can see who's flying
+themselves. An altitude *amends* the clearance (`c 230` = "climb via the SID,
+then maintain FL230") without dropping it; a heading or a `dct` is you taking
+it back by hand, and cancels the procedure; the ILS clearance picks up
+naturally where the arrival ends. A field off the CIFP has no procedures to
+join, so there it's vectors as ever.
 
 Arrivals check in at entry gates between 11,000 and 16,000 ft; your job
 ends when they're established on the localizer — cleared, coupled, the
@@ -376,7 +430,7 @@ shared with the live scope (`blips`), which reuses the same renderer.
 | --------------------- | --------------------------------------------------------- |
 | `game/app.py`         | command bar, radio log, tape, HUD, `--game` wiring        |
 | `game/sim.py`         | kinematics, wind, ILS, wake, sector, satellite, spawner, ambient sky, separation, conflict alert, hearback, scoring |
-| `game/procedures.py`  | vendored SIDs/STARs/approaches, the gate-decluttered overlay |
+| `game/procedures.py`  | vendored SIDs/STARs compiled per runway: spines, gates, joins, the decluttered overlay |
 | `game/schedules.py`   | vendored per-airport arrival/departure schedules          |
 | `game/fleet.py`       | live-sampled traffic pool with real routes                |
 | `game/voice.py`       | macOS `say` speech: one voice per flight, accent by airline |

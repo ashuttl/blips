@@ -823,11 +823,13 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
                  weather=None, show_weather=False, drag_offset=None,
                  routes=None, pins=None, lines_geo=None, game_footer=None,
                  header_note=None, rings_at=None, ground=None,
-                 hover_card=None, **_):
+                 hover_card=None, pin_card=None, **_):
     """Render one frame of the scope.
 
     Hovering a blip floats a chip of flight detail beside the pointer
     (drawn over the map via live_loop's ``\\x00`` overlay channel);
+    ``pin_card`` is an optional callable(key) → chip lines for the scenery
+    under the pointer when no aircraft is (a fix, a procedure name).
     ``hover_card`` is an optional callable(ac) → chip lines that replaces
     the stock card — the game uses it to serve a flight strip — falling
     back to the stock card when it returns None.
@@ -1008,23 +1010,36 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
             air[(col, row)] = (blip_glyph(ac), blip_color(ac))
 
     overlays = dict(basemap.airport_overlays())
-    # game pins (sector fixes): glyph + as much of the label as fits, under
-    # the traffic — a data block always outranks a fix name
+    # game pins (sector fixes, procedure names): glyph + as much of the label
+    # as fits, under the traffic — a data block always outranks a fix name.
+    # A pin may carry ``meta``: a colour for the label text (so an arrival
+    # and a departure read apart at a glance instead of both going grey), a
+    # row offset (so a procedure can sit under the corner post it feeds), and
+    # a key the pointer can ask about.
+    pin_hits = []
     if pins:
-        for plat, plon, glyph, pcolor, plabel in pins:
+        for pin in pins:
+            plat, plon, glyph, pcolor, plabel = pin[:5]
+            meta = pin[5] if len(pin) > 5 else None
             if not (minlon <= plon <= maxlon and minlat <= plat <= maxlat):
                 continue
             pcol = int((plon - minlon) / (maxlon - minlon) * graph_w)
             prow = int((maxlat - plat) / (maxlat - minlat) * height_cells)
+            prow += (meta or {}).get("row", 0)
             if not (0 <= pcol < graph_w and 0 <= prow < height_cells):
                 continue
-            overlays[(pcol, prow)] = (glyph, pcolor)
+            lcolor = (meta or {}).get("label_color") or DIM
+            key = (meta or {}).get("key")
+            if glyph:
+                overlays[(pcol, prow)] = (glyph, pcolor)
+                pin_hits.append((pcol, prow, key))
             for i, ch in enumerate(plabel or ""):
-                cell = (pcol + 2 + i, prow)
+                cell = (pcol + (2 if glyph else 0) + i, prow)
                 if (cell[0] >= graph_w or cell in overlays
                         or cell in blip_cells):
                     break
-                overlays[cell] = (ch, DIM)
+                overlays[cell] = (ch, lcolor)
+                pin_hits.append((cell[0], cell[1], key))
     overlays.update(air)
 
     # reticle: range rings + crosshair, stamped over the map last. Anchored
@@ -1090,13 +1105,21 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
         reticle[(hcol, hrow)] = ("+", MARKER)
 
     # pointer focus: nearest blip within a few cells of the mouse
-    focused = None
-    if mouse_pos is not None and placed:
+    focused = focused_pin = None
+    if mouse_pos is not None:
         mcol, mrow = mouse_pos[0] - 1, mouse_pos[1] - 2  # screen → cell
-        best = min(placed, key=lambda p: (p[4] - mcol) ** 2
-                   + ((p[5] - mrow) * 2) ** 2)
-        if abs(best[4] - mcol) <= 4 and abs(best[5] - mrow) <= 2:
-            focused = best[1]
+        if placed:
+            best = min(placed, key=lambda p: (p[4] - mcol) ** 2
+                       + ((p[5] - mrow) * 2) ** 2)
+            if abs(best[4] - mcol) <= 4 and abs(best[5] - mrow) <= 2:
+                focused = best[1]
+        if focused is None:
+            # nothing under the pointer but scenery: a fix or a procedure
+            # name will answer for itself.  Traffic always outranks it.
+            for hcol_, hrow_, key in pin_hits:
+                if key is not None and hrow_ == mrow and abs(hcol_ - mcol) <= 1:
+                    focused_pin = key
+                    break
 
     grid, bg_grid = compose(basemap, fx, overlays, graph_w, height_cells, echo)
 
@@ -1205,6 +1228,10 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
                                 focused["lon"]) if routes else None)
             card = _hover_card(focused, center, route)
         out += "\x00" + _chip_overlay(card, mouse_pos, cols, rows)
+    elif focused_pin is not None and pin_card is not None:
+        card = pin_card(focused_pin)
+        if card:
+            out += "\x00" + _chip_overlay(card, mouse_pos, cols, rows)
     return out
 
 

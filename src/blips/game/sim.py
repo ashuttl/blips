@@ -29,7 +29,9 @@ from blips._airports import find_airport
 from blips._geo import (
     advance, bearing_to, cross_along_track, haversine_nm, turn_delta,
 )
-from blips.game.procedures import build_join, find_named, flow_path
+from blips.game.procedures import (
+    find_named, flow_path, join_plan, plans_for, procedures_through,
+)
 from blips.game.schedules import far_city, schedule_for
 
 SECTOR_NM = 45.0          # boundary ring radius
@@ -576,9 +578,21 @@ NOT_OVERFLIGHT = frozenset((
     "CRJ7", "CRJ9", "E175", "DH8D", "AT76", "C56X", "GLF5", "C402", "P212",
 ))
 
-GATE_BAND_NM = (22.0, 52.0)   # where sector gates live — wide enough to
-                              # catch the real close-in VORs (PIE is 15 nm
-                              # off TPA; a near gate is a fun corner)
+GATE_BAND_NM = (22.0, 52.0)   # where a searched-for sector gate lives — wide
+                              # enough to catch the real close-in VORs (PIE is
+                              # 15 nm off TPA; a near gate is a fun corner)
+# A published corner post sits where the plate puts it, which is often
+# outside any band we'd have searched — Seattle's arrivals cross CHINS at
+# 67 nm — and rounding that to a compass rose would be a fiction.  But an
+# *exit* gate has a job beyond being real: it's where you throw a departure
+# over the boundary, so it has to be out near one.  Tampa's GANDY is a
+# genuine departure fix twelve miles off the field, and adopting it as a
+# sector gate meant centre would take a handoff from an aeroplane still
+# over the runway.  Short SIDs like that still draw; they just aren't gates.
+PLATE_ENTRY_BAND_NM = (10.0, 70.0)
+PLATE_EXIT_BAND_NM = (20.0, 70.0)
+MAX_GATES = 5                 # corner posts per direction — a real TRACON
+MIN_GATES = 4                 # works four to six, and the scope has to read
 NEIGHBOR_BAND_NM = (8.0, 35.0)  # a nearby major is a metroplex neighbour —
                                 # its traffic you see but never work
 _NAV_RANK = {"VORTAC": 0, "VOR-DME": 0, "VOR": 0, "TACAN": 1,
@@ -588,27 +602,87 @@ _NAV_RANK = {"VORTAC": 0, "VOR-DME": 0, "VOR": 0, "TACAN": 1,
 def build_sector(airport):
     """Fixes and active runway for an airport, seeded by its ICAO code.
 
-    The corner posts are real: the best radio navaid in each 45° octant
-    of the gate band, VORs first, the way TRACON gates always were, then a
-    real named waypoint where no navaid stands (the FAA CIFP fixes).  Only
-    an octant the real world left with neither — off the CIFP's coverage,
-    so outside the US — falls back to a synthesized five-letter fix.
-    Deterministic per airport either way — TPA's sector is always TPA's
-    sector, so learning it means something.
+    The corner posts are the ones the field really uses.  Where the CIFP has
+    published procedures, a gate *is* a procedure's outer fix — Seattle's
+    arrivals cross CHINS, HAWKZ, MARNR and SKYKO because that is what the
+    CHINS FIVE, HAWKZ EIGHT, MARNR EIGHT and SKYKO ONE arrivals do — so the
+    name under a corner post and the name in a ``via`` clearance are the same
+    word, and a sector can be learned once.  They are taken from both
+    directions of the runway and held fixed for the shift: real corner posts
+    don't move when the wind turns, the procedures over them change.
+
+    Octants the plates leave empty top up from the old search — the best
+    radio navaid in the gate band, VORs first, the way TRACON gates always
+    were, then a real named waypoint where no navaid stands.  A field off the
+    CIFP entirely (outside the US) gets that search for all eight, exactly as
+    before, and an octant the real world left with neither falls back to a
+    synthesized five-letter fix.  Deterministic per airport either way — TPA's
+    sector is always TPA's sector, so learning it means something.
 
     A real approach control rarely works one field: the nearest airport
     with a jet runway inside the sector becomes the satellite, and some
     of the traffic is theirs.
     """
     from blips._airports import airports_near, fixes_near, navaids_near
+    from blips.game.procedures import flow_gates
     rng = random.Random(airport["icao"])
     lat, lon = airport["lat"], airport["lon"]
+
+    runway = airport["rwys"][0]                    # longest, by build sort
+    end = rng.choice(("le", "he"))                 # today's flow
+    ident, course, thr = _end_geometry(airport, runway, end)
+
+    fixes, names, entries, exits = {}, set(), [], []
+    taken = {"STAR": set(), "SID": set()}          # octants already gated
+
+    # the plates first, over both flows, so the gates outlast a wind change.
+    # Today's flow is offered its gates before the reciprocal's, so a field
+    # whose plates are lopsided still gates the direction it's working.
+    plate = []
+    for gend in (end, "he" if end == "le" else "le"):
+        rid = _end_geometry(airport, runway, gend)[0]
+        for gate in flow_gates(airport, rid):
+            lo_nm, hi_nm = (PLATE_ENTRY_BAND_NM if gate["kind"] == "STAR"
+                            else PLATE_EXIT_BAND_NM)
+            if not lo_nm <= gate["dist_nm"] <= hi_nm:
+                continue
+            if any(g["name"] == gate["name"] for g in plate):
+                continue
+            plate.append(gate)
+
+    # A field with a handful of published posts keeps all of them: Boston
+    # really does work four arrival gates, and two of them share a quadrant.
+    # Only somewhere like LAX, with two dozen, needs thinning — and there the
+    # rule is one per octant, furthest out, which is the corner post rather
+    # than a step-down fix already inside the sector.
+    for kind in ("STAR", "SID"):
+        mine = [g for g in plate if g["kind"] == kind]
+        if len(mine) > MAX_GATES:
+            per_octant = {}
+            for gate in mine:
+                oct_ = int(((gate["bearing"] + 22.5) % 360.0) // 45.0)
+                cur = per_octant.get(oct_)
+                if cur is None or gate["dist_nm"] > cur["dist_nm"]:
+                    per_octant[oct_] = gate
+            mine = sorted(per_octant.values(), key=lambda g: g["bearing"])
+        for gate in mine[:MAX_GATES]:
+            if gate["name"] in names:
+                continue
+            names.add(gate["name"])
+            taken[kind].add(int(((gate["bearing"] + 22.5) % 360.0) // 45.0))
+            fixes[gate["name"]] = gate["pos"]
+            (entries if kind == "STAR" else exits).append(gate["name"])
+
+    # ...then fill out the compass, so every bearing has a gate to enter or
+    # leave by even where the plates are thin
     candidates = (navaids_near(lat, lon, *GATE_BAND_NM)
                   + fixes_near(lat, lon, *GATE_BAND_NM))
     ideal = sum(GATE_BAND_NM) / 2.0
-
-    fixes, names, entries, exits = {}, set(), [], []
     for base in (45, 135, 225, 315, 0, 90, 180, 270):  # diagonals first
+        kind = "STAR" if base % 90 else "SID"
+        want = entries if kind == "STAR" else exits
+        if len(want) >= MIN_GATES or base // 45 in taken[kind]:
+            continue
         best = None
         for dist, brg, nav in candidates:
             if abs(((brg - base) + 180.0) % 360.0 - 180.0) > 22.5:
@@ -629,11 +703,8 @@ def build_sector(airport):
             brg = base + rng.uniform(-18, 18)
             fixes[name] = advance(lat, lon, brg, SECTOR_NM)
         names.add(name)
-        (entries if base % 90 else exits).append(name)
-
-    runway = airport["rwys"][0]                    # longest, by build sort
-    end = rng.choice(("le", "he"))                 # today's flow
-    ident, course, thr = _end_geometry(airport, runway, end)
+        taken[kind].add(base // 45)
+        want.append(name)
 
     # the satellite is a minor field you also work; a major nearby is not
     # yours at all — it's a metroplex neighbour, so keep the two apart
@@ -725,6 +796,7 @@ class Sim:
         self.schedule = schedule or []   # vendored real routes for this field
         self.wx_sample = None    # callable(lat, lon) → echo 0..1, or None
         self.sector_rev = 0      # bumps on a flow change so the UI redraws
+        self._navpoints, self._navpoints_rev = {}, None
         self.bell = False        # ring the terminal on the next frame
         self.speaker = None      # a _voice.Speaker, when the player wants sound
         self.go_arounds = 0
@@ -936,6 +1008,91 @@ class Sim:
         ap = (find_airport(code) if code else None) or (
             find_airport(place) if place else None)
         return (place or code), ((ap["lat"], ap["lon"]) if ap else None)
+
+    def _navpoint(self, ident):
+        """A named place you can send an aeroplane to: a corner post, or any
+        fix on a procedure serving today's runway.  The gates win a clash,
+        being the names the sector is drawn with."""
+        spot = self.sector["fixes"].get(ident)
+        if spot is not None:
+            return spot
+        rwy = self.sector["rwy"]
+        if self._navpoints_rev != (self.sector_rev, rwy):
+            from blips.game.procedures import fix_positions
+            self._navpoints = fix_positions(self.airport, rwy)
+            self._navpoints_rev = (self.sector_rev, rwy)
+        return self._navpoints.get(ident)
+
+    def _procs_available(self, kind):
+        """The names of the SIDs or STARs that serve today's runway."""
+        return [p["name"] for p in plans_for(self.airport, self.sector["rwy"])
+                if p["kind"] == kind]
+
+    def _no_such_proc(self, me, name, want):
+        """Why a name in a ``via`` clearance meant nothing — and what would.
+
+        The honest mistake here is a gate.  RADDY is one of Seattle's corner
+        posts *and* a fix on the CHINS FIVE arrival, so "via RADDY" is the
+        first thing anyone tries, and "unfamiliar with RADDY" teaches nothing
+        about why.  A pilot who recognises the fix says which procedure it
+        belongs to; so does this.
+        """
+        through = procedures_through(self.airport["icao"], name)
+        mine = [n for n, k in through if k == want]
+        if mine:
+            noun = "arrival" if want == "STAR" else "departure"
+            return (f"unable — {name} is a fix on the "
+                    f"{say_proc(mine[0])} {noun}, say via {mine[0]}")
+        if through:
+            n, k = through[0]
+            noun = "arrival" if k == "STAR" else "departure"
+            return (f"unable — {name} is on the {say_proc(n)} {noun}, "
+                    f"which isn't ours")
+        avail = self._procs_available(want)
+        if avail:
+            noun = "arrivals" if want == "STAR" else "departures"
+            return (f"unable — unfamiliar with {name}; the {noun} to "
+                    f"runway {say_runway(self.sector['rwy'])} are "
+                    f"{', '.join(avail)}")
+        return f"unable — {me} is unfamiliar with {name}"
+
+    def _cannot_join(self, me, name, res, ac=None):
+        """Why a real procedure still can't be picked up from here — and,
+        where there is one, which procedure could be.
+
+        Naming the alternative is the whole point.  "Unable" teaches you
+        nothing; "unable CHINS5, HAWKZ8 would work from here" teaches you
+        the shape of the sector, which is the thing worth learning.
+        """
+        reason = res.get("reason")
+        if reason == "behind":
+            where = res.get("nearest")
+            if res.get("at_end") and where:
+                why = f"unable {name} — we're inside {where}"
+            else:
+                why = f"unable — {me} isn't positioned to join {name}"
+        elif reason == "far":
+            why = (f"unable {name} — {res.get('join')} is "
+                   f"{res.get('dist_nm', 0.0):.0f} miles from us")
+        else:
+            return (f"unable {name} — nothing of it serves runway "
+                    f"{say_runway(self.sector['rwy'])}")
+        alt = self._joinable_instead(ac, name) if ac is not None else None
+        return f"{why}, {alt} would work from here" if alt \
+            else f"{why}, we'll take vectors"
+
+    def _joinable_instead(self, ac, exclude):
+        """A procedure of the right kind this aircraft could actually join."""
+        want = "STAR" if ac["plan"] == "arrival" else "SID"
+        best = None
+        for plan in plans_for(self.airport, self.sector["rwy"]):
+            if plan["kind"] != want or plan["name"] == exclude:
+                continue
+            res = join_plan(self.airport, self.sector["rwy"], plan["name"],
+                            (ac["lat"], ac["lon"]), hdg=ac["hdg"])
+            if res["nav"] and (best is None or res["dist_nm"] < best[0]):
+                best = (res["dist_nm"], plan["name"])
+        return best[1] if best else None
 
     def _gate_toward(self, gates, coords):
         """The gate whose bearing off the field is nearest the real bearing
@@ -2541,7 +2698,7 @@ class Sim:
             self._stage(ac, due, tgt_ias=float(ins["kt"]))
             return self._spoken(ac, ins)
         if kind == "direct":
-            spot = self.sector["fixes"].get(ins["fix"])
+            spot = self._navpoint(ins["fix"])
             if spot is None:
                 raise CommandError(f"unable — {me} is unfamiliar with "
                                    f"{ins['fix']}")
@@ -2560,30 +2717,24 @@ class Sim:
             if ac.get("sat"):
                 raise CommandError(f"unable — {me} is working the satellite "
                                    "field, vectors or the ILS only")
-            proc = find_named(self.airport["icao"], ins["name"])
-            if proc is None:
-                raise CommandError(f"unable — {me} is unfamiliar with "
-                                   f"{ins['name']}")
             want = "STAR" if ac["plan"] == "arrival" else "SID"
+            icao = self.airport["icao"]
+            proc = find_named(icao, ins["name"])
+            if proc is None:
+                raise CommandError(self._no_such_proc(me, ins["name"], want))
             if proc["k"] != want:
                 is_a = {"STAR": "an arrival", "SID": "a departure"}.get(
                     proc["k"], "an approach")
                 mine = "an arrival" if ac["plan"] == "arrival" else "a departure"
-                raise CommandError(f"unable — {ins['name']} is {is_a}, "
+                raise CommandError(f"unable — {proc['n']} is {is_a}, "
                                    f"{me} is {mine}")
-            nav = build_join(self.airport, self.sector["rwy"], proc,
-                             (ac["lat"], ac["lon"]))
+            res = join_plan(self.airport, self.sector["rwy"], proc,
+                            (ac["lat"], ac["lon"]), hdg=ac["hdg"])
+            nav = res["nav"]
             if not nav:
-                raise CommandError(
-                    f"unable {ins['name']} — nothing of it serves runway "
-                    f"{say_runway(self.sector['rwy'])}")
+                raise CommandError(self._cannot_join(me, proc["n"], res, ac))
             join = nav[0]
             to_join = bearing_to(ac["lat"], ac["lon"], join[0], join[1])
-            if (abs(turn_delta(ac["hdg"], to_join)) > 135.0
-                    and haversine_nm(ac["lat"], ac["lon"],
-                                     join[0], join[1]) > 6.0):
-                raise CommandError(f"unable — {me} isn't positioned to join "
-                                   f"{ins['name']}, we'll take vectors")
             self._wx_check(ac, to_join)
             plan = ac["plan"]
             cruise = (ac["alt"] if plan == "arrival"
@@ -2597,7 +2748,13 @@ class Sim:
             ac["wx_deviating"] = False
             verb = "descend" if plan == "arrival" else "climb"
             noun = "arrival" if plan == "arrival" else "departure"
-            return f"{verb} via the {say_proc(proc['n'])} {noun}"
+            # a real clearance names the fix it joins at — "direct RADDY,
+            # descend via the CHINS FIVE arrival" — so you can hear whether
+            # you caught the whole procedure or only its last few miles
+            lead = ""
+            if res.get("join") and res.get("dist_nm", 0.0) > 4.0:
+                lead = f"direct {res['join']}, "
+            return f"{lead}{verb} via the {say_proc(proc['n'])} {noun}"
         if kind == "traffic":
             # a traffic call on the nearest 1200 code: the pilot who gets
             # the target in sight keeps it there, and the near-miss that
@@ -2649,7 +2806,7 @@ class Sim:
             return "roger"
         if kind == "hold":
             if ins["fix"] is not None:
-                spot = self.sector["fixes"].get(ins["fix"])
+                spot = self._navpoint(ins["fix"])
                 if spot is None:
                     raise CommandError(f"unable — {me} is unfamiliar with "
                                        f"{ins['fix']}")
