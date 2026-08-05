@@ -98,9 +98,12 @@ def _strip_card(ac):
     if plan in ("vfr", "overflight", "balloon"):
         state = f"{ac['alt']:,.0f} ft · {ac['gs']:.0f} kt"
     else:
+        spd = f"{ac['ias']:.0f}"
+        if round(ac["ias"]) != round(ac["tgt_ias"]):
+            spd += f"→{ac['tgt_ias']:.0f}"   # an assigned speed still owed
         state = (f"{ac['alt']:,.0f}→{ac['tgt_alt']:,.0f} ft · "
                  f"hdg {ac['hdg']:03.0f}→{ac['tgt_hdg']:03.0f} · "
-                 f"{ac['ias']:.0f} kt")
+                 f"{spd} kt")
     phase = {"cleared": " · cleared ILS", "established": " · on the ILS",
              "handed": " · handed off"}.get(ac["phase"], "")
     mut = fg(*ensure_contrast(MUTED, CHIP_BG, 3.0))
@@ -112,6 +115,16 @@ def _strip_card(ac):
     if route:
         lines.append(f"{mut}{route}")
     lines.append(f"{mut}{state}{phase}")
+    if plan == "arrival" and ac.get("par"):
+        # the clock the landing pays out on: time in hand while under,
+        # time owed once past it — tinted once the landing starts shrinking
+        over = ac["delay"] - ac["par"]
+        m, s = divmod(int(abs(over)), 60)
+        if over > 0:
+            lines.append(f"{fg(*ensure_contrast(WARN, CHIP_BG, 3.0))}"
+                         f"par +{m}:{s:02d}")
+        else:
+            lines.append(f"{mut}par −{m}:{s:02d}")
     return lines
 
 
@@ -465,21 +478,35 @@ def _wx_sampler(rgba, pw, ph, fbbox):
     return sample
 
 
-def _rating(sim):
+def _grade(score, offered, busts, elapsed):
     """A letter for the shift: what you scored against what the traffic
     was worth.  Fair at any shift length and any hour of the ramp —
     working everything cleanly and promptly is an A whether the sector
     gave you six aircraft or sixty.  Busts are what they are."""
-    if sim._elapsed < 120.0 or sim.offered < 150:
+    if elapsed < 120.0 or offered < 150:
         return "—"
-    if sim.busts >= 3 or sim.score < 0:
+    if busts >= 3 or score < 0:
         return "F"
-    ratio = sim.score / sim.offered
+    ratio = score / offered
     for grade, floor in (("A+", 0.96), ("A", 0.88), ("B+", 0.78),
                          ("B", 0.65), ("C", 0.45), ("D", 0.20)):
         if ratio >= floor:
             return grade
     return "F"
+
+
+def _rating(sim):
+    """The shift's grade so far — live in the header, final on the card."""
+    return _grade(sim.score, sim.offered, sim.busts, sim._elapsed)
+
+
+def _best_note(best):
+    """One line for a shift-book best: the rate, since that's the record —
+    a legacy entry from before the book graded by rate shows its raw score."""
+    if "ratio" in best:
+        return (f"{best['rating']} "
+                f"({best['ratio']:.0%} in {best['minutes']} min)")
+    return f"{best['score']:,} ({best['rating']})"
 
 
 def _shift_card(sim, airport, seed, live_cast, entry=None, prev=None):
@@ -489,13 +516,16 @@ def _shift_card(sim, airport, seed, live_cast, entry=None, prev=None):
     rating = _rating(sim)
     book = ""
     if entry is not None:
-        if rating != "—" and prev is not None and sim.score > prev["score"]:
-            note = (f"new personal best — previous "
-                    f"{prev['score']:,} ({prev['rating']})")
-        elif prev is not None:
-            note = f"personal best here {prev['score']:,} ({prev['rating']})"
-        elif rating != "—":
+        # record_shift only reassigns "best" when this shift took it, so
+        # a best that isn't the previous object is a fresh record
+        best = entry.get("best")
+        new_best = rating != "—" and best is not None and best is not prev
+        if new_best and prev is not None:
+            note = f"new personal best — previous {_best_note(prev)}"
+        elif new_best:
             note = "first rated shift — your record now"
+        elif prev is not None:
+            note = f"personal best here {_best_note(prev)}"
         elif entry["shifts"] == 1:
             note = "first shift in the book here"
         else:
@@ -666,10 +696,15 @@ def main(args):
         state["desk"] = (msg, time.time() + DESK_HOLD)
 
     def hud():
+        # the live pressures ride here: the ATIS letter and the running
+        # grade.  (An on-frequency count was tried and cut — the header
+        # has ~100 columns and the scope already counts the sky.)
         wd, wk = sim.wind
-        note = (f"{airport['icao']} approach · rwy {sim.sector['rwy']} · "
+        note = (f"{airport['icao']} approach · info {sim.atis} · "
+                f"rwy {sim.sector['rwy']} · "
                 f"wind {int(wd):03d}/{int(wk):02d} · "
-                f"score {sim.score:,} · busts {sim.busts} · {clock()}")
+                f"score {sim.score:,} ({_rating(sim)}) · "
+                f"busts {sim.busts} · {clock()}")
         if state["paused"]:
             note += " · PAUSED"
         toast = state["desk"]
@@ -770,6 +805,12 @@ def main(args):
                          if rgba is not None and state["weather"] else None)
         if not state["paused"]:
             sim.tick()
+        if sim.ledger:
+            # scored events surface as desk toasts, one line, latest wins —
+            # quiet enough that a busy scope never has to read past them
+            for event in sim.ledger:
+                desk(event)
+            sim.ledger.clear()
         console.tape = state["paused"]
         pins, lines_geo = sector_scenery()
         frame = render_scope(
@@ -850,6 +891,6 @@ def main(args):
     entry, prev = record_shift(
         airport["icao"], score=sim.score, rating=_rating(sim),
         minutes=int(sim._elapsed) // 60, landed=sim.landed,
-        handed=sim.departed, busts=sim.busts)
+        handed=sim.departed, busts=sim.busts, offered=sim.offered)
     print(_shift_card(sim, airport, seed, live_cast=pool is not None,
                       entry=entry, prev=prev))

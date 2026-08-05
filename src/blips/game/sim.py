@@ -806,6 +806,8 @@ class Sim:
         self.radio = []          # [(time, line, kind)] — newest last
         self.score = 0
         self.offered = 0         # points the concluded traffic was worth
+        self.ledger = []         # scored events, one short line each — the
+                                 # app drains these into the header toast
         self.landed = 0
         self.departed = 0
         self.busts = 0
@@ -881,6 +883,11 @@ class Sim:
                                    (alt - self.airport["elev"]) / ALOFT_FT)))
         return ((wdir + veer * f) % 360.0 or 360.0,
                 wkt * (1.0 + (factor - 1.0) * f))
+
+    @property
+    def atis(self):
+        """The current information letter, for the header."""
+        return _NATO[self._atis_n % len(_NATO)][0].upper()
 
     def _say_atis(self, update=False):
         head = ("ATIS update, information" if update else "information")
@@ -2018,6 +2025,8 @@ class Sim:
             ac.update(rwy=src["rwy"], thr=src["thr"], course=src["course"])
         self.score -= cost
         self.go_arounds += 1
+        if cost:                 # a closed-runway wave-off charges nothing
+            self.ledger.append(f"go-around · −{cost}")
         self.say(f"{hail(ac)} going around — {reason}", "alert",
                  voice=ac["callsign"])
 
@@ -2344,14 +2353,25 @@ class Sim:
                 # is never worth nothing)
                 par = ac.get("par")
                 extra = max(0.0, ac["delay"] - par) if par else 0.0
-                self.score += 100 - min(80, int(extra / 6.0))
+                pts = 100 - min(80, int(extra / 6.0))
+                self.score += pts
+                verdict = ""
                 if par:
                     self.offered += 100
                     self._delay_extra += extra
                     self._delay_n += 1
+                    m, s = divmod(int(extra), 60)
+                    verdict = (f" · {m}:{s:02d} over par" if extra
+                               else " · under par")
+                bonus = 0
                 if ac.get("mayday_t") is not None:
                     quick = self._elapsed - ac["mayday_t"] < 720.0
-                    self.score += 300 if quick else 100
+                    bonus = 300 if quick else 100
+                    self.score += bonus
+                self.ledger.append(
+                    f"{ac['callsign']} down · +{pts + bonus}"
+                    + (" · medical priority" if bonus else verdict))
+                if bonus:
                     self.say(f"{hail(ac)} — thanks for "
                              "the help, medics are meeting us", "checkin",
                              voice=ac["callsign"])
@@ -2386,11 +2406,13 @@ class Sim:
                     self.score -= 100
                     self.offered += 100
                     self.diversions += 1
+                    self.ledger.append(f"{ac['callsign']} diverted · −100")
                     self.say(f"{ac['callsign']} diverted — flew out of "
                              "your airspace unworked", "alert")
                 else:
                     self.score -= 100
                     self.offered += 50
+                    self.ledger.append(f"{ac['callsign']} unworked · −100")
                     self.say(f"{ac['callsign']} left the sector "
                              "without a handoff", "alert")
                 self.trails.pop(ac["hex"], None)
@@ -2427,6 +2449,7 @@ class Sim:
                 if pair not in self._bust_pairs:
                     self.busts += 1
                     self.score -= 500
+                    self.ledger.append("loss of separation · −500")
                     self.bell = True
                     self.say(f"LOSS OF SEPARATION — {a['callsign']} and "
                              f"{b['callsign']}", "alert")
@@ -2451,6 +2474,7 @@ class Sim:
                 if pair not in self._nmac_pairs:
                     self.nmacs += 1
                     self.score -= 200
+                    self.ledger.append("traffic alert · −200")
                     self.bell = True
                     what = ("the balloon" if t["plan"] == "balloon"
                             else "the traffic" if t["plan"] == "neighbor"
@@ -2562,6 +2586,8 @@ class Sim:
                     # the same kind of instruction, again, quickly: the
                     # controller caught the bad readback and fixed it
                     self.hearbacks_caught += 1
+                    self.score += 25
+                    self.ledger.append("hearback caught · +25")
                     ac["misheard_kind"] = None
                 said = None
                 if i == bad_idx:
@@ -2946,5 +2972,6 @@ class Sim:
             }
             self._stage(ac, due, **fields)
             self.score += 50
+            self.ledger.append(f"{ac['callsign']} handed off · +50")
             return "switching, good day"
         raise CommandError("say again?")
