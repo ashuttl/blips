@@ -20,6 +20,8 @@ for you.  The sim validates verbs against aircraft state and answers a
 wrong one with a puzzled pilot, not a silent fix.
 """
 
+import re
+
 # ICAO telephony designators — how the airline reads back.  The spawner
 # only issues callsigns from this table, so coverage is guaranteed.
 TELEPHONY = {
@@ -386,7 +388,8 @@ def parse(text):
             and tokens[0][0].isdigit() and tokens[0].isalnum()):
         query, tokens = query + tokens[0], tokens[1:]
     if not tokens:
-        raise CommandError("say again — callsign but no instruction")
+        raise CommandError("say again — callsign but no instruction "
+                           f"(try \"{query} l 230\")")
 
     out = []
     i = 0
@@ -397,6 +400,15 @@ def parse(text):
             out.append({"kind": "turn", "hdg": hdg, "dir": t[0]})
             i += 2
         elif t in ("c", "d", "climb", "descend"):
+            # the newcomer's trap: an altitude typed in feet — teach the
+            # hundreds convention instead of stonewalling
+            nxt = tokens[i + 1] if i + 1 < len(tokens) else ""
+            if nxt.isdigit() and 1000 <= int(nxt) <= 45000 \
+                    and int(nxt) % 100 == 0:
+                raise CommandError(
+                    f"altitude {nxt} out of range — altitudes read like "
+                    f"the data blocks, say {t} {int(nxt) // 100} for "
+                    f"{int(nxt):,} ft")
             hundreds = _int_arg(tokens, i + 1, "altitude", 10, 450)
             out.append({"kind": "alt", "alt_ft": hundreds * 100,
                         "verb": t[0]})
@@ -407,6 +419,9 @@ def parse(text):
                         "dir": "reduce" if t[0] == "r" else "increase"})
             i += 2
         elif t == "s":
+            if i + 1 < len(tokens) and tokens[i + 1].isdigit():
+                raise CommandError("say again — bare s resumes normal "
+                                   "speed; say rs 250 or is 250")
             out.append({"kind": "speed", "kt": None})
             i += 1
         elif t in ("dct", "direct"):
@@ -444,7 +459,18 @@ def parse(text):
             out.append({"kind": "hold", "fix": fix})
             i += 1
         else:
-            raise CommandError(f"say again — didn't catch \"{t}\"")
+            # forgive a missing space between verb and value: l230 ≡ l 230
+            m = re.fullmatch(r"(l|r|c|d|rs|is)(\d+)", t)
+            if m:
+                tokens[i:i + 1] = [m.group(1), m.group(2)]
+                continue
+            nxt = tokens[i + 1] if i + 1 < len(tokens) else ""
+            if t in ("h", "fh", "hdg", "heading", "t", "turn", "fly") \
+                    and nxt.isdigit():
+                raise CommandError("say again — direction is yours to "
+                                   "give: say l 230 or r 230")
+            raise CommandError(f"say again — didn't catch \"{t}\" "
+                               "(? for the commands)")
     return query, out
 
 

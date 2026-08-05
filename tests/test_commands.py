@@ -88,6 +88,32 @@ def test_errors_speak_like_pilots():
         parse("dal1")
 
 
+def test_teaching_errors_point_the_way():
+    # feet instead of hundreds — the newcomer's trap — teaches the rule
+    with pytest.raises(CommandError, match="say d 40"):
+        parse("dal1 d 4000")
+    with pytest.raises(CommandError, match="say c 110"):
+        parse("dal1 c 11000")
+    # a value after bare s points at rs/is
+    with pytest.raises(CommandError, match="rs 250"):
+        parse("dal1 s 250")
+    # a 'fly heading' shape teaches l/r without granting the shortcut
+    with pytest.raises(CommandError, match="l 230 or r 230"):
+        parse("dal1 fh 230")
+    with pytest.raises(CommandError, match="l 230 or r 230"):
+        parse("dal1 h 230")
+    # nonsense points at help
+    with pytest.raises(CommandError, match=r"\? for the commands"):
+        parse("dal1 xyzzy")
+
+
+def test_missing_space_is_forgiven():
+    _, ins = parse("dal1 l230 c40 rs180")
+    assert ins[0] == {"kind": "turn", "hdg": 230, "dir": "l"}
+    assert ins[1] == {"kind": "alt", "alt_ft": 4000, "verb": "c"}
+    assert ins[2] == {"kind": "speed", "kt": 180, "dir": "reduce"}
+
+
 def _acs(*callsigns):
     return [{"callsign": c} for c in callsigns]
 
