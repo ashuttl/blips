@@ -57,31 +57,33 @@ are done.
   first `^O` points at the hover cards, once; GAME.md and the code now
   agree the tape starts open (the open tape teaches, so `log_open =
   True` stayed and the doc moved).
+- ✅ **Event cooldowns & variety** *(fun)* — emergency/NORDO/centre-
+  closure share one abnormal clock: one crisis at a time, eligible
+  again ~20–25 min after the last concludes, same low hazard rates
+  (balloons stay a once-a-shift calm-morning special). Two new events
+  off existing machinery: a climbing departure that declares and
+  returns (7700, arrival priority, bonus clock, closure aftermath) and
+  a minimum-fuel arrival (no red blip, par cut to the straight-in,
+  hover-chip tell, escalates to emergency fuel after 6 min airborne).
+  Flow change de-metronomed: 600–2,400 s reschedule, ~30% of updates
+  hold the wind — the letter advances, the runway stays.
 
 ## Next — highest leverage remaining
 
-1. **Event cooldowns instead of once-per-shift-forever** *(fun)*.
-   Emergency/NORDO/centre-closure are hard-capped at 1 per shift; after
-   minute 40 only pushes and flow changes remain. Cooldowns (~20–25 min)
-   at the same low rates, plus one or two cheap new events reusing
-   existing machinery: a departure that declares and returns; a
-   minimum-fuel arrival (no red blip, zero par slack). De-metronome the
-   flow change (measured: exactly 3/hr at ~12/~33/~52 every shift) —
-   sometimes the wind holds and only the ATIS letter advances.
-2. **Parallel-runway operations** *(uniqueness — the single biggest
+1. **Parallel-runway operations** *(uniqueness — the single biggest
    differentiator)*. `build_sector` uses only `rwys[0]`; TPA, SEA, EGLL
    all run parallels. Phase 1 is segregated mode (land the longer,
    depart the other — EGLL's actual operation); the `i 19L` grammar and
    per-runway wake keys already exist. Phase 2: dual arrival streams
    with the independent-approach separation exemption (centerlines >
    4,300 ft).
-3. **Visual approaches** *(realism + fun)*. `v 19L` with a
+2. **Visual approaches** *(realism + fun)*. `v 19L` with a
    field-in-sight roll keyed on range/weather; "follow the traffic
    ahead" reuses the existing `visual` sighting set so in-trail inside
    3 nm is legal while wake still bites. VMC majors clear mostly
    visuals in reality; also the hook for charted ones (river/bay
    visuals) later.
-4. **First-shift calm ramp** *(discoverability)*. When the shift book
+3. **First-shift calm ramp** *(discoverability)*. When the shift book
    is empty: doubled spawn intervals, hearback/emergency/flow-change
    off for ~8 minutes, and 3–4 one-time coach lines at the moment they
    apply ("type dal204 d 60 to start them down"). Also fixes the cold

@@ -352,13 +352,16 @@ storms over your real airport are the game's terrain, different every
 session. Turn weather off (`w`) and the sky is honest: nobody complains.
 
 **The day changes.** Ten-odd minutes in, the ATIS updates (the letter
-advances — information bravo): the wind has come around, and the
-airport turns with it — new landing runway (the reciprocal end), new
-localizer on the map, departures rolling the other way. Anyone
+advances — information bravo). Usually the wind has come around, and
+the airport turns with it — new landing runway (the reciprocal end),
+new localizer on the map, departures rolling the other way. Anyone
 established rides their approach in; anyone merely cleared hears
 "cancel approach clearance, expect the new runway" and is yours to
 re-sequence. This is the hardest moment in real approach control, on
-purpose.
+purpose. But not every update is the turn: sometimes the wind only
+shifts in place — new numbers, same runway — and the next one comes
+when it comes, so a fresh letter is a thing to read, not a fire alarm
+you can set your watch by.
 
 **The traffic comes in banks.** Quiet spells, then centre calls the
 push and a bank of arrivals comes off the boundary at two and a half
@@ -428,14 +431,23 @@ own sector fills: for a couple of minutes nothing gets handed off, the
 boundary you normally throw departures over becomes a wall, and `hold`
 earns its keep at the exit fixes until they call back.
 
-**Sometimes it's not routine.** At most once a shift, an arrival declares
-a medical emergency — squawk 7700, the blip goes red and stays red, and
-they want the field *now*. Get them down inside twelve minutes for a
+**Sometimes it's not routine.** Now and then — one crisis at a time,
+with a real breather between them, so a shift feels unlucky rather
+than scripted — an arrival declares a medical emergency: squawk 7700,
+the blip goes red and stays red, and they want the field *now*. Get
+them down inside twelve minutes for a
 +300 bonus; everyone else can wait. Then the equipment meets them **on
 the runway**: closed for three to five minutes, approaches refused,
 clearances cancelled, short final waving off free of charge, departures
 holding on the ground — and `hold` finally earns its keep while final
-backs up behind the ambulance. Rarely, on a busy scope, somebody's
+backs up behind the ambulance. Or the mayday is a departure you just
+launched — a sick passenger, an engine shutting down — and it flips to
+an arrival on the spot: low and fast in the middle of the room, wanting
+the runway it left, ahead of everything you'd sequenced. Or an arrival
+calls **minimum fuel** — no red blip, not an emergency, just a crew
+telling you their pattern allowance is gone: the par clock on the hover
+chip reads what's left, and one still airborne six minutes on stops
+advising and declares emergency fuel. Rarely, on a busy scope, somebody's
 radios die instead: **squawk 7600**, the blip goes red, they fly their
 last clearance and answer nobody for a few minutes — the traffic you
 can't talk to is yours to vector everyone else around. Your terminal

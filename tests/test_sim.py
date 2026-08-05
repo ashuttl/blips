@@ -22,7 +22,8 @@ def sim():
     s._next_arrival = s._next_departure = s._next_request = 1e9
     s._next_vfr = s._next_over = s._next_sat_dep = 1e9
     s._balloon_event = 2        # the ambient sky stays parked too
-    s._center_events = 1        # centre never saturates unless a test says
+    s._next_abnormal = 1e9      # nothing goes wrong unless a test says
+    s.flow_hold_p = 0.0         # a forced flow change always turns the field
     s.hearback_p = 0.0          # pilots hear perfectly unless a test says
     s.wind = (360.0, 0.0)       # calm air unless a test brings weather
     s._aloft = (0.0, 1.0)       # one wind at every altitude unless layered
@@ -1117,6 +1118,23 @@ def test_flow_change_flips_the_runway(sim):
     assert est["phase"] in ("established", "landed")   # grandfathered
 
 
+def test_the_wind_can_hold_through_an_atis_update(sim):
+    # not every new letter turns the airport: sometimes the wind only
+    # shifts in place — new numbers, same runway, nothing cancelled
+    before = (sim.sector["rwy"], sim.sector["end"], sim.sector_rev)
+    letter = sim.atis
+    cleared = _arrival(sim, alt=9000.0)
+    cleared["phase"] = "cleared"
+    sim.flow_hold_p = 1.0           # this update, the wind holds
+    sim._next_flow = 0.0
+    _run(sim, 2)
+    assert sim.atis != letter                       # the letter advances
+    assert any("ATIS update" in line for _t, line, _k in sim.radio)
+    assert (sim.sector["rwy"], sim.sector["end"]) == before[:2]
+    assert sim.sector_rev == before[2]              # the scope never redraws
+    assert cleared["phase"] == "cleared"            # the clearance survives
+
+
 def test_flow_change_holds_departures_for_the_old_final(sim):
     # an arrival established when the airport turns lands out the old way —
     # tower must not release a new-end departure into that head-on final
@@ -1278,6 +1296,92 @@ def test_emergency_priority_bonus(sim):
     assert sim.landed == 1
     assert sim.score == 100 + 300       # landing + quick-priority bonus
     assert any("medics" in line for _t, line, _k in sim.radio)
+
+
+def test_abnormals_cool_down_instead_of_capping(sim):
+    # once-per-shift-forever is gone: a concluded crisis re-arms after a
+    # breather, and only one runs at a time on the shared clock
+    sim._next_abnormal = 0.0
+    sim._elapsed = 1000.0               # past every event's opening floor
+    sim._center_until = float("inf")    # park centre; this test works the clock
+    first = _arrival(sim, alt=12000.0)
+    assert sim._abnormal_ok()
+    sim.rng.random = lambda: 0.0        # every hazard roll fires
+    _run(sim, 3)
+    assert first["squawk"] == "7700"    # the tick declared them unprompted
+    assert not sim._abnormal_ok()       # one crisis at a time
+    first["phase"] = "landed"
+    _run(sim, 2)
+    assert sim._abnormal_active == 0    # concluded on the deck...
+    assert not sim._abnormal_ok()       # ...but the breather holds
+    assert 1150.0 < sim._next_abnormal - sim._elapsed < 1550.0
+    second = _arrival(sim, callsign="DAL200", alt=12000.0)
+    _run(sim, 30)
+    assert second["squawk"] != "7700"   # still cooling down
+    sim._next_abnormal = sim._elapsed   # the breather expires
+    _run(sim, 3)
+    assert second["squawk"] == "7700"   # eligible again — no lifetime cap
+
+
+def test_a_departure_declares_and_comes_back(sim):
+    sim._next_abnormal = 0.0
+    sim._spawn_departure()
+    dep = sim.aircraft[-1]
+    dep.pop("xr", None)
+    sim._declare_return(dep)
+    assert dep["squawk"] == "7700"
+    assert dep["plan"] == "arrival"             # the plan flips
+    assert dep["rwy"] == sim.sector["rwy"]      # with a runway...
+    assert dep["thr"] == sim.sector["thr"]
+    assert dep["par"] and dep["mayday_t"] is not None   # ...a par, a clock
+    assert sim.bell
+    assert any("return to the field" in line for _t, line, _k in sim.radio)
+    # no longer centre's to take — they're yours to land
+    assert "yours to land" in sim.command(f"{dep['callsign']} ho")
+    # bring them around: park them on a long final, the ILS just works
+    thr, course = sim.sector["thr"], sim.sector["course"]
+    dep["lat"], dep["lon"] = advance(*thr, (course + 180.0) % 360.0, 10.0)
+    dep.update(alt=3000.0, tgt_alt=3000.0, hdg=course, tgt_hdg=course,
+               ias=180.0, tgt_ias=180.0)
+    assert "cleared ils" in sim.command(f"{dep['callsign']} i").lower()
+    _run(sim, 400)
+    assert sim.landed == 1                      # scores as an arrival...
+    assert sim.score == 100 + 300               # ...with the priority bonus
+    assert sim._rwy_closed()                    # equipment meets them
+    assert any("closed — equipment" in line for _t, line, _k in sim.radio)
+    assert sim._abnormal_active == 0            # concluded — cooldown running
+    assert sim._next_abnormal > sim._elapsed
+
+
+def test_minimum_fuel_zeroes_the_pattern_allowance(sim):
+    ac = _arrival(sim, alt=9000.0)
+    ac["par"] = 4000.0                          # plenty of slack this morning
+    sim._declare_minfuel(ac)
+    dist = haversine_nm(ac["lat"], ac["lon"], *sim.sector["thr"])
+    straight = ac["delay"] + dist * 4500.0 / float(ac["perf"][0])
+    assert abs(ac["par"] - straight) < 1.0      # par is now the straight-in
+    assert ac["squawk"] != "7700"               # advisory, not an emergency
+    assert not sim.bell                         # no red blip, no bell
+    assert any("minimum fuel" in line for _t, line, _k in sim.radio)
+    assert not sim._abnormal_ok()               # it holds the shared clock
+    # the hover chip carries the tell, and its par clock reads what's left
+    from blips.game.app import _strip_card
+    lines = "\n".join(_strip_card(ac))
+    assert "minimum fuel" in lines
+    assert "par −" in lines                     # time in hand, honestly read
+
+
+def test_minimum_fuel_escalates_to_emergency_fuel(sim):
+    ac = _arrival(sim, alt=11000.0, hdg=90.0)   # dawdling across, not inbound
+    ac["par"] = 4000.0
+    sim._declare_minfuel(ac)
+    _run(sim, 300)
+    assert ac["squawk"] != "7700"               # six minutes of patience
+    _run(sim, 90)
+    assert ac["squawk"] == "7700"               # emergency fuel — a real 7700
+    assert ac["mayday_t"] is not None
+    assert sim.bell
+    assert any("emergency fuel" in line for _t, line, _k in sim.radio)
 
 
 def test_seeded_shifts_reproduce():

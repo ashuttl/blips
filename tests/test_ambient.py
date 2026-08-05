@@ -22,7 +22,8 @@ def sim():
     s._next_arrival = s._next_departure = s._next_request = 1e9
     s._next_vfr = s._next_over = s._next_sat_dep = 1e9
     s._balloon_event = 2
-    s._center_events = 1
+    s._next_abnormal = 1e9      # nothing goes wrong unless a test says
+    s.flow_hold_p = 0.0         # a forced flow change always turns the field
     s.hearback_p = 0.0
     s.wind = (360.0, 0.0)
     s._aloft = (0.0, 1.0)       # one wind at every altitude unless layered
