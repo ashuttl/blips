@@ -599,14 +599,16 @@ def _bg_prefix(cell):
 def _footer_alpha(i, n):
     """How opaque log line ``i`` (0 = top) is, of ``n`` lines.
 
-    The command bar and the latest calls sit at full strength; the upper
-    lines ramp down so the oldest calls dissolve into the radar. A two-line
-    footer (latest call + bar) never fades — there's nothing old up there.
+    The command bar and the calls nearest it sit at full strength; lines
+    ramp down with height *above the bar*, so the oldest tape lines dissolve
+    into the radar. Keyed on distance from the bottom, not the top, so a
+    footer of any height (the bar hint wraps on a narrow terminal) keeps
+    its working lines legible.
     """
-    if n <= 2:
+    j = n - 1 - i                 # rows above the bottom line
+    if j < 5:
         return 1.0
-    span = 5
-    return 1.0 if i >= span else (i + 1) / (span + 1)
+    return max(0.0, min(1.0, (n - j) / 6))
 
 
 def _line_overlay(overlay, segs, cy, graph_w, alpha):
@@ -652,14 +654,17 @@ def _footer_overlay(lines, graph_w, height_cells):
     anchored to the bottom of the map. Its opacity is that line alpha — the
     game fades a call by age there — times ``_footer_alpha`` for its distance
     from the bottom, so old and scrolled-away calls both dissolve into the
-    radar. Returns {(cx, cy): (char, rgb, bold, alpha)}.
+    radar. A line alpha of ``None`` pins the line at full strength wherever
+    it sits — the help card reads top to bottom, not oldest to newest.
+    Returns {(cx, cy): (char, rgb, bold, alpha)}.
     """
     n = len(lines)
     y0 = height_cells - n
     overlay = {}
     for i, line in enumerate(lines):
         segs, line_alpha = line if isinstance(line, tuple) else (line, 1.0)
-        alpha = _footer_alpha(i, n) * line_alpha
+        alpha = (1.0 if line_alpha is None
+                 else _footer_alpha(i, n) * line_alpha)
         if alpha < 0.08:
             # faded to nothing (an old call aged out): drop the line entirely
             # so the scope shows through where it was, braille and all — a knocked

@@ -88,9 +88,10 @@ and goes on the shift card. Pilots also take a **beat between reading
 back and acting** — the readback is the mic click, not the bank — so
 lead your turns like you mean it.
 
-The bar shows only the latest transmission by default. Type `log` (or
-`r`) to hold the **tape** open while you work — the last nine calls,
-oldest at the top, the same view a pause gives you. In the tape your own
+The **tape** — the last nine calls, oldest at the top, the same view a
+pause gives you — starts open, because learning the frequency means
+reading it. Type `log` (or `r`) to drop back to just the latest
+transmission when you want the scope bare. In the tape your own
 keyed transmissions appear spelled out in full phraseology, one line
 above each pilot's readback, so a misheard number is there to be *read*
 off the two lines rather than held in your head. You never hear your own
@@ -103,10 +104,17 @@ nonsense gets a pilot's "say again". Airline telephony comes from a
 vendored table — `RPA` reads back as Brickyard, `BAW` as Speedbird.
 
 Words the sim understands without a callsign: `pause`, `q`/`quit`,
-`w`/`weather`, `log`/`r` (hold the tape open), `proc` (and `arr`/`star`,
+`w`/`weather`, `log`/`r` (toggle the tape), `proc` (and `arr`/`star`,
 `dep`/`sid`, `plate` — the procedure overlay), `voice` (speak the
-frequency aloud — macOS only), `?` for help. `+`/`-` zoom while the bar
-is empty; Esc clears it; up-arrow recalls history.
+frequency aloud — macOS only), and `?`, which pauses the shift and
+draws the **help card** over the footer: the radio verbs one per line
+with a worked example off a callsign that's actually on frequency, the
+altitudes-in-hundreds rule, the desk keys and the mouse — and `?` again
+turns the page to a short glossary (established, hearback, NORDO, the
+push…). Esc puts the shift back in motion. `+`/`-` zoom while the bar
+is empty; Esc clears it; up-arrow recalls history. The empty bar wears
+the whole radio grammar as its hint, wrapped to however wide your
+terminal really is, so `? help` never falls off the edge.
 
 On macOS, `voice` turns the pilots' words into speech through the system
 `say` command. It's a radio, so it stays half-duplex — one transmission
