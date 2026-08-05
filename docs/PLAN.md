@@ -4,7 +4,7 @@ A synthesis of four audits (gameplay, discoverability/UI, realism &
 local uniqueness, engineering) against the goals: **(a) fun,
 (b) discoverability & UI, (c) realism, (d) local airport specificity,
 (e) technical underpinnings.** Ordered by leverage. Items marked ✅
-are done; 🚧 are in flight this session.
+are done.
 
 ## Done / in flight
 
@@ -27,13 +27,13 @@ are done; 🚧 are in flight this session.
   longer release hold behind a heavy departure. Par verified headless
   under the clamp: prompt landings keep 20–170 s of the 300 s pattern
   allowance, no retune needed.
-- 🚧 **Scoring made felt** *(fun, discoverability)* — every score event
+- ✅ **Scoring made felt** *(fun, discoverability)* — every score event
   says its number (landing with par verdict, +50 handoff, −500/−200/−50
   named); caught hearbacks pay +25; par pressure and assigned speed on
   the hover chip; live rating letter, ATIS letter and aircraft count in
   the HUD; shift-book personal best keyed on rating ratio, not raw
   score (a 3-hour C shift no longer beats a 50-minute A+).
-- 🚧 **Engineering floor** *(underpinnings)* — GitHub Actions CI;
+- ✅ **Engineering floor** *(underpinnings)* — GitHub Actions CI;
   unit tests for the untested offline-degradation cores (`_terrain`
   0% → covered, `fleet` draw semantics); the one unseeded RNG
   (fleet shuffle) made injectable.
