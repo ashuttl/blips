@@ -53,12 +53,136 @@ TERRAIN_TINT = (126, 96, 58)   # high ground, as a dim warm wash
 # the bar carries only the radio language — what you say to an airplane after
 # a callsign.  Nothing here touches the app itself: pause, voice, the log, the
 # weather layer are desk controls, reached by a key, never keyed like a mic.
-RADIO_HINT = ("callsign then  l/r hdg · c/d alt · rs/is spd · s resume · "
-              "dct FIX · via PROC · hold [FIX] · i [rwy] · tfc · ho handoff")
-# `?` reveals the desk: control keys, shown as keys so they read apart from the
-# radio verbs above.  These run the station, not the airplanes.
-MORE_HINT = ("desk:  +/− zoom · ^L log · ^O procs (arr/dep/both) · ^P pause · "
-             "^W weather · ^B labels · ^V voice · ^C quit")
+# The full sentence needs ~140 columns, so it's kept as tokens and greedy-
+# wrapped to the terminal that's actually there (``fit_hint``): one row on a
+# wide desk, three on a 60-column laptop, and never a verb clipped — the win
+# condition (`i`) and `? help` itself used to fall off an 80-column edge.
+HINT_TOKENS = (
+    [("callsign then  l/r hdg", "hint")],
+    [("c/d alt", "hint")],
+    [("rs/is spd", "hint")],
+    [("s resume", "hint")],
+    [("dct FIX", "hint")],
+    [("via PROC", "hint")],
+    [("hold [FIX]", "hint")],
+    [("i [rwy]", "hint")],
+    [("tfc", "hint")],
+    [("ho handoff", "hint")],
+    [("^L", "key"), (" log", "hint")],
+    [("?", "key"), (" help", "hint")],
+)
+
+
+def fit_hint(width):
+    """The empty-bar hint wrapped to ``width`` columns: rows of (text, role).
+
+    Rows read top to bottom; the last row is the command bar itself and
+    opens with the prompt.  Tokens never split across rows, so nothing ever
+    clips — and `? help` is the final token, so the way into the help card
+    is always on screen, at any width the scope itself survives.
+    """
+    cap = max(40, width) - 2                # the prompt / indent column
+    rows, row, used = [], [], 0
+    for tok in HINT_TOKENS:
+        w = sum(len(t) for t, _r in tok)
+        if row and used + 3 + w > cap:      # 3: the " · " between tokens
+            rows.append(row)
+            row, used = [], 0
+        if row:
+            row.append((" · ", "hint"))
+            used += 3
+        row.extend(tok)
+        used += w
+    rows.append(row)
+    return [[("▸ " if i == len(rows) - 1 else "  ",
+              "prompt" if i == len(rows) - 1 else "hint")] + r
+            for i, r in enumerate(rows)]
+
+
+def _kv(key, text):
+    """One help-card row: a command in the key column, its meaning after."""
+    return [("  " + key.ljust(17), "key"), (text, "text")]
+
+
+def help_lines(page, example=None, rwy=None):
+    """The help card, one page at a time: rows of (text, role) segments.
+
+    Pure content, so what the card claims can be tested without a terminal.
+    ``example`` is a real on-frequency callsign when the sector has one, so
+    the worked example is a transmission the player could key right now;
+    ``rwy`` names the active runway in the ILS line.  Every row joins to
+    fewer than 78 columns, so the card never clips anywhere the game runs.
+    """
+    example = (example or "dal204").lower()
+    rwy = rwy or "19L"
+    if page >= 2:
+        return [
+            [("help — the words · page 2/2 · ? back · esc closes", "title")],
+            _kv("established", "on the localizer and staying there; "
+                               "your job is done"),
+            _kv("localizer", "the runway centreline as a radio beam; "
+                             "the ILS rides it"),
+            _kv("par", "what a prompt landing takes; "
+                       "beat it or pay by the tick"),
+            _kv("corner post", "a gate: the fix traffic enters or leaves "
+                               "the sector over"),
+            _kv("scratchpad", "the data block's third field — "
+                              "destination or procedure"),
+            _kv("hearback", "catching a bad readback before the "
+                            "aeroplane flies it; +25"),
+            _kv("NORDO", "no radio — they fly their last clearance "
+                         "and answer nobody"),
+            _kv("flow change", "the wind turns and the airport turns "
+                               "with it; new runway"),
+            _kv("the push", "centre's bank of arrivals, all at once, "
+                            "on purpose"),
+            _kv("MVA", "minimum vectoring altitude — the ground's "
+                       "claim on the sky"),
+        ]
+    return [
+        [("help — the radio · page 1/2 · ? more · esc closes", "title")],
+        [("  type a callsign, then any of these, chained:", "text")],
+        _kv("l 230 / r 230", "turn left / right heading 230"),
+        _kv("c 110 / d 40", "climb / descend and maintain "
+                            "(hundreds of feet)"),
+        _kv("rs 180 / is 250", "reduce / increase speed (knots); "
+                               "bare s resumes"),
+        _kv("dct LAL", "proceed direct a fix"),
+        _kv("via CDOGG4", "join a SID/STAR — it flies the fixes itself"),
+        _kv("hold / hold LAL", "hold present position / at a fix, "
+                               "right turns"),
+        _kv(f"i / i {rwy}", "cleared ILS approach — how an arrival "
+                            "leaves you"),
+        _kv("tfc", "traffic call — points out the nearest VFR target"),
+        _kv("ho", "handoff — near the exit fix, banks a departure"),
+        [("  e.g.  ", "text"), (f"{example} l 230 d 60", "key"),
+         (" — turn left heading 230, then down to 6,000", "text")],
+        [("  altitudes are hundreds of feet, the way the data blocks "
+          "write them:", "text")],
+        [("  40 = 4,000 ft · 110 = 11,000 ft · 240 = FL240", "text")],
+        [("the desk:", "title")],
+        [("  ^O procedures · ^B labels · ^L log · ^V voice · ^W weather "
+          "· ^P pause", "text")],
+        [("  +/− zoom (empty bar) · pause · q quit · ? this card", "text")],
+        [("the mouse:", "title")],
+        [("  click a blip to key it up · hover an aircraft, a procedure "
+          "name", "text")],
+        [("  or a corner post for its card", "text")],
+    ]
+
+
+# roles → (colour, bold): the card speaks a register up from the bar hint —
+# it's the main thing on a paused scope — while the hint stays quiet under
+# whatever the frequency is doing.
+_CARD_ROLES = {"title": (TEXT, True), "key": (TEXT, False),
+               "text": (MUTED, False)}
+_HINT_ROLES = {"prompt": (MARKER, True), "key": (MUTED, False),
+               "hint": (DIM, False)}
+
+
+def _paint(rows, roles):
+    """(text, role) rows → (text, rgb, bold) segments for the footer."""
+    return [[(t, *roles[r]) for t, r in row] for row in rows]
 
 
 def _strip_card(ac):
@@ -235,7 +359,9 @@ class _Console:
         self.hist_idx = None
         self.last_mouse = None
         self.tape = False         # paused: the footer replays the frequency
-        self.log_open = True      # `log`: keep the tape up while you work
+        self.log_open = True      # the tape starts open — reading the
+        self.help_page = 0        # frequency is the game; `log` closes it
+        # 0: no card; 1/2: which help page is up (the sim holds its breath)
 
     # -- keyboard (live_loop raw mode: every printable is ours) -------------
     def intercept(self, action):
@@ -245,6 +371,8 @@ class _Console:
             self.buffer = self.buffer[:-1]
             return True
         if action == "escape":
+            if self.meta("esc"):      # the help card yields first
+                return True
             self.buffer = ""
             return True
         if action in ("back", "fwd"):
@@ -339,16 +467,24 @@ class _Console:
             top = ([(line, RADIO_COLORS.get(kind, MUTED))], self._age_alpha(t))
         else:
             top = ([], 1.0)
-        prompt = ("▸ ", MARKER, True)
         if self.buffer:
-            bar = [prompt, (self.buffer, TEXT), ("▌", MARKER)]
+            bar = [(([("▸ ", MARKER, True), (self.buffer, TEXT),
+                      ("▌", MARKER)], 1.0))]
         else:
-            # radio language first, then the desk-controls cluster: keys in a
-            # brighter tone so they read as pressable, labels kept quiet
-            bar = [prompt, (RADIO_HINT + "      ", DIM),
-                   ("^L", MUTED), (" log   ", DIM),
-                   ("?", MUTED), (" help", DIM)]
-        bar = (bar, 1.0)              # the command line never ages out
+            # the whole hint, wrapped to the terminal that's really there —
+            # keys in a brighter tone so they read as pressable, labels quiet;
+            # the command line (and its hint) never ages out
+            cols, _rows = get_terminal_size()
+            bar = [(row, 1.0) for row in _paint(fit_hint(cols), _HINT_ROLES)]
+        if self.help_page:
+            # `?`: the sim is holding its breath and the card owns the
+            # footer — pinned alphas, so it reads top to bottom, no fade
+            example = next((a["callsign"] for a in self.sim.aircraft
+                            if a["phase"] != "handed" and _commandable(a)),
+                           None)
+            card = help_lines(self.help_page, example=example,
+                              rwy=self.sim.sector["rwy"])
+            return [(row, None) for row in _paint(card, _CARD_ROLES)] + bar
         if self.tape or self.log_open:
             # the tape: every call in order, oldest at the top — up while
             # paused (the busy moment you missed) or held open with `log`,
@@ -357,8 +493,8 @@ class _Console:
             tape = [([(line, RADIO_COLORS.get(kind, MUTED))], self._age_alpha(t))
                     for t, line, kind in self.sim.radio[-TAPE_LINES:]]
             tape = [([], 1.0) for _ in range(TAPE_LINES - len(tape))] + tape
-            return tape + [bar]
-        return [top, bar]
+            return tape + bar
+        return [top] + bar
 
 
 def _sector_pins(sim, airport):
@@ -683,7 +819,7 @@ def main(args):
     weather = WeatherFeed(airport["lat"], airport["lon"],
                           theme=theme_id(args.wx_theme), nudge=live)
     state = {"paused": False, "weather": bool(args.weather), "procs": "off",
-             "plate": False, "labels": True, "desk": None}
+             "plate": False, "labels": True, "desk": None, "proc_tip": False}
 
     def clock():
         m, s = divmod(int(sim._elapsed), 60)
@@ -705,8 +841,8 @@ def main(args):
                 f"wind {int(wd):03d}/{int(wk):02d} · "
                 f"score {sim.score:,} ({_rating(sim)}) · "
                 f"busts {sim.busts} · {clock()}")
-        if state["paused"]:
-            note += " · PAUSED"
+        if state["paused"] or console.help_page:
+            note += " · PAUSED"     # the help card holds the sim too
         toast = state["desk"]
         if toast is not None:
             msg, expiry = toast
@@ -733,8 +869,17 @@ def main(args):
                 sim._last_tick = None    # resume without a time jump
             return True
         if word in ("?", "help", "h"):
-            sim.say(MORE_HINT, "help")
+            # the card: the sim pauses underneath it, `?` turns the page,
+            # esc puts the shift back in motion
+            console.help_page = 2 if console.help_page == 1 else 1
             return True
+        if word == "esc":
+            if console.help_page:
+                console.help_page = 0
+                if not state["paused"]:
+                    sim._last_tick = None    # resume without a time jump
+                return True
+            return False
         if word in ("w", "wx", "weather"):
             state["weather"] = not state["weather"]
             weather.set_enabled(state["weather"])
@@ -768,6 +913,12 @@ def main(args):
             if state["procs"] != "off" and state["plate"]:
                 note += " · full plate"
             desk(note)
+            if state["procs"] != "off" and not state["proc_tip"]:
+                # once per shift, the first time the plates come up: the
+                # overlay answers questions if you know it can be asked
+                state["proc_tip"] = True
+                sim.say("hover a procedure name for its plate and the "
+                        "clearance to type", "help")
             return True
         if word in ("voice", "voices", "tts", "sound"):
             if sim.speaker is not None:
@@ -803,8 +954,8 @@ def main(args):
         rgba, pw, ph, frame_view, *_rest = weather.snapshot()
         sim.wx_sample = (_wx_sampler(rgba, pw, ph, frame_view[0])
                          if rgba is not None and state["weather"] else None)
-        if not state["paused"]:
-            sim.tick()
+        if not state["paused"] and not console.help_page:
+            sim.tick()             # the help card is a pause: read in peace
         if sim.ledger:
             # scored events surface as desk toasts, one line, latest wins —
             # quiet enough that a busy scope never has to read past them
@@ -813,8 +964,9 @@ def main(args):
             sim.ledger.clear()
         console.tape = state["paused"]
         pins, lines_geo = sector_scenery()
+        held = state["paused"] or bool(console.help_page)
         frame = render_scope(
-            center, zoom[0], sim, playing=not state["paused"],
+            center, zoom[0], sim, playing=not held,
             mouse_pos=mouse_pos, show_ground=False, weather=weather,
             show_weather=state["weather"], show_labels=state["labels"],
             drag_offset=drag_preview[0],
@@ -880,7 +1032,7 @@ def main(args):
         _sync_weather()
     weather.start()
     sim.say(f"you have the {airport['name']} sector — traffic inbound. "
-            "? for the desk controls", "atc")
+            "? for help", "atc")
     live_loop(render, interval=0.5, mouse=True, auto_play=True,
               play_interval=0.5, on_action=on_action, on_drag=on_drag,
               intercept=console.intercept, raw_keys=True)
