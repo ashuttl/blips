@@ -242,6 +242,7 @@ def test_ils_capture_glideslope_landing(sim):
     assert ac not in sim.aircraft       # flown down the slope and landed
     assert sim.landed == 1
     assert sim.score == 100
+    assert sim.ledger[-1] == "DAL100 down · +100"   # quietly, in the ledger
 
 
 def test_vector_off_the_approach_cancels_it(sim):
@@ -292,6 +293,7 @@ def test_unstable_approach_goes_around(sim):
     _run(sim, 240)
     assert sim.busts == 0
     assert any("going around" in line for _t, line, _k in sim.radio)
+    assert "go-around · −50" in sim.ledger
     assert ac in sim.aircraft           # back with you for another try
     assert ac["phase"] == "cruise"
 
@@ -342,6 +344,7 @@ def test_separation_bust_scored_once_until_resolved(sim):
     _run(sim, 3)
     assert sim.busts == 1
     assert a["emergency"] and b["emergency"]       # both blips flash red
+    assert sim.ledger.count("loss of separation · −500") == 1
     _run(sim, 30)
     assert sim.busts == 1               # same conflict, still one bust
     sim.command("200 c 100")            # climb SWA200 away
@@ -751,6 +754,7 @@ def test_departure_handoff_rules(sim):
     line = sim.command(f"{suffix} ho")
     assert "switching" in line.lower()
     assert sim.score == 50
+    assert sim.ledger[-1] == f"{dep['callsign']} handed off · +50"
 
 
 def test_traffic_profile_reads_the_signals():
@@ -911,15 +915,38 @@ def test_hover_chip_shows_origin_and_destination():
     arr = {"plan": "arrival", "callsign": "MXY4964", "actype": "A223",
            "fix": "ICTEB", "rwy": "11", "from": "Charleston", "alt": 6000,
            "tgt_alt": 3000, "hdg": 110, "tgt_hdg": 110, "ias": 250,
-           "phase": "cruise"}
+           "tgt_ias": 250, "phase": "cruise"}
     dep = {"plan": "departure", "callsign": "RPA606", "actype": "CRJ7",
            "fix": "AUG", "to": "Newark", "alt": 2000, "tgt_alt": 11000,
-           "hdg": 290, "tgt_hdg": 290, "ias": 210, "phase": "cruise"}
+           "hdg": 290, "tgt_hdg": 290, "ias": 210, "tgt_ias": 210,
+           "phase": "cruise"}
     assert "from Charleston" in plain(_strip_card(arr))
     assert "to Newark" in plain(_strip_card(dep))
     # a flight whose far city is unknown simply omits the line
     del arr["from"]
     assert "from" not in plain(_strip_card(arr))
+
+
+def test_hover_chip_shows_assigned_speed_and_par():
+    """The chip carries what the assignment book knows: a speed still owed
+    shows as ias→target, and an arrival wears its par clock — time in hand
+    while under, time owed once past it."""
+    from blips.game.app import _strip_card
+
+    def plain(lines):
+        return " ".join(re.sub(r"\x1b\[[0-9;]*m", "", ln) for ln in lines)
+
+    arr = {"plan": "arrival", "callsign": "DAL204", "actype": "B738",
+           "fix": "ICTEB", "rwy": "11", "alt": 6000, "tgt_alt": 3000,
+           "hdg": 110, "tgt_hdg": 110, "ias": 250, "tgt_ias": 210,
+           "par": 600.0, "delay": 410.0, "phase": "cruise"}
+    text = plain(_strip_card(arr))
+    assert "250→210 kt" in text
+    assert "par −3:10" in text          # 3:10 in hand
+    arr["delay"] = 680.0
+    assert "par +1:20" in plain(_strip_card(arr))   # 1:20 past it
+    arr["tgt_ias"] = 250.0              # at assigned speed: no arrow
+    assert "250 kt" in plain(_strip_card(arr))
 
 
 def test_schedule_drives_real_routes_with_origin():
@@ -1461,6 +1488,8 @@ def test_dawdling_landing_pays_a_delay_penalty(sim):
     assert sim.landed == 1
     assert sim.score == 20              # 100 minus the capped penalty
     assert sim.offered == 100
+    assert sim.ledger[-1].startswith("DAL100 down · +20 · ")
+    assert sim.ledger[-1].endswith(" over par")
 
 
 def test_prompt_landing_keeps_the_hundred(sim):
@@ -1473,6 +1502,7 @@ def test_prompt_landing_keeps_the_hundred(sim):
     _run(sim, 900)
     assert sim.score == 100
     assert sim.offered == 100
+    assert sim.ledger[-1] == "DAL100 down · +100 · under par"
 
 
 def test_spawned_arrivals_carry_a_reachable_par(sim):
@@ -1502,6 +1532,42 @@ def test_rating_is_score_against_offered(sim):
     assert _rating(sim) == "—"          # too little concluded to judge
 
 
+def test_grade_is_pure_and_liveable():
+    # the header calls this every frame, mid-shift — no sim required
+    from blips.game.app import _grade
+    assert _grade(990, 1000, 0, 900.0) == "A+"
+    assert _grade(990, 1000, 0, 60.0) == "—"     # too young to judge
+    assert _grade(100, 100, 0, 900.0) == "—"     # too little concluded
+    assert _grade(2000, 2000, 3, 900.0) == "F"   # three strikes
+
+
+def test_shift_card_reads_the_rate_based_best(sim):
+    from blips.game.app import _shift_card
+    sim._elapsed = 900.0
+    sim.offered, sim.score = 1000, 900
+    best = {"score": 700, "rating": "A", "ratio": 0.93,
+            "minutes": 15, "when": 0}
+    entry = {"shifts": 3, "landed": 12, "handed": 8, "busts": 0,
+             "best": best}
+    card = _shift_card(sim, sim.airport, 1, live_cast=False,
+                       entry=entry, prev=best)     # best unmoved: not beaten
+    assert "personal best here A (93% in 15 min)" in card
+
+
+def test_shift_card_names_the_record_it_broke(sim):
+    from blips.game.app import _shift_card
+    sim._elapsed = 900.0
+    sim.offered, sim.score = 1000, 900
+    prev = {"score": 3000, "rating": "B+", "ratio": 0.85,
+            "minutes": 40, "when": 0}
+    entry = {"shifts": 3, "landed": 12, "handed": 8, "busts": 0,
+             "best": {"score": 900, "rating": "A", "ratio": 0.9,
+                      "minutes": 15, "when": 1}}   # this shift took it
+    card = _shift_card(sim, sim.airport, 1, live_cast=False,
+                       entry=entry, prev=prev)
+    assert "new personal best — previous B+ (85% in 40 min)" in card
+
+
 # -- hearback -------------------------------------------------------------------
 
 def test_misheard_readback_is_flown_until_corrected(sim):
@@ -1519,6 +1585,8 @@ def test_misheard_readback_is_flown_until_corrected(sim):
     assert "seven thousand" in line
     assert ac["tgt_alt"] == 7000.0
     assert sim.hearbacks_caught == 1
+    assert sim.score == 25              # a catch is worth something
+    assert sim.ledger[-1] == "hearback caught · +25"
 
 
 def test_misheard_heading_is_one_value_off(sim):

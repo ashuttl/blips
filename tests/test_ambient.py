@@ -107,6 +107,7 @@ def test_nmac_scores_once_and_rings(sim):
     assert sim.score == -200
     assert a["emergency"]
     assert "TRAFFIC ALERT" in sim.radio[-1][1]
+    assert sim.ledger == ["traffic alert · −200"]
     sim._separation()                    # debounced while still close
     assert sim.nmacs == 1
     assert sim.score == -200

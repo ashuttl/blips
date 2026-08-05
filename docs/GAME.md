@@ -28,17 +28,23 @@ Score comes from working aircraft: a landing, a clean handoff at the
 boundary. Losing separation — two aircraft closer than **3 nm laterally
 and 1,000 ft vertically** — costs you heavily, flashes the pair red, and
 goes on your record. A go-around costs a little and puts the arrival
-back in your pattern. The header keeps the tally.
+back in your pattern. The header keeps the tally and the running
+grade, and every scored event names its price up there as it lands.
 
 Expedition counts too. Every arrival carries a **par time** (the
 straight-in distance at working speeds, plus room for a civilised
 pattern); a landing pays 100 flown at par and loses a point for every
 six seconds past it. Slowing the whole sector to a crawl is safe and
-it shows. The shift is graded on what you scored against what the
-concluded traffic was worth, so a clean prompt hour is an A whether
-the sector gave you six aircraft or sixty — and the game keeps a
-**shift book**, one page per airport, so the card after every shift
-tells you the number still to beat.
+it shows. Hover an arrival and the chip wears its par clock — time in
+hand, then time owed, amber once the landing starts shrinking — along
+with any assigned speed still coming. The shift is graded on what
+you scored against what the concluded traffic was worth, so a clean
+prompt hour is an A whether the sector gave you six aircraft or
+sixty — and the game keeps a
+**shift book**, one page per airport, whose personal best is the best
+*rate*, not the biggest pile: a short brilliant shift outranks a long
+mediocre one, and the card after every shift tells you the rate still
+to beat.
 
 ## Talking to aircraft
 
@@ -77,8 +83,8 @@ a thousand foot out — and the aircraft flies what the pilot *said*, not
 what you meant. The readback line is the only tell. Saying it again is
 the correction (and if they've already sunk through the altitude you
 wanted, the fix takes the other verb). This is hearback, it's why real
-controllers never stop listening to readbacks, and the shift card
-counts the ones you caught. Pilots also take a **beat between reading
+controllers never stop listening to readbacks, and a catch pays +25
+and goes on the shift card. Pilots also take a **beat between reading
 back and acting** — the readback is the mic click, not the bank — so
 lead your turns like you mean it.
 
@@ -440,7 +446,8 @@ shared with the live scope (`blips`), which reuses the same renderer.
 | `_terrain.py`         | real-elevation MVA grid *(shared)*                        |
 
 Scoring: +100 landing less a point per six seconds over par (floored at
-20), +50 handoff, −500 separation bust (debounced), −200 traffic alert
+20), +50 handoff, +25 a hearback caught before it stuck, −500
+separation bust (debounced), −200 traffic alert
 (a near-miss with an unsighted VFR target), −50 go-around (free when a
 closed runway waves them off), −100 leaving the sector unworked. The
 rating is score against what the concluded traffic was worth; three
