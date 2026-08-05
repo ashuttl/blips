@@ -1396,7 +1396,11 @@ class Sim:
         elev = src["elev"]
         exit_fix = self._gate_toward(self.sector["exits"],
                                      dest[1] if dest else None)
-        initial = float(round((elev + 3000) / 1000) * 1000)
+        # the letter of agreement keeps the two fields' climb-outs apart
+        # until they're on your frequency: satellite departures level a
+        # thousand feet under the main flow's initial altitude
+        initial = float(round(
+            (elev + (2000 if sat is not None else 3000)) / 1000) * 1000)
         perf = PERF.get(actype) or GA_PERF[actype]
         ac = self._base(callsign, actype, lat, lon, elev + 1200.0,
                         course, min(170.0, float(perf[0])))
@@ -1700,6 +1704,38 @@ class Sim:
             and abs(turn_delta(ac["course"], course)) > 90.0
             for ac in self.aircraft)
 
+    def _release_blocked(self, src):
+        """Tower meters the runway.  The next departure appears 1.5 nm
+        past the threshold at the same initial altitude on the same
+        heading as the last one, so the release waits until the climb-out
+        ahead is genuinely out of the way — turned, above, or far — which
+        is how a real tower gets successive IFR departures apart.  Anybody
+        else low over the departure end (a go-around, a crossing vector)
+        holds the release too."""
+        course, thr = src["course"], src["thr"]
+        lat, lon = advance(thr[0], thr[1], course, 1.5)
+        sat = src is not self.sector
+        initial = float(round(
+            (src["elev"] + (2000 if sat else 3000)) / 1000) * 1000)
+        for ac in self.aircraft:
+            if not _controlled(ac) or ac["phase"] in (
+                    "handed", "established", "cleared"):
+                continue
+            gap = haversine_nm(ac["lat"], ac["lon"], lat, lon)
+            above = ac["alt"] >= initial + 800.0
+            if gap < 5.0 and not above:
+                return True
+            if ac["plan"] != "departure":
+                continue
+            diverged = abs(turn_delta(ac["hdg"], course)) >= 20.0
+            # a slow climb-out gets run down from behind — the next jet
+            # accelerates to 250 into a King Air's 200 — so it needs more
+            # room before anything rolls after it
+            need = 15.0 if ac["tgt_ias"] < 210.0 else 10.0
+            if gap < need and not (diverged or above):
+                return True
+        return False
+
     def _spawn_tick(self, dt):
         self._next_arrival -= dt
         self._next_departure -= dt
@@ -1724,16 +1760,12 @@ class Sim:
         if self._rwy_closed():
             self._next_departure = max(self._next_departure, 15.0)
         if self._next_departure <= 0 and active < 16:
-            # tower meters releases: nobody rolls while the previous
-            # departure is still climbing out close-in on runway heading,
-            # or while an arrival caught by a flow change is still landing
-            # out the old way — a new-end takeoff meets that final head-on
-            blocked = any(
-                ac["plan"] == "departure" and ac["phase"] == "cruise"
-                and haversine_nm(ac["lat"], ac["lon"], self.airport["lat"],
-                                 self.airport["lon"]) < 7.0
-                for ac in self.aircraft) or self._opposing_final(
-                    self.sector["course"])
+            # tower meters releases: nobody rolls into the climb-out
+            # ahead, or while an arrival caught by a flow change is still
+            # landing out the old way — a new-end takeoff meets that
+            # final head-on
+            blocked = (self._release_blocked(self.sector)
+                       or self._opposing_final(self.sector["course"]))
             if blocked:
                 self._next_departure = 20.0
             else:
@@ -1745,7 +1777,13 @@ class Sim:
         if self._next_sat_dep <= 0 and active < 16:
             sat = self.sector["sat"]
             src = sat or self.sector
-            if self._opposing_final(src["course"], sat=sat is not None):
+            # without a satellite this timer rolls a main-field departure,
+            # so it owes the main runway the same metering — and nobody
+            # rolls anywhere while the equipment is on the runway
+            if (self._release_blocked(src)
+                    or self._opposing_final(src["course"],
+                                            sat=sat is not None)
+                    or (sat is None and self._rwy_closed())):
                 self._next_sat_dep = 20.0
             else:
                 self._spawn_departure(sat=sat)

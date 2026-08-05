@@ -1075,6 +1075,84 @@ def test_flow_change_holds_departures_for_the_old_final(sim):
     assert any(ac["plan"] == "departure" for ac in sim.aircraft)
 
 
+def _departure(sim, gap, alt=3000.0, hdg=None, ias=250.0,
+               callsign="EJA100"):
+    """A climb-out planted ``gap`` nm ahead of where the next release
+    would appear, on runway heading unless told otherwise."""
+    thr, course = sim.sector["thr"], sim.sector["course"]
+    lat, lon = advance(*thr, course, 1.5 + gap)
+    ac = sim._base(callsign, "B738", lat, lon, alt,
+                   course if hdg is None else hdg, ias)
+    ac.update(plan="departure", fix=sim.sector["exits"][0],
+              tgt_alt=alt, tgt_ias=ias)
+    sim.aircraft.append(ac)
+    return ac
+
+
+def test_tower_holds_the_release_behind_a_climbout(sim):
+    # same track, same altitude, nothing between them — nobody rolls,
+    # even though the leader is past the old 7 nm-from-the-field line
+    lead = _departure(sim, gap=7.0)
+    sim._next_departure = 0.0
+    _run(sim, 2)
+    assert [a for a in sim.aircraft if a["plan"] == "departure"] == [lead]
+    # climbed away, and the runway frees up
+    lead["alt"] = lead["tgt_alt"] = 4200.0
+    sim._next_departure = 0.0
+    _run(sim, 2)
+    assert sum(a["plan"] == "departure" for a in sim.aircraft) == 2
+
+
+def test_a_diverged_climbout_frees_the_release(sim):
+    course = sim.sector["course"]
+    _departure(sim, gap=7.0, hdg=(course + 40.0) % 360.0)
+    sim._next_departure = 0.0
+    _run(sim, 2)
+    assert sum(a["plan"] == "departure" for a in sim.aircraft) == 2
+
+
+def test_a_slow_climbout_needs_more_room(sim):
+    # a jet released 250 kt behind a King Air's 200 runs it down on the
+    # same track — the slow leader holds the release further out
+    lead = _departure(sim, gap=12.0, ias=180.0)
+    sim._next_departure = 0.0
+    _run(sim, 2)
+    assert sum(a["plan"] == "departure" for a in sim.aircraft) == 1
+    lead["lat"], lead["lon"] = advance(*sim.sector["thr"],
+                                       sim.sector["course"], 1.5 + 16.0)
+    sim._next_departure = 0.0
+    _run(sim, 2)
+    assert sum(a["plan"] == "departure" for a in sim.aircraft) == 2
+
+
+def test_the_extra_departure_timer_owes_the_same_metering(sim):
+    # at a field with no satellite the sat timer rolls a main-runway
+    # departure — it must not roll one into a fresh climb-out
+    sim.sector["sat"] = None
+    sim.sector["sat_apt"] = None
+    lead = _departure(sim, gap=2.0, alt=2000.0)
+    sim._next_sat_dep = 0.0
+    _run(sim, 2)
+    assert sum(a["plan"] == "departure" for a in sim.aircraft) == 1
+    lead["alt"] = lead["tgt_alt"] = 5200.0     # climbed clear overhead
+    sim._next_sat_dep = 0.0
+    _run(sim, 2)
+    assert sum(a["plan"] == "departure" for a in sim.aircraft) == 2
+
+
+def test_satellite_departures_level_below_the_main_flow(sim):
+    # the LOA's split: a satellite climb-out stops a thousand feet under
+    # the main field's, so two untouched departures never meet level
+    sat = sim.sector["sat"]
+    if sat is None:
+        pytest.skip("no satellite at this field")
+    sim._spawn_departure(sat=sat)
+    dep = next(a for a in sim.aircraft if a["plan"] == "departure")
+    assert dep["tgt_alt"] == float(round((sat["elev"] + 2000) / 1000) * 1000)
+    assert dep["tgt_alt"] < float(
+        round((sim.sector["elev"] + 3000) / 1000) * 1000)
+
+
 def test_flow_change_go_around_gets_the_new_runway(sim):
     # a grandfathered arrival that balks its approach comes back for the
     # runway everyone else is using now, not yesterday's
