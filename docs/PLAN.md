@@ -10,11 +10,11 @@ are done.
 
 - ✅ **Departure release metering** *(fun, realism)* — tower no longer
   rolls a departure into the climb-out ahead: gap measured from the
-  release point, waived only by divergence (20°+) or altitude (800 ft+),
-  slow leaders get more room, the second (satellite) departure timer
-  obeys the same rules, and satellite departures level 1,000 ft under
-  the main flow per the LOA. Verified: 0 departure-pair busts in 9
-  unattended shift-hours (previously routine).
+  release point, waived only by divergence (20°+) or preserved vertical
+  separation (1,000 ft+ across both current and assigned altitude),
+  slow leaders get more room, and the second (satellite) departure timer
+  obeys the same release rules. Verified: 0 same-runway departure-pair
+  busts in 300 unattended shift-hours (previously routine).
 - ✅ **Teaching parse errors** *(discoverability)* — `d 4000` teaches the
   hundreds convention, `s 250` points at `rs`/`is`, `h/fh/t 230` teaches
   `l`/`r`, `l230` is forgiven, nonsense points at `?`.
@@ -68,22 +68,48 @@ are done.
   Flow change de-metronomed: 600–2,400 s reschedule, ~30% of updates
   hold the wind — the letter advances, the runway stays.
 
+## Safety follow-up
+
+- **Make the satellite LOA altitude an invariant.** Satellite and main-field
+  initial altitudes are currently rounded independently from different field
+  elevations, so the advertised 1,000-ft split is not guaranteed: 47 of 400
+  sampled large-airport sectors with satellites produced less than 1,000 ft
+  (sometimes the same altitude). Derive the pair together in one helper,
+  reuse it in spawning and release checks, and soak-test mixed-field flows.
+
 ## Next — highest leverage remaining
 
-1. **Parallel-runway operations** *(uniqueness — the single biggest
-   differentiator)*. `build_sector` uses only `rwys[0]`; TPA, SEA, EGLL
-   all run parallels. Phase 1 is segregated mode (land the longer,
-   depart the other — EGLL's actual operation); the `i 19L` grammar and
-   per-runway wake keys already exist. Phase 2: dual arrival streams
+1. **Airport operations profiles + parallel runways** *(uniqueness — the
+   single biggest differentiator)*. `build_sector` uses only `rwys[0]`;
+   TPA, SEA, EGLL all run parallels, and generic initial altitudes,
+   satellites and wind flips make unlike airports play alike. Add an
+   optional, data-driven profile consumed by `build_sector`: arrival and
+   departure runway configurations, calm-wind preference, initial/crossing
+   altitudes, transition altitude, and actual satellite ownership. Start
+   with three showcase fields (KTPA, KPWM, EGLL) and keep today's generated
+   sector as the fallback. Phase 1 uses segregated parallels (land the
+   longer, depart the other — EGLL's actual operation); the `i 19L` grammar
+   and per-runway wake keys already exist. Phase 2 adds dual arrival streams
    with the independent-approach separation exemption (centerlines >
    4,300 ft).
-2. **Visual approaches** *(realism + fun)*. `v 19L` with a
+2. **Make approach claims true** *(realism, locality)*. APPCH records are
+   vendored but discarded while every runway end is treated as an ILS.
+   Compile the real approach runway/final-fix/altitude data, refuse an ILS
+   where none exists, and make vectors-only fallback explicit. Published
+   missed approaches can follow once the basic availability is honest.
+3. **Let live traffic lead when it is actually available** *(locality)*.
+   `_cast_flight` currently draws the vendored route list first, so at the
+   375 scheduled fields the live ADS-B pool almost never influences a cast.
+   Prefer route-confirmed pool traffic, fall back to the route-presence
+   dataset, and expose the source in diagnostics before adding richer
+   time-of-day/frequency weights.
+4. **Visual approaches** *(realism + fun)*. `v 19L` with a
    field-in-sight roll keyed on range/weather; "follow the traffic
    ahead" reuses the existing `visual` sighting set so in-trail inside
    3 nm is legal while wake still bites. VMC majors clear mostly
    visuals in reality; also the hook for charted ones (river/bay
    visuals) later.
-3. **First-shift calm ramp** *(discoverability)*. When the shift book
+5. **First-shift calm ramp** *(discoverability)*. When the shift book
    is empty: doubled spawn intervals, hearback/emergency/flow-change
    off for ~8 minutes, and 3–4 one-time coach lines at the moment they
    apply ("type dal204 d 60 to start them down"). Also fixes the cold
@@ -102,8 +128,9 @@ are done.
 - **Optional `--shift 45`** — "relief is on the line, clean up the
   board": arrivals stop, card presents itself on a clean board; gives
   a session a final act.
-- **Local flow rules table** — preferred calm-wind runways (EGLL
-  westerlies), one-way fields; a dozen hand-curated majors is enough.
+- **Expand airport operations profiles** — after the three showcase fields
+  prove the shape, add preferred flows and one-way/noise rules for a dozen
+  hand-curated majors rather than trying to curate all 4,472 airports.
 - **MacDill and friends** — the satellite search floor is 10 nm, which
   drops KMCF (7.6 nm from TPA, military profile already castable);
   widen to ~6 nm or adopt military fields inside 10 as an extra
@@ -129,11 +156,21 @@ are done.
   transcript) → golden ledger; then a **fixed internal timestep** so
   `--seed` means the same shift at any frame rate (measured: currently
   cadence-dependent).
+- **Horizon-capped closest-approach alerts** — `_separation` currently checks
+  only the projected positions at exactly 45 seconds, so a head-on pair that
+  passes and separates inside that window can miss the advance warning. Share
+  one CPA helper with the scope and test an early crossing conflict.
 - **sim.py trim** — move the ~800 lines of casting tables and the
   sector builder to `game/casting.py` / `game/sector.py`, re-exported;
   do NOT split the radio layer (its coupling is the design).
 - **Data provenance** — `_meta` key (source, CIFP cycle, build date) in
   the vendored `.gz` files + a refresh runbook in tools/.
+- **Release artifact smoke test** — CI should build and install the wheel,
+  verify the six vendored datasets, exercise the Python 3.10 floor, and run
+  `blips --help` plus offline game construction from the installed artifact.
+- **Name the terrain layer honestly** — the current 24×24 terrain-plus-
+  2,000-ft grid is a useful safety floor, not a published MVA. Label it that
+  way until a real MVA source exists.
 - **VFR reporting-point landmarks** ("traffic over the Gandy Bridge") —
   new NASR checkpoint pipeline; cosmetic, last.
 

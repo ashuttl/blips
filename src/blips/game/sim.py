@@ -1763,8 +1763,14 @@ class Sim:
                     "handed", "established", "cleared"):
                 continue
             gap = haversine_nm(ac["lat"], ac["lon"], lat, lon)
-            above = ac["alt"] >= initial + 800.0
-            if gap < 5.0 and not above:
+            # Current altitude alone is not enough: a departure can be high
+            # while already assigned (or waiting to act on) a descent back
+            # into the next release's level.  Only waive lateral spacing when
+            # the whole remaining vertical path preserves the same minimum
+            # enforced by _separation().
+            assigned = (ac.get("pend") or {}).get("tgt_alt", ac["tgt_alt"])
+            vertically_clear = min(ac["alt"], assigned) >= initial + SEP_FT
+            if gap < 5.0 and not vertically_clear:
                 return True
             if ac["plan"] != "departure":
                 continue
@@ -1776,7 +1782,7 @@ class Sim:
             # and behind a heavy the tower owes the two-minute wake wait
             if WAKE.get(ac["actype"]) in ("heavy", "super"):
                 need = max(need, 14.0)
-            if gap < need and not (diverged or above):
+            if gap < need and not (diverged or vertically_clear):
                 return True
         return False
 

@@ -10,8 +10,8 @@ from blips._geo import (
     advance, bearing_to, cross_along_track, haversine_nm, turn_delta,
 )
 from blips.game.sim import (
-    PERF, SECTOR_NM, WX_CLEAR, WX_DEVIATE, Sim, _commandable, _controlled,
-    build_sector,
+    PERF, SECTOR_NM, SEP_FT, WX_CLEAR, WX_DEVIATE, Sim, _commandable,
+    _controlled, build_sector,
 )
 
 
@@ -1184,6 +1184,29 @@ def test_tower_holds_the_release_behind_a_climbout(sim):
     sim._next_departure = 0.0
     _run(sim, 2)
     assert sum(a["plan"] == "departure" for a in sim.aircraft) == 2
+
+
+def test_tower_does_not_treat_800_feet_as_vertical_separation(sim):
+    # The separation monitor requires 1,000 ft.  The release meter must use
+    # that same number or this follower climbs into an automatic bust about
+    # 40 seconds after tower puts it on the runway.
+    initial = float(round((sim.sector["elev"] + 3000) / 1000) * 1000)
+    lead = _departure(sim, gap=2.0, alt=initial + SEP_FT - 200.0)
+    sim._next_departure = 0.0
+    _run(sim, 60)
+    assert [a for a in sim.aircraft if a["plan"] == "departure"] == [lead]
+    assert sim.busts == 0
+
+
+def test_tower_holds_for_a_high_departure_assigned_back_into_the_flow(sim):
+    # Being high at this instant is not protection if the aircraft is level
+    # below the minimum, descending there, or has yet to act on that descent.
+    initial = float(round((sim.sector["elev"] + 3000) / 1000) * 1000)
+    lead = _departure(sim, gap=2.0, alt=initial + 3000.0)
+    lead["pend"] = {"due": sim._elapsed + 10.0, "tgt_alt": initial}
+    sim._next_departure = 0.0
+    _run(sim, 2)
+    assert [a for a in sim.aircraft if a["plan"] == "departure"] == [lead]
 
 
 def test_a_diverged_climbout_frees_the_release(sim):
