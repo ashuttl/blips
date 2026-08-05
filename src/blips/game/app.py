@@ -85,6 +85,8 @@ def _strip_card(ac):
     elif plan == "arrival":
         where = f"{ac['tag']} " if ac.get("tag") else ""
         job = f"arrival → {where}rwy {ac['rwy']}"
+        if ac.get("min_fuel_t") is not None:
+            job += " · minimum fuel"   # no red blip — the chip is the tell
         if ac.get("pre_ho"):
             job += " · with centre"
         if ac.get("from"):

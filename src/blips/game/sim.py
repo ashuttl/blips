@@ -866,9 +866,13 @@ class Sim:
                                else float("inf"))
         self._balloon_event = 0  # 0 not yet · 1 aloft · 2 done for the day
         self._center_until = 0.0
-        self._center_events = 0
-        self._emergencies = 0
-        self._nordos = 0
+        # abnormals — emergencies, lost comms, centre saturating, a
+        # departure coming back, minimum fuel — share one clock: one
+        # crisis at a time, and a breather after each before the next
+        # becomes possible.  Unlucky, not scripted.
+        self._abnormal_active = 0
+        self._next_abnormal = 0.0
+        self.flow_hold_p = 0.30  # odds an ATIS update keeps the runway
         self._elapsed = 0.0
         self._last_tick = None
         self.hearback_p = 0.05   # odds per transmission of a bad readback
@@ -2140,6 +2144,8 @@ class Sim:
         self._handin_tick(dt)
         self._emergency_tick(dt)
         self._nordo_tick(dt)
+        self._return_tick(dt)
+        self._minfuel_tick(dt)
         self._wake_final()
         self._separation()
         self._trails(now)
@@ -2218,11 +2224,23 @@ class Sim:
 
     # -- the day changes ------------------------------------------------------
     def _flow_tick(self, dt):
-        """Eventually the wind comes around, and the airport turns with it."""
+        """Eventually the wind comes around, and the airport turns with it.
+
+        Not on a metronome, and not every time: the reschedule is wide,
+        and now and then the wind only shifts in place — the letter
+        advances with new numbers and the runway stays.  A fresh ATIS is
+        a thing to read, not a fire alarm you can set your watch by.
+        """
         self._next_flow -= dt
         if self._next_flow > 0:
             return
-        self._next_flow = self.rng.uniform(900.0, 1500.0)
+        self._next_flow = self.rng.uniform(600.0, 2400.0)
+        self._atis_n += 1
+        if self.rng.random() < self.flow_hold_p:
+            # the wind holds: same runway, new numbers on the broadcast
+            self._set_wind()
+            self._say_atis(update=True)
+            return
         runway = self.airport["rwys"][0]
         new_end = "he" if self.sector["end"] == "le" else "le"
         ident, course, thr = _end_geometry(self.airport, runway, new_end)
@@ -2230,7 +2248,6 @@ class Sim:
         if self.sector["sat_apt"] is not None:
             self.sector["sat"] = _sat_end(self.sector["sat_apt"], course)
         self.sector_rev += 1
-        self._atis_n += 1
         self._set_wind()         # the wind that turned the airport
         self._say_atis(update=True)
         for ac in self.aircraft:
@@ -2268,6 +2285,26 @@ class Sim:
             ac.update(pre_ho=False, dim=False)
             self._check_in(ac)
 
+    # -- abnormals share one clock ---------------------------------------------
+    def _abnormal_ok(self):
+        """May something go wrong right now?  Only one crisis at a time,
+        and only once the last one has concluded and had its breather —
+        a shift should feel unlucky, not scripted."""
+        return (not self._abnormal_active
+                and self._elapsed >= self._next_abnormal)
+
+    def _abnormal_begin(self, ac=None):
+        """An abnormal starts; blocks the others until it concludes."""
+        self._abnormal_active += 1
+        if ac is not None:
+            ac["abnormal"] = True   # concluded when this flight is done
+
+    def _abnormal_end(self):
+        """The crisis is over; the next becomes possible in ~20-25 min."""
+        self._abnormal_active = max(0, self._abnormal_active - 1)
+        self._next_abnormal = self._elapsed + self.rng.uniform(1200.0,
+                                                               1500.0)
+
     # -- centre next door -------------------------------------------------------
     def _center_closed(self):
         return self._elapsed < self._center_until
@@ -2278,14 +2315,15 @@ class Sim:
         you normally throw departures over becomes a wall."""
         if self._center_until and self._elapsed >= self._center_until:
             self._center_until = 0.0
+            self._abnormal_end()
             self.say("centre calls back — they'll take handoffs again",
                      "atc")
             return
-        if (self._center_events >= 1 or self._center_until
-                or self._elapsed < 600.0
+        if (self._center_until or self._elapsed < 600.0
+                or not self._abnormal_ok()
                 or self.rng.random() > dt / 1500.0):
             return
-        self._center_events = 1
+        self._abnormal_begin()
         self._center_until = self._elapsed + self.rng.uniform(70.0, 120.0)
         self.say("centre calls — their sector's full, no handoffs for the "
                  "next couple of minutes; keep your departures inside the "
@@ -2295,14 +2333,14 @@ class Sim:
     def _declare_emergency(self, ac):
         ac["squawk"] = "7700"    # the blip goes red and stays red
         ac["mayday_t"] = self._elapsed
-        self._emergencies += 1
+        self._abnormal_begin(ac)
         self.bell = True
         self.say(f"MAYDAY, MAYDAY — {hail(ac)} declaring "
                  "a medical emergency, request priority to the field",
                  "alert", voice=ac["callsign"])
 
     def _emergency_tick(self, dt):
-        if self._emergencies >= 1 or self._elapsed < 600.0:
+        if self._elapsed < 600.0 or not self._abnormal_ok():
             return
         if self.rng.random() > dt / 1500.0:
             return
@@ -2310,16 +2348,112 @@ class Sim:
                       if ac["plan"] == "arrival" and ac["phase"] == "cruise"
                       and not ac.get("sat")     # the equipment is here
                       and not ac.get("pre_ho")  # already on your frequency
+                      and ac["squawk"] not in ("7600", "7700")
+                      and not ac.get("mayday_t")
+                      and not ac.get("min_fuel_t")
                       and ac["alt"] > 6000.0]
         if candidates:
             self._declare_emergency(self.rng.choice(candidates))
+
+    def _declare_return(self, ac):
+        """A climbing departure declares and wants the field: the flight
+        you just launched flips to an arrival — low and fast in the middle
+        of the room, and it has to come around the pattern ahead of
+        everyone you were already sequencing."""
+        why = self.rng.choice((
+            "we have a medical emergency on board",
+            "we're shutting down the left engine",
+            "we've got smoke in the cabin",
+        ))
+        ac["squawk"] = "7700"        # the same red blip, the same priority
+        ac["mayday_t"] = self._elapsed   # and the same bonus clock
+        self._abnormal_begin(ac)
+        self.bell = True
+        # an arrival needs a runway and a par: the field they just left,
+        # and what an honest return from right here is worth
+        dist = haversine_nm(ac["lat"], ac["lon"],
+                            self.sector["thr"][0], self.sector["thr"][1])
+        pace = 4500.0 / float(ac["perf"][0])
+        ac.update(plan="arrival", phase="cruise", nav=None, via_name=None,
+                  rwy=self.sector["rwy"], thr=self.sector["thr"],
+                  course=self.sector["course"],
+                  felev=float(self.airport["elev"]),
+                  par=ac["delay"] + dist * pace + 300.0)
+        ac.pop("xr", None)   # centre's restriction died with the flight plan
+        self.say(f"MAYDAY, MAYDAY — {hail(ac)} declaring an emergency, "
+                 f"{why}, request an immediate return to the field",
+                 "alert", voice=ac["callsign"])
+
+    def _return_tick(self, dt):
+        if self._elapsed < 600.0 or not self._abnormal_ok():
+            return
+        if self.rng.random() > dt / 2400.0:
+            return
+        candidates = [ac for ac in self.aircraft
+                      if ac["plan"] == "departure"
+                      and ac["phase"] in ("cruise", "nav")
+                      and not ac.get("sat")     # the equipment is here
+                      and not ac.get("nordo_until")
+                      and ac["squawk"] not in ("7600", "7700")
+                      and haversine_nm(ac["lat"], ac["lon"],
+                                       self.airport["lat"],
+                                       self.airport["lon"])
+                      < SECTOR_NM - 8.0]
+        if candidates:
+            self._declare_return(self.rng.choice(candidates))
+
+    def _declare_minfuel(self, ac):
+        """Minimum fuel: not an emergency, no red blip — an advisory that
+        the pattern allowance is gone.  The radio line is the tell, and
+        the hover chip's par clock reads what's left."""
+        ac["min_fuel_t"] = self._elapsed
+        self._abnormal_begin(ac)
+        dist = haversine_nm(ac["lat"], ac["lon"],
+                            ac["thr"][0], ac["thr"][1])
+        pace = 4500.0 / float(ac["perf"][0])
+        straight = ac["delay"] + dist * pace   # no room for a pattern now
+        par = ac.get("par")
+        ac["par"] = min(par, straight) if par else straight
+        self.say(f"{hail(ac)}, minimum fuel — we can't accept delays to "
+                 "the field", "request", voice=ac["callsign"])
+
+    def _minfuel_tick(self, dt):
+        # an advisory only holds so long: still airborne well past it,
+        # they stop advising — emergency fuel, and now it's a real 7700
+        for ac in self.aircraft:
+            t = ac.get("min_fuel_t")
+            if (t is None or ac["squawk"] == "7700"
+                    or ac["phase"] in ("established", "landed")):
+                continue
+            if self._elapsed - t > 360.0:
+                ac["squawk"] = "7700"
+                ac["mayday_t"] = self._elapsed
+                self.bell = True
+                self.say(f"MAYDAY — {hail(ac)} declaring emergency fuel, "
+                         "we need the field now", "alert",
+                         voice=ac["callsign"])
+        if self._elapsed < 600.0 or not self._abnormal_ok():
+            return
+        if self.rng.random() > dt / 2400.0:
+            return
+        candidates = [ac for ac in self.aircraft
+                      if ac["plan"] == "arrival" and ac["phase"] == "cruise"
+                      and not ac.get("sat")     # the equipment is here
+                      and not ac.get("pre_ho")  # already on your frequency
+                      and not ac.get("nordo_until")
+                      and ac["squawk"] not in ("7600", "7700")
+                      and not ac.get("mayday_t")
+                      and not ac.get("min_fuel_t")
+                      and ac.get("par")]
+        if candidates:
+            self._declare_minfuel(self.rng.choice(candidates))
 
     # -- lost comms -----------------------------------------------------------
     def _declare_nordo(self, ac):
         """Radios fail: squawk 7600, last clearance flown, nobody home."""
         ac["squawk"] = "7600"    # the blip goes red; the frequency goes quiet
         ac["nordo_until"] = self._elapsed + self.rng.uniform(150.0, 240.0)
-        self._nordos += 1
+        self._abnormal_begin(ac)
         self.bell = True
         self.say(f"{ac['callsign']} squawking seven six zero zero — "
                  "radio failure, they'll fly their last clearance", "alert")
@@ -2332,10 +2466,12 @@ class Sim:
                 ac["squawk"] = "%04d" % self.rng.choice(
                     [n for n in range(1201, 6777)
                      if "8" not in str(n) and "9" not in str(n)])
+                if ac.pop("abnormal", None):
+                    self._abnormal_end()
                 self.say(f"{hail(ac)} back with you — sorry, we had a "
                          "radio failure. Say again anything we missed",
                          "checkin", voice=ac["callsign"])
-        if self._nordos >= 1 or self._elapsed < 900.0:
+        if self._elapsed < 900.0 or not self._abnormal_ok():
             return
         if self.rng.random() > dt / 2400.0:
             return
@@ -2396,6 +2532,8 @@ class Sim:
                     keep.append(ac)
                 continue
             if ac["phase"] == "landed":
+                if ac.pop("abnormal", None):
+                    self._abnormal_end()   # the crisis concludes on the deck
                 self.landed += 1
                 # a landing is worth 100 flown at par; every six seconds
                 # spent over par shaves a point (down to 20 — a landing
@@ -2448,6 +2586,8 @@ class Sim:
             if dist > DESPAWN_NM and not ac.get("pre_ho"):
                 # centre's inbounds start out past the ring and fly in —
                 # they're never a diversion, so they don't count out here
+                if ac.pop("abnormal", None):
+                    self._abnormal_end()   # gone is concluded, however sadly
                 if ac["phase"] == "handed":
                     self.departed += 1
                     self.offered += 50
