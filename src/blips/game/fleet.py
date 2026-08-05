@@ -60,8 +60,9 @@ TYPE_ALIAS = {
 class TrafficPool:
     """The real traffic near an airport, waiting to be spawned."""
 
-    def __init__(self, airport, perf_types):
+    def __init__(self, airport, perf_types, rng=None):
         self.airport = airport
+        self._rng = rng or random.Random()
         self._perf = perf_types
         self._codes = {c for c in (airport["iata"], airport["icao"]) if c}
         self.routes = RouteLookup()
@@ -90,7 +91,7 @@ class TrafficPool:
             seen.add(cs)
             entries.append({"cs": cs, "actype": actype,
                             "lat": ac["lat"], "lon": ac["lon"]})
-        random.shuffle(entries)
+        self._rng.shuffle(entries)
         with self._lock:
             self._entries = entries
         debug_log(f"traffic pool: {len(entries)} flights via {source}")
