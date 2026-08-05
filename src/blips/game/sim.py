@@ -112,8 +112,35 @@ WAKE = {"A388": "super",
         "A359": "heavy", "A339": "heavy",
         "C17": "heavy", "K35R": "heavy", "A400": "heavy",
         "B752": "b757"}
-WAKE_NM = {"super": 6.0, "heavy": 5.0, "b757": 4.0}   # in-trail behind one
-_WAKE_WORD = {"super": "super", "heavy": "heavy", "b757": "seven five seven"}
+# the pair minima (7110.65): the miles behind a leader depend on what the
+# *follower* weighs too — a small pays the most behind everything, and a
+# small even owes miles behind an ordinary 737
+WAKE_NM = {("super", "heavy"): 6.0, ("super", "large"): 7.0,
+           ("super", "small"): 8.0,
+           ("heavy", "heavy"): 4.0, ("heavy", "large"): 5.0,
+           ("heavy", "small"): 6.0,
+           ("b757", "heavy"): 4.0, ("b757", "large"): 4.0,
+           ("b757", "small"): 5.0,
+           ("large", "small"): 4.0}
+_WAKE_WORD = {"super": "super", "heavy": "heavy",
+              "b757": "seven five seven", "large": "traffic"}
+# the nine-seat commuters ride wake like the GA singles they share ramps
+# with; everything else in the airline tables is at least large
+_WAKE_SMALL = {"C402", "P212"}
+
+
+def _wake_size(actype):
+    """The follower's side of the pair: roughly, what they weigh."""
+    if WAKE.get(actype) in ("heavy", "super"):
+        return "heavy"
+    if actype in GA_PERF or actype in _WAKE_SMALL:
+        return "small"
+    return "large"
+
+
+def _wake_cat(actype):
+    """The leader's side: the category whose wake you'd be riding."""
+    return WAKE.get(actype) or _wake_size(actype)
 
 # longest runway (ft) a type realistically uses — the spawner won't cast an
 # arrival or departure onto a field whose longest runway can't take it, so a
@@ -1411,8 +1438,10 @@ class Sim:
         perf = PERF.get(actype) or GA_PERF[actype]
         ac = self._base(callsign, actype, lat, lon, elev + 1200.0,
                         course, min(170.0, float(perf[0])))
+        # bugged for cruise from the start: the 250 clamp holds them
+        # through one zero thousand, then they accelerate on their own
         ac.update(plan="departure", fix=exit_fix, tgt_alt=initial,
-                  tgt_ias=min(250.0, float(perf[0])), phase="cruise")
+                  tgt_ias=float(perf[0]), phase="cruise")
         if sat is not None:
             ac.update(sat=True, tag=sat["code"])
         # centre's letter of agreement: some departures carry a crossing
@@ -1739,6 +1768,9 @@ class Sim:
             # accelerates to 250 into a King Air's 200 — so it needs more
             # room before anything rolls after it
             need = 15.0 if ac["tgt_ias"] < 210.0 else 10.0
+            # and behind a heavy the tower owes the two-minute wake wait
+            if WAKE.get(ac["actype"]) in ("heavy", "super"):
+                need = max(need, 14.0)
             if gap < need and not (diverged or above):
                 return True
         return False
@@ -1873,10 +1905,18 @@ class Sim:
             ac["alt"] += math.copysign(step_ft, diff)
             ac["vrate"] = int(math.copysign(rate, diff))
 
-        # speed, and the ground speed it buys at altitude
-        sdiff = ac["tgt_ias"] - ac["ias"]
+        # speed, and the ground speed it buys at altitude.  250 below one
+        # zero thousand (91.117) is the crew's to keep, not yours to say:
+        # a departure holds it through the floor and opens up on its own,
+        # an arrival given 280 up high bleeds it off through ten — the
+        # props never reach it, and an emergency takes what it needs
+        tgt_ias = ac["tgt_ias"]
+        if (tgt_ias > 250.0 and ac["alt"] < 10000.0 and cruise >= 230
+                and ac["squawk"] != "7700"):
+            tgt_ias = 250.0
+        sdiff = tgt_ias - ac["ias"]
         sstep = ACCEL_KT_S * dt
-        ac["ias"] = (ac["tgt_ias"] if abs(sdiff) <= sstep
+        ac["ias"] = (tgt_ias if abs(sdiff) <= sstep
                      else ac["ias"] + math.copysign(sstep, sdiff))
         tas = ac["ias"] * (1.0 + ac["alt"] * 2e-5)
 
@@ -1982,8 +2022,17 @@ class Sim:
         gs_alt = elev + along * GS_FT_PER_NM
         if gs_alt < ac["alt"]:
             ac["tgt_alt"] = max(elev, gs_alt)
-        # …and slow to approach speed inside six miles
-        if along < 6.0:
+        # …and manage the speed.  A speed you assigned on the approach is
+        # kept — that's the real spacing tool, "one niner zero to the
+        # marker" — until five miles, where the pilot says so once and
+        # takes the normal schedule; left alone they slow themselves
+        if ac.get("spd_pin"):
+            if along < 5.0:
+                ac["spd_pin"] = False
+                ac["tgt_ias"] = float(ac["perf"][2])
+                self.say(f"{hail(ac)} slowing to final approach speed",
+                         "pilot", voice=ac["callsign"])
+        elif along < 6.0:
             ac["tgt_ias"] = float(ac["perf"][2])
         elif ac["tgt_ias"] > 190.0:
             ac["tgt_ias"] = 180.0
@@ -2012,7 +2061,7 @@ class Sim:
     def _go_around(self, ac, reason, cost=50):
         """Break an approach off: climb out on runway heading, yours again."""
         ac.update(phase="cruise", tower_handoff=None, pend=None,
-                  tgt_hdg=ac["course"], turn_dir=None,
+                  tgt_hdg=ac["course"], turn_dir=None, spd_pin=False,
                   tgt_ias=max(ac["perf"][2] + 40.0, 180.0), wake_warned=False)
         ac["tgt_alt"] = float(
             round((ac.get("felev", self.sector["elev"]) + 3000.0)
@@ -2047,8 +2096,8 @@ class Sim:
             stream.sort(key=lambda pair: pair[0])
             for (lead_at, leader), (foll_at, follower) in zip(stream,
                                                               stream[1:]):
-                cat = WAKE.get(leader["actype"])
-                need = WAKE_NM.get(cat)
+                cat = _wake_cat(leader["actype"])
+                need = WAKE_NM.get((cat, _wake_size(follower["actype"])))
                 if need is None or follower["squawk"] == "7700":
                     continue     # standard 3 nm applies; the monitor has it
                 gap = foll_at - lead_at
@@ -2742,6 +2791,7 @@ class Sim:
         if kind == "speed":
             if ins["kt"] is None:
                 ac["spd_manual"] = False   # resume the procedure's own speeds
+                ac["spd_pin"] = False      # and the approach schedule's
                 self._stage(ac, due, tgt_ias=float(ac["perf"][0]))
                 return self._spoken(ac, ins)
             lo = ac["perf"][2] if ac["phase"] in ("cleared", "established") \
@@ -2751,6 +2801,17 @@ class Sim:
                                    f"{me} can do "
                                    f"{say_digits(lo)} to "
                                    f"{say_digits(ac['perf'][0])}")
+            # 91.117 isn't yours to waive: below one zero thousand — or
+            # descending back under it — nobody legal takes more than 250
+            if (ins["kt"] > 250 and ac["perf"][0] >= 230
+                    and ac["squawk"] != "7700"
+                    and min(ac["alt"], ac["tgt_alt"]) < 10000.0):
+                raise CommandError("unable — two five zero below "
+                                   "one zero thousand")
+            if ac["phase"] == "established" and ins["kt"] > 190:
+                raise CommandError(f"unable {say_digits(ins['kt'])} on "
+                                   f"final — we can give you one niner "
+                                   "zero to the marker")
             if ins["dir"] == "reduce" and ins["kt"] > ac["ias"] + 5:
                 raise CommandError(f"unable reduce — {me} is doing "
                                    f"{say_digits(round(ac['ias']))} knots")
@@ -2759,7 +2820,10 @@ class Sim:
                                    f"{say_digits(round(ac['ias']))} knots")
             if ac["phase"] == "nav":
                 ac["spd_manual"] = True   # your speed overrides the STAR's
-            self._stage(ac, due, tgt_ias=float(ins["kt"]))
+            fields = {"tgt_ias": float(ins["kt"])}
+            if ac["phase"] in ("cleared", "established") and ins["kt"] <= 190:
+                fields["spd_pin"] = True   # they'll ride it to the marker
+            self._stage(ac, due, **fields)
             return self._spoken(ac, ins)
         if kind == "direct":
             spot = self._navpoint(ins["fix"])
@@ -2927,7 +2991,7 @@ class Sim:
                         f"unable — there's a cell on the final for "
                         f"{say_runway(rwy)}, {me} needs vectors around it")
             ac.update(phase="cleared", rwy=rwy, course=course, thr=thr,
-                      tower_handoff=None, wake_warned=False,
+                      tower_handoff=None, wake_warned=False, spd_pin=False,
                       nav=None, via_name=None)
             return f"cleared ILS runway {say_runway(rwy)} approach"
         if kind == "handoff":
