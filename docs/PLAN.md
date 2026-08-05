@@ -18,13 +18,15 @@ are done; 🚧 are in flight this session.
 - ✅ **Teaching parse errors** *(discoverability)* — `d 4000` teaches the
   hundreds convention, `s 250` points at `rs`/`is`, `h/fh/t 230` teaches
   `l`/`r`, `l230` is forgiven, nonsense points at `?`.
-- 🚧 **Speed realism bundle** *(realism, fun)* — 250 kt below 10,000 MSL
+- ✅ **Speed realism bundle** *(realism, fun)* — 250 kt below 10,000 MSL
   (clamp + pilot refusal); assigned speed rides to ~5 nm from the
   threshold ("190 to the marker" becomes a real tool, and the silent
   180-clip — the sim's only quiet input-fix — becomes an honest
   refusal); follower-aware wake matrix (7110.65 pairs: small behind
   large 4, behind heavy 4/5/6, behind super 6/7/8, B757 rules) plus a
-  longer release hold behind a heavy departure.
+  longer release hold behind a heavy departure. Par verified headless
+  under the clamp: prompt landings keep 20–170 s of the 300 s pattern
+  allowance, no retune needed.
 - 🚧 **Scoring made felt** *(fun, discoverability)* — every score event
   says its number (landing with par verdict, +50 handoff, −500/−200/−50
   named); caught hearbacks pay +25; par pressure and assigned speed on

@@ -261,7 +261,12 @@ Simple physics, honest feel: standard-rate turns (3°/s — a jet takes a
 full minute to come around 180°), type-plausible climbs and speeds, speed
 changes that take time. Pilots say "unable" to what they can't do, ask
 for things now and then ("requesting lower"), and read back what they
-will.
+will. And the speed limit isn't yours to waive: **250 below one zero
+thousand** — ask for more down low and you get "unable — two five zero
+below one zero thousand". A departure holds 250 through the floor and
+opens up on its own; an arrival given 280 up high keeps it, then bleeds
+it off through ten the way real crews do. The props never reach it, and
+an emergency takes whatever it needs.
 
 **The wind is real.** The shift opens with an ATIS ("information alpha —
 wind 190 at 12, landing and departing runway 19"), and that wind is the
@@ -283,17 +288,27 @@ scope; that's the same wind your next arrival is about to descend out
 of.
 
 **Heavies are heavy.** The 777s, 767s and 787s carry the suffix on
-every call — "Speedbird 12 heavy" — and on final it matters: three
-miles is legal behind a 737 and dangerous behind a heavy. Five behind
-a heavy, six behind the A380, four behind the 757. Close inside a mile
+every call — "Speedbird 12 heavy" — and on final it matters, by the
+pair, the way the book has it: behind a heavy it's four miles for
+another heavy, five for a 737, six for a Cape Air 402; behind the A380
+six, seven and eight; four behind the 757, five if you're small — and
+even a small behind an ordinary jet owes four. Close inside a mile
 of the minimum and the follower offers to take speed off; below it
 they go around and tell you why. Sequencing becomes an ordering
 puzzle: slot the E175 ahead of the 777, or pay the miles behind it.
+The tower pays too: a release behind a heavy departure waits out the
+two-minute wake gap unless the climb-out ahead has turned away or
+climbed clear.
 
 **The ILS** captures the way you'd hope: clear them on a sane intercept
 (30–40° works; up to ~90° will lock on, leading the turn) and they take
 it from there — localizer, glideslope, slowing to approach speed,
-switched to tower at five miles. Clear them pointed away and you'll hear
+switched to tower at five miles. A speed you assign on the approach is
+theirs to keep — "one niner zero to the marker" is the real spacing
+tool — flown to five miles from the threshold, where the pilot says
+"slowing to final approach speed" once and takes the schedule from
+there; ask for more than 190 on final and you're offered exactly that
+instead. Clear them pointed away and you'll hear
 about it. Blow the energy management — still hot or high on short final —
 and they **go around**, back into your pattern for another try.
 

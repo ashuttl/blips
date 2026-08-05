@@ -296,6 +296,44 @@ def test_unstable_approach_goes_around(sim):
     assert ac["phase"] == "cruise"
 
 
+def test_assigned_speed_rides_to_the_marker(sim):
+    thr, course = sim.sector["thr"], sim.sector["course"]
+    lat, lon = advance(*thr, (course + 180.0) % 360.0, 14.0)
+    ac = _arrival(sim, lat=lat, lon=lon, alt=4000.0, hdg=course, ias=190.0)
+    sim.command("100 i")
+    _run(sim, 5)
+    assert ac["phase"] == "established"
+    sim.command("100 rs 190")
+    for _ in range(400):                # walk down final to short of five
+        _run(sim, 1)
+        _cross, along = cross_along_track(ac["lat"], ac["lon"], *thr, course)
+        if along < 5.5:
+            break
+    assert ac["tgt_ias"] == 190.0       # theirs to keep, not force-slowed at six
+    assert not any("slowing to final approach speed" in line
+                   for _t, line, _k in sim.radio)
+    _run(sim, 30)                       # through five miles: announced once
+    assert any("slowing to final approach speed" in line
+               for _t, line, _k in sim.radio)
+    assert ac["tgt_ias"] == float(ac["perf"][2])
+    _run(sim, 300)
+    assert sim.landed == 1              # and the landing still works out
+
+
+def test_fast_on_final_is_refused_with_the_real_tool(sim):
+    thr, course = sim.sector["thr"], sim.sector["course"]
+    lat, lon = advance(*thr, (course + 180.0) % 360.0, 12.0)
+    ac = _arrival(sim, lat=lat, lon=lon, alt=3500.0, hdg=course, ias=190.0)
+    sim.command("100 i")
+    _run(sim, 5)
+    assert ac["phase"] == "established"
+    line = sim.command("100 is 220")
+    assert "unable two two zero on final" in line
+    assert "one niner zero to the marker" in line
+    assert ac["tgt_ias"] <= 190.0       # nothing quietly took the number
+    assert "one niner zero" in sim.command("100 rs 190")   # the offered tool
+
+
 def test_hold_orbits_and_vectors_cancel_it(sim):
     ac = _arrival(sim, alt=8000.0)
     line = sim.command("100 hold")
@@ -1076,12 +1114,12 @@ def test_flow_change_holds_departures_for_the_old_final(sim):
 
 
 def _departure(sim, gap, alt=3000.0, hdg=None, ias=250.0,
-               callsign="EJA100"):
+               callsign="EJA100", actype="B738"):
     """A climb-out planted ``gap`` nm ahead of where the next release
     would appear, on runway heading unless told otherwise."""
     thr, course = sim.sector["thr"], sim.sector["course"]
     lat, lon = advance(*thr, course, 1.5 + gap)
-    ac = sim._base(callsign, "B738", lat, lon, alt,
+    ac = sim._base(callsign, actype, lat, lon, alt,
                    course if hdg is None else hdg, ias)
     ac.update(plan="departure", fix=sim.sector["exits"][0],
               tgt_alt=alt, tgt_ias=ias)
@@ -1120,6 +1158,36 @@ def test_a_slow_climbout_needs_more_room(sim):
     assert sum(a["plan"] == "departure" for a in sim.aircraft) == 1
     lead["lat"], lead["lon"] = advance(*sim.sector["thr"],
                                        sim.sector["course"], 1.5 + 16.0)
+    sim._next_departure = 0.0
+    _run(sim, 2)
+    assert sum(a["plan"] == "departure" for a in sim.aircraft) == 2
+
+
+def test_a_heavy_departure_holds_the_next_release_longer(sim):
+    # the two-minute wake rule, in trail: eleven miles frees a 737 ahead,
+    # not a heavy — the roll waits until the wake has somewhere to be
+    thr, course = sim.sector["thr"], sim.sector["course"]
+    lead = _departure(sim, gap=11.0, actype="B77W")
+    sim._next_departure = 0.0
+    _run(sim, 2)
+    assert sum(a["plan"] == "departure" for a in sim.aircraft) == 1
+    lead["lat"], lead["lon"] = advance(*thr, course, 1.5 + 15.0)
+    sim._next_departure = 0.0
+    _run(sim, 2)
+    assert sum(a["plan"] == "departure" for a in sim.aircraft) == 2
+
+
+def test_a_heavy_climbout_turned_or_above_still_frees_the_release(sim):
+    course = sim.sector["course"]
+    lead = _departure(sim, gap=11.0, actype="B77W")
+    lead["alt"] = lead["tgt_alt"] = 4200.0   # 800 up on the next one's initial
+    sim._next_departure = 0.0
+    _run(sim, 2)
+    assert sum(a["plan"] == "departure" for a in sim.aircraft) == 2
+    sim.aircraft.clear()
+    lead = _departure(sim, gap=11.0, actype="B77W",
+                      hdg=(course + 40.0) % 360.0)
+    lead["tgt_hdg"] = lead["hdg"]            # turned away, holding it
     sim._next_departure = 0.0
     _run(sim, 2)
     assert sum(a["plan"] == "departure" for a in sim.aircraft) == 2
@@ -1523,6 +1591,96 @@ def test_closing_on_a_heavy_warns_before_it_bites(sim):
     _run(sim, 4)
     assert sum("closing on the heavy" in line
                for _t, line, _k in sim.radio) == warnings  # said once
+
+
+def test_the_wake_minimum_reads_the_follower(sim):
+    # four and a half behind a heavy is legal for another heavy...
+    _lead, follower = _final_pair(sim, "B77W", 6.0, "B77W", 10.5)
+    _run(sim, 2)
+    assert follower["phase"] == "established"
+    assert sim.go_arounds == 0
+    sim.aircraft.clear()
+    # ...and a go-around for a 737, which owes five
+    _lead, follower = _final_pair(sim, "B77W", 6.0, "B738", 10.5)
+    _run(sim, 2)
+    assert follower["phase"] == "cruise"
+    assert sim.go_arounds == 1
+
+
+def test_a_small_pays_miles_even_behind_a_737(sim):
+    # 3.5 nm is an everyday gap for a jet pair; a nine-seater owes four
+    _lead, follower = _final_pair(sim, "B738", 6.0, "C402", 9.5)
+    _run(sim, 2)
+    assert follower["phase"] == "cruise"
+    assert sim.go_arounds == 1
+    assert any("traffic ahead" in line for _t, line, _k in sim.radio)
+
+
+def test_the_757_earns_its_own_rows(sim):
+    _lead, follower = _final_pair(sim, "B752", 6.0, "B738", 9.5)
+    _run(sim, 2)
+    assert follower["phase"] == "cruise"        # 3.5 nm: four behind a 757
+    assert any("seven five seven ahead" in line
+               for _t, line, _k in sim.radio)
+    sim.aircraft.clear()
+    _lead, follower = _final_pair(sim, "B752", 6.0, "C402", 10.5)
+    _run(sim, 2)
+    assert follower["phase"] == "cruise"        # 4.5 nm: a small owes five
+    assert sim.go_arounds == 2
+
+
+# -- 250 below ten thousand -----------------------------------------------------
+
+def test_the_clamp_bleeds_speed_off_below_ten_thousand(sim):
+    # checked in fast and low: the crew slows themselves, no word needed
+    ac = _arrival(sim, alt=8000.0, ias=280.0)
+    _run(sim, 60)
+    assert ac["ias"] == 250.0
+    # ...and 280 given up high is kept until the descent crosses ten
+    hi = _arrival(sim, callsign="SWA200", alt=14000.0, ias=280.0)
+    sim.command("200 d 60")
+    _run(sim, 60)
+    assert hi["alt"] > 10000.0 and hi["ias"] == 280.0
+    _run(sim, 300)
+    assert hi["alt"] < 10000.0 and hi["ias"] == 250.0
+
+
+def test_the_speed_limit_is_refused_below_ten_thousand(sim):
+    ac = _arrival(sim, alt=8000.0, ias=250.0)
+    line = sim.command("100 is 280")
+    assert "two five zero below one zero thousand" in line
+    assert ac["tgt_ias"] == 250.0
+    # one still descending back under it gets the same answer...
+    mid = _arrival(sim, callsign="SWA200", alt=12000.0, ias=250.0)
+    sim.command("200 d 80")
+    assert "below one zero thousand" in sim.command("200 is 280")
+    # ...and one staying above may have it
+    _arrival(sim, callsign="UAL300", alt=12000.0, ias=250.0)
+    assert "two eight zero" in sim.command("300 is 280")
+    assert mid["tgt_ias"] == 250.0
+
+
+def test_a_departure_holds_250_through_ten_thousand(sim):
+    # the spawner bugs cruise from the start; the clamp does the law, so
+    # the acceleration through ten happens on its own, on the scope
+    sim._spawn_departure()
+    dep = sim.aircraft[-1]
+    assert dep["tgt_ias"] == float(dep["perf"][0])
+    sim.aircraft.clear()
+    dep = _departure(sim, gap=0.0, alt=3000.0, ias=250.0)
+    dep.update(tgt_alt=23000.0, tgt_ias=280.0)
+    _run(sim, 120)
+    assert dep["alt"] < 10000.0 and dep["ias"] == 250.0
+    _run(sim, 180)
+    assert dep["alt"] > 10000.0 and dep["ias"] > 260.0
+
+
+def test_an_emergency_takes_what_it_needs_below_ten(sim):
+    ac = _arrival(sim, alt=8000.0, ias=250.0)
+    sim._declare_emergency(ac)
+    assert "two eight zero" in sim.command("100 is 280")
+    _run(sim, 60)
+    assert ac["ias"] == 280.0
 
 
 # -- delay and the rating -------------------------------------------------------
