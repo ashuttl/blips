@@ -33,6 +33,16 @@ are done.
   the hover chip; live rating letter, ATIS letter and aircraft count in
   the HUD; shift-book personal best keyed on rating ratio, not raw
   score (a 3-hour C shift no longer beats a 50-minute A+).
+- ✅ **The shift outgrows you + fair bust grading** *(fun)* — the active
+  cap breathes upward with survival (16 +1 per 20 min, ceiling 21, all
+  three spawn gates), the arrival ramp keeps climbing gently past 34/hr
+  toward ~40/hr by the second hour, and each push survived leans a
+  little harder (×2.4 creeping to ×2.8); the ambient sky stays capped
+  as before. Busts keep their −500 but now cap the letter (1 → B+,
+  2 → C, 3 = F) instead of the score-below-zero standing F, so playing
+  on after an early bust beats quit-restart. Verified unattended:
+  active traffic peaks at 17–20 in minutes 60–80 across three seeds
+  (previously pinned at 16).
 - ✅ **Engineering floor** *(underpinnings)* — GitHub Actions CI;
   unit tests for the untested offline-degradation cores (`_terrain`
   0% → covered, `fleet` draw semantics); the one unseeded RNG
@@ -49,15 +59,7 @@ are done.
    the bar hints to the measured terminal width. Also reconcile
    `log_open = True` default with GAME.md's claim that the tape starts
    closed.
-2. **Let the shift outgrow you** *(fun)*. Arrival rate caps at 34/hr by
-   minute 20 and the active cap pins at 16 — measured: every shift
-   plateaus; a player who can hold 16 has beaten the game permanently.
-   Let the cap breathe upward with survival (e.g. +1 per 20 min) and
-   let pushes intensify slightly. Pair with: **one early bust
-   mathematically locks out an A** — grade cleanliness by cap (1 bust
-   caps B+, 2 caps C, 3 = F) instead of raw subtraction, so playing on
-   after a bust stays rational.
-3. **Event cooldowns instead of once-per-shift-forever** *(fun)*.
+2. **Event cooldowns instead of once-per-shift-forever** *(fun)*.
    Emergency/NORDO/centre-closure are hard-capped at 1 per shift; after
    minute 40 only pushes and flow changes remain. Cooldowns (~20–25 min)
    at the same low rates, plus one or two cheap new events reusing
@@ -65,20 +67,20 @@ are done.
    minimum-fuel arrival (no red blip, zero par slack). De-metronome the
    flow change (measured: exactly 3/hr at ~12/~33/~52 every shift) —
    sometimes the wind holds and only the ATIS letter advances.
-4. **Parallel-runway operations** *(uniqueness — the single biggest
+3. **Parallel-runway operations** *(uniqueness — the single biggest
    differentiator)*. `build_sector` uses only `rwys[0]`; TPA, SEA, EGLL
    all run parallels. Phase 1 is segregated mode (land the longer,
    depart the other — EGLL's actual operation); the `i 19L` grammar and
    per-runway wake keys already exist. Phase 2: dual arrival streams
    with the independent-approach separation exemption (centerlines >
    4,300 ft).
-5. **Visual approaches** *(realism + fun)*. `v 19L` with a
+4. **Visual approaches** *(realism + fun)*. `v 19L` with a
    field-in-sight roll keyed on range/weather; "follow the traffic
    ahead" reuses the existing `visual` sighting set so in-trail inside
    3 nm is legal while wake still bites. VMC majors clear mostly
    visuals in reality; also the hook for charted ones (river/bay
    visuals) later.
-6. **First-shift calm ramp** *(discoverability)*. When the shift book
+5. **First-shift calm ramp** *(discoverability)*. When the shift book
    is empty: doubled spawn intervals, hearback/emergency/flow-change
    off for ~8 minutes, and 3–4 one-time coach lines at the moment they
    apply ("type dal204 d 60 to start them down"). Also fixes the cold

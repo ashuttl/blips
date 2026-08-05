@@ -1777,6 +1777,37 @@ def test_grade_is_pure_and_liveable():
     assert _grade(2000, 2000, 3, 900.0) == "F"   # three strikes
 
 
+def test_busts_cap_the_grade_instead_of_poisoning_the_ratio():
+    from blips.game.app import _grade
+    # the −500 still prices safety into the score; the cap is the ceiling
+    assert _grade(990, 1000, 1, 900.0) == "B+"   # perfect ratio, one bust
+    assert _grade(700, 1000, 1, 900.0) == "B"    # ratio worse than the cap
+    assert _grade(990, 1000, 2, 900.0) == "C"    # two busts hold C
+    assert _grade(300, 1000, 2, 900.0) == "D"    # the cap never lifts a letter
+    # an early bust is no longer a standing F: score < 0 reads F off the
+    # ratio while it lasts, and recovers as the hour is worked
+    assert _grade(-400, 200, 1, 900.0) == "F"
+    assert _grade(2500, 3000, 1, 3600.0) == "B+"  # played on, earned it back
+
+
+def test_active_cap_loosens_with_survival(sim):
+    """The room grows with the shift: sixteen strips at the top of the
+    hour, one more every twenty minutes — the spawner that used to stop
+    at 16 keeps dealing once you've survived long enough to earn it."""
+    sim._next_push = 1e9                # no push: the cap alone decides
+    for i in range(16):
+        _arrival(sim, callsign=f"DAL{100 + i}",
+                 lat=sim.airport["lat"] + 0.2 + i * 0.03)
+    sim._next_arrival = 0.0
+    sim._spawn_tick(0.0)
+    assert len(sim.aircraft) == 16      # minute zero: the old wall holds
+    sim._elapsed = 75 * 60.0            # minute 75: three notches looser
+    for _ in range(12):
+        sim._next_arrival = 0.0
+        sim._spawn_tick(0.0)
+    assert len(sim.aircraft) == 19      # 16 + 75//20, and not one more
+
+
 def test_shift_card_reads_the_rate_based_best(sim):
     from blips.game.app import _shift_card
     sim._elapsed = 900.0

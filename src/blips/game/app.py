@@ -478,21 +478,30 @@ def _wx_sampler(rgba, pw, ph, fbbox):
     return sample
 
 
+_LETTERS = ("A+", "A", "B+", "B", "C", "D", "F")
+
+
 def _grade(score, offered, busts, elapsed):
     """A letter for the shift: what you scored against what the traffic
     was worth.  Fair at any shift length and any hour of the ramp —
     working everything cleanly and promptly is an A whether the sector
-    gave you six aircraft or sixty.  Busts are what they are."""
+    gave you six aircraft or sixty.  Busts price themselves into the
+    score and hold the ceiling besides — one caps the shift at B+, two
+    at C, three is an F whatever the number — so the hour after a bad
+    moment is still worth working."""
     if elapsed < 120.0 or offered < 150:
         return "—"
-    if busts >= 3 or score < 0:
+    if busts >= 3:
         return "F"
+    letter = "F"
     ratio = score / offered
     for grade, floor in (("A+", 0.96), ("A", 0.88), ("B+", 0.78),
                          ("B", 0.65), ("C", 0.45), ("D", 0.20)):
         if ratio >= floor:
-            return grade
-    return "F"
+            letter = grade
+            break
+    cap = ("A+", "B+", "C")[busts]
+    return max(letter, cap, key=_LETTERS.index)
 
 
 def _rating(sim):

@@ -856,6 +856,7 @@ class Sim:
         self._next_flow = self.rng.uniform(600.0, 1080.0)
         self._next_push = self.rng.uniform(420.0, 780.0)
         self._push_until = 0.0
+        self._pushes = 0         # each one survived makes the next lean harder
         self._rwy_closed_until = 0.0
         self._next_vfr = self.rng.uniform(90.0, 240.0)
         self._next_over = self.rng.uniform(60.0, 180.0)
@@ -1786,19 +1787,29 @@ class Sim:
             self._push_until = self._elapsed + self.rng.uniform(180.0, 300.0)
             self._next_push = self._push_until + self.rng.uniform(420.0,
                                                                   900.0)
+            self._pushes += 1
             self.say("centre calls the push — a bank of arrivals is "
                      "coming off the boundary", "atc")
         active = sum(1 for ac in self.aircraft
                      if _controlled(ac) and ac["phase"] != "handed")
+        # the room grows with survival: one more strip on the board every
+        # twenty minutes, ceiling twenty-one, and the arrival ramp keeps
+        # climbing gently past the old plateau toward ~40/hr by the second
+        # hour — a shift you can hold at minute twenty shouldn't still be
+        # the shift at minute eighty.  The ambient sky stays where it is;
+        # the growth is all traffic you work.
+        cap = 16 + min(5, int(self._elapsed / 1200.0))
         base = min(34.0, 16.0 + self._elapsed / 75.0)   # per hour, ramping
-        rate = base * (2.4 if self._elapsed < self._push_until else 0.75)
-        if self._next_arrival <= 0 and active < 16:
+        base += min(6.0, max(0.0, self._elapsed - 1350.0) / 975.0)
+        push = min(2.8, 2.3 + 0.1 * self._pushes)   # pushes learn your name
+        rate = base * (push if self._elapsed < self._push_until else 0.75)
+        if self._next_arrival <= 0 and active < cap:
             self._spawn_arrival()
             self._next_arrival = max(
                 35.0, self.rng.expovariate(rate / 3600.0))
         if self._rwy_closed():
             self._next_departure = max(self._next_departure, 15.0)
-        if self._next_departure <= 0 and active < 16:
+        if self._next_departure <= 0 and active < cap:
             # tower meters releases: nobody rolls into the climb-out
             # ahead, or while an arrival caught by a flow change is still
             # landing out the old way — a new-end takeoff meets that
@@ -1813,7 +1824,7 @@ class Sim:
                 self._next_departure = max(
                     45.0, self.rng.expovariate(base * 0.7 / 3600.0))
         self._next_sat_dep -= dt
-        if self._next_sat_dep <= 0 and active < 16:
+        if self._next_sat_dep <= 0 and active < cap:
             sat = self.sector["sat"]
             src = sat or self.sector
             # without a satellite this timer rolls a main-field departure,

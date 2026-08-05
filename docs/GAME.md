@@ -468,8 +468,14 @@ Scoring: +100 landing less a point per six seconds over par (floored at
 separation bust (debounced), −200 traffic alert
 (a near-miss with an unsighted VFR target), −50 go-around (free when a
 closed runway waves them off), −100 leaving the sector unworked. The
-rating is score against what the concluded traffic was worth; three
-busts is an F, whatever the score. Arrival rate breathes between quiet
-spells and pushes; active count capped so the scope stays readable —
-and ambient traffic never counts against the cap, never scores, and
-never talks: it's there to make the sky honest, not to make you busier.
+rating is score against what the concluded traffic was worth — and a
+bust, besides its price, holds the ceiling: one caps the shift at B+,
+two at C, and three busts is an F, whatever the score. The letter is
+a ceiling, not a verdict; the hour after a bad moment is still worth
+working, and recovering the picture is the job. Arrival rate breathes
+between quiet spells and pushes, each push leaning a little harder than
+the last; the active count is capped so the scope stays readable, but
+the cap eases upward the longer you survive — the shift grows into you,
+then past you. Ambient traffic never counts against the cap, never
+scores, and never talks: it's there to make the sky honest, not to
+make you busier.
