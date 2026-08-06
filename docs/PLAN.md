@@ -98,6 +98,20 @@ are done.
   pool metal, then the country mix; `cast_sources` tallies who led and the
   radio notes, once, when the live sample leads or runs dry. Seeded shifts
   still skip the pool (`_live_pool`, regression-tested).
+- ✅ **Airport operations profiles** *(uniqueness)* — an optional,
+  hand-curated table (`game/profiles.py`, every key optional) for the
+  habits the data can't derive: calm-wind flow preference with
+  flow-change rolls that lean back home (EGLL holds the 27s — the
+  westerly preference is policy), explicit arrival/departure parallels
+  (KTPA lands the shorter 19L in south flow per the airport's Informal
+  Runway Use Program), pinned satellites (Farnborough, Brunswick — the
+  latter agreeing with the search, so the pin is documentation), a
+  curated initial level-off routed through `_initial_alt` so the
+  satellite's 1,000-ft LOA split holds by construction (EGLL's 6,000
+  SID cap), and the centre crossing-restriction menu. Unprofiled
+  fields verified byte-identical to the generated sector; growth
+  beyond the three showcases stays in Later ("Expand airport
+  operations profiles").
 
 ## Safety follow-up
 
@@ -110,26 +124,18 @@ are done.
 
 ## Next — highest leverage remaining
 
-1. **Airport operations profiles** *(uniqueness)*. With segregated
-   parallels landed, the remaining gap is that generic initial
-   altitudes, satellites and wind flips still make unlike airports play
-   alike. Add an optional, data-driven profile consumed by
-   `build_sector`: runway configurations beyond the longest-lands
-   heuristic, calm-wind preference, initial/crossing altitudes,
-   transition altitude, and actual satellite ownership. Start with
-   three showcase fields (KTPA, KPWM, EGLL) and keep today's generated
-   sector as the fallback.
-2. **Make approach claims true** *(realism, locality)*. APPCH records are
+1. **Make approach claims true** *(realism, locality)*. APPCH records are
    vendored but discarded while every runway end is treated as an ILS.
    Compile the real approach runway/final-fix/altitude data, refuse an ILS
    where none exists, and make vectors-only fallback explicit. Published
    missed approaches can follow once the basic availability is honest.
-3. **Visual approaches** *(realism + fun)*. `v 19L` with a
+2. **Visual approaches** *(realism + fun)*. `v 19L` with a
    field-in-sight roll keyed on range/weather; "follow the traffic
    ahead" reuses the existing `visual` sighting set so in-trail inside
    3 nm is legal while wake still bites. VMC majors clear mostly
    visuals in reality; also the hook for charted ones (river/bay
    visuals) later.
+
 ## Later — worth doing, not first
 
 - **Parallel operations, phase 2 — dual arrival streams** with the
