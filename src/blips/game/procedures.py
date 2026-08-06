@@ -40,6 +40,7 @@ import gzip
 import json
 import math
 import os
+import re
 
 from blips._airports import load_fixes, load_navaids
 from blips._geo import bearing_to, haversine_nm
@@ -87,6 +88,69 @@ def procedures_for(icao):
     """The procedure list for an airport, or [] when none is vendored."""
     rec = _load().get((icao or "").upper())
     return rec["procs"] if rec else []
+
+
+_APPR = {}    # icao -> {end ident: set of approach type letters}, or None
+_APPCH_ID = re.compile(r"^([A-Z])(\d{2})([LCR]?)")
+
+# The CIFP names an approach by what flies it: I06 is the ILS to runway 6,
+# R31 the RNAV, V-A a VOR that only circles.  I and L are the localizer
+# family — the thing the game's `i` clearance claims — and the rest, in the
+# order a controller would offer them, are what an honest refusal names.
+_APPR_ILS = frozenset("IL")
+_APPR_ALT = (("RNAV", frozenset("RHP")), ("VOR", frozenset("VDS")),
+             ("LDA", frozenset("X")), ("localizer back course",
+                                       frozenset("B")),
+             ("NDB", frozenset("NQ")), ("SDF", frozenset("U")),
+             ("GLS", frozenset("J")), ("TACAN", frozenset("T")))
+
+
+def approach_ends(icao):
+    """The straight-in instrument approaches at a field, per runway end:
+    ``{"31L": {"R", "H"}, ...}`` — ARINC 424 approach-type letters (``I``
+    ILS, ``L`` localizer, ``R`` RNAV (GPS), ``H`` RNP, ``V``/``D``/``S``
+    VOR, ``X`` LDA, ``N``/``Q`` NDB, ``B`` back course), keyed by the end
+    ident without its leading zero.
+
+    ``None`` when the vendored data can't say: a field with no APPCH
+    records at all (military approaches live in the DoD FLIP, foreign
+    fields are off the CIFP), or one whose only approaches circle (Aspen's
+    way in carries no runway in its name).  Absence of knowledge is not
+    absence of equipment — a None field keeps whatever the caller always
+    assumed.
+    """
+    icao = (icao or "").upper()
+    if icao not in _APPR:
+        ends, seen = {}, False
+        for proc in procedures_for(icao):
+            if proc["k"] != "APPCH":
+                continue
+            seen = True
+            m = _APPCH_ID.match(proc["n"])
+            if not m:
+                continue                     # circling — no runway to claim
+            kind, num, side = m.groups()
+            ends.setdefault(num.lstrip("0") + side, set()).add(kind)
+        _APPR[icao] = ends if (seen and ends) else None
+    return _APPR[icao]
+
+
+def approach_to(icao, rwy):
+    """What actually gets an aeroplane down to a runway end: ``"ILS"`` when
+    a localizer-based straight-in is published there, else the best
+    alternative's name ("RNAV", "VOR", ...), ``""`` when nothing straight-in
+    serves the end at all, and ``None`` when the vendored data can't say
+    (see ``approach_ends``)."""
+    ends = approach_ends(icao)
+    if ends is None:
+        return None
+    kinds = ends.get((rwy or "").upper().lstrip("0"), set())
+    if kinds & _APPR_ILS:
+        return "ILS"
+    for name, letters in _APPR_ALT:
+        if kinds & letters:
+            return name
+    return ""
 
 
 def _coords():

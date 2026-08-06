@@ -30,7 +30,8 @@ from blips._geo import (
     advance, bearing_to, cross_along_track, haversine_nm, turn_delta,
 )
 from blips.game.procedures import (
-    find_named, flow_path, join_plan, plans_for, procedures_through,
+    approach_ends, approach_to, find_named, flow_path, join_plan, plans_for,
+    procedures_through,
 )
 from blips.game.profiles import profile_for
 from blips.game.schedules import far_city, schedule_for
@@ -665,6 +666,14 @@ def build_sector(airport):
 
     runway = airport["rwys"][0]                    # longest, by build sort
     end = rng.choice(("le", "he"))                 # today's flow
+    # ...unless the plates know the field and only one flow lands on its
+    # instruments: a field with one ILS opens the shift pointed at it, the
+    # way its own calm-wind preference really runs.  Fields the approach
+    # data can't speak for keep the coin flip they always had.
+    ranks = {e: _appr_rank(airport["icao"], _flow_ends(airport, e)["rwy"])
+             for e in ("le", "he")}
+    if None not in ranks.values() and ranks["le"] != ranks["he"]:
+        end = "le" if ranks["le"] > ranks["he"] else "he"
     ident, course, _thr = _end_geometry(airport, runway, end)
 
     fixes, names, entries, exits = {}, set(), [], []
@@ -836,6 +845,15 @@ def _flow_ends(airport, end):
     dident, dcourse, dthr = min(
         (_end_geometry(airport, partner, e) for e in ("le", "he")),
         key=lambda geom: abs(turn_delta(geom[1], course)))
+    # ...unless the ILS lives on the shorter parallel: where the plates
+    # know the field, arrivals land the equipment — Kennedy lands 13L and
+    # rolls its departures off the longer 13R, not the other way round.
+    if (_appr_rank(airport["icao"], ident) is not None
+            and _appr_rank(airport["icao"], ident) < 2
+            and _appr_rank(airport["icao"], dident) == 2):
+        return {"rwy": dident, "course": dcourse, "thr": dthr, "end": end,
+                "dep_rwy": ident, "dep_course": course, "dep_thr": thr,
+                "dep_len": runway["len"], "parallel": True}
     return {"rwy": ident, "course": course, "thr": thr, "end": end,
             "dep_rwy": dident, "dep_course": dcourse, "dep_thr": dthr,
             "dep_len": partner["len"], "parallel": True}
@@ -905,6 +923,16 @@ def _end_geometry(airport, runway, end):
             airport["lat"], airport["lon"], (course + 180.0) % 360.0,
             runway["len"] / 6076.0 / 2.0)
     return ident, course, (thr_lat, thr_lon)
+
+
+def _appr_rank(icao, ident):
+    """How well instrumented a runway end is: 2 for a localizer-based
+    straight-in (the game's ILS), 1 for any other straight-in approach,
+    0 for nothing at all, None when the vendored data can't say."""
+    appr = approach_to(icao, ident)
+    if appr is None:
+        return None
+    return 2 if appr == "ILS" else 1 if appr else 0
 
 
 def _runway_end(airport, ident):
@@ -2533,6 +2561,18 @@ class Sim:
         if (self._prefer is not None and new_end != self._prefer
                 and self.rng.random() < 0.65):
             new_end = old_end
+        # and a field with one ILS keeps landing on it: where the plates
+        # know the field and the other flow would put arrivals on a runway
+        # end with less approach than this one has, the wind only shifts
+        # in place — the real calm-wind preference of a one-ILS airport
+        if new_end != old_end:
+            cur = _appr_rank(self.airport["icao"], self.sector["rwy"])
+            new = _appr_rank(self.airport["icao"],
+                             _flow_ends(self.airport, new_end)["rwy"])
+            if cur is not None and new is not None and new < cur:
+                self._set_wind()
+                self._say_atis(update=True)
+                return
         # both ends of a parallel pair flip together — one wind, one
         # direction; a single runway simply turns around
         self.sector.update(_flow_ends(self.airport, new_end))
@@ -3426,9 +3466,8 @@ class Sim:
             else:
                 rwy = self.sector["rwy"]
                 course, thr = self.sector["course"], self.sector["thr"]
+            apt = self.sector["sat_apt"] if sat is not None else self.airport
             if ins["rwy"]:
-                apt = self.sector["sat_apt"] if sat is not None \
-                    else self.airport
                 end = _runway_end(apt, ins["rwy"])
                 if end is None:
                     raise CommandError(f"unable — no runway {ins['rwy']} "
@@ -3442,6 +3481,40 @@ class Sim:
                         f"today, we're landing "
                         f"{say_runway(self.sector['rwy'])}")
                 thr = (tlat, tlon)
+            # the ILS is a piece of equipment, not a property of pavement.
+            # Where the vendored plates know the field, an end without one
+            # answers honestly: a teaching refusal when the ILS is a
+            # parallel over, a plain no when nothing straight-in serves the
+            # end at all — and the real approach cleared by its own name
+            # where the sim can fly it (a straight-in RNAV rides this same
+            # final course and slope, so an RNAV-only field plays true).
+            # A field the data can't speak for keeps its ILS everywhere.
+            appr = approach_to(apt["icao"], rwy)
+            appr_word = "ILS"
+            if appr is not None and appr != "ILS":
+                ends = approach_ends(apt["icao"]) or {}
+                ils_at = sorted(e for e in ends if ends[e] & {"I", "L"})
+
+                def _same_flow(e):
+                    geom = _runway_end(apt, e)
+                    return (geom is not None and geom[1] is not None
+                            and abs(turn_delta(geom[1], course)) <= 60.0)
+
+                steer = next((e for e in ils_at if _same_flow(e)), None)
+                if not appr:
+                    hint = (f"the ILS serves runway "
+                            f"{say_runway(steer or ils_at[0])}"
+                            if ils_at else "expect vectors")
+                    raise CommandError(
+                        f"unable — there's no instrument approach to "
+                        f"runway {say_runway(rwy)}; {hint}")
+                if steer:
+                    an = "an" if appr[0].upper() in "AEFHILMNORSX" else "a"
+                    raise CommandError(
+                        f"unable — no ILS to runway {say_runway(rwy)}, "
+                        f"that's {an} {appr} approach; the ILS serves "
+                        f"runway {say_runway(steer)}")
+                appr_word = appr
             # hopeless geometry gets a puzzled pilot, not a wasted clearance
             cross, along = cross_along_track(ac["lat"], ac["lon"],
                                              thr[0], thr[1], course)
@@ -3464,7 +3537,7 @@ class Sim:
             ac.update(phase="cleared", rwy=rwy, course=course, thr=thr,
                       tower_handoff=None, wake_warned=False, spd_pin=False,
                       nav=None, via_name=None)
-            return f"cleared ILS runway {say_runway(rwy)} approach"
+            return f"cleared {appr_word} runway {say_runway(rwy)} approach"
         if kind == "handoff":
             if ac["plan"] != "departure":
                 raise CommandError(f"unable — {me} is an arrival, "

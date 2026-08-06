@@ -112,6 +112,25 @@ are done.
   fields verified byte-identical to the generated sector; growth
   beyond the three showcases stays in Later ("Expand airport
   operations profiles").
+- ✅ **Make approach claims true** *(realism, locality)* — the vendored
+  APPCH records (5,116 approaches at 733 US fields, shipped all along
+  in procedures.json.gz but ignored by the game) now say which runway
+  ends really have a localizer. `i` to an ILS-less end teaches ("unable
+  — no ILS to runway four left, that's an RNAV approach; the ILS serves
+  runway four right"); an end with nothing straight-in refuses
+  outright; a field with no ILS anywhere (Palm Springs, Lihue) clears
+  its real approach by name — "cleared RNAV runway three one right
+  approach" — down the same final course and slope the sim already
+  flies, so RNAV-only fields play true instead of fictional. The data
+  steers the sector too: segregated arrivals prefer the ILS-equipped
+  parallel (Kennedy lands 13L and rolls departures off the longer 13R),
+  the shift opens on the flow the instruments serve, and a one-ILS
+  field holds its flow when the wind turns — the broadcast advances,
+  the runway stays. Fields the data can't speak for — military
+  (approaches live in the DoD FLIP, off the public CIFP), foreign, or
+  circling-only (Aspen) — keep the old every-end-an-ILS assumption, so
+  nothing changes across the rest of the 4,472. Approach final-fix and
+  step-down geometry, and published missed approaches, wait (Later).
 
 ## Safety follow-up
 
@@ -124,12 +143,7 @@ are done.
 
 ## Next — highest leverage remaining
 
-1. **Make approach claims true** *(realism, locality)*. APPCH records are
-   vendored but discarded while every runway end is treated as an ILS.
-   Compile the real approach runway/final-fix/altitude data, refuse an ILS
-   where none exists, and make vectors-only fallback explicit. Published
-   missed approaches can follow once the basic availability is honest.
-2. **Visual approaches** *(realism + fun)*. `v 19L` with a
+1. **Visual approaches** *(realism + fun)*. `v 19L` with a
    field-in-sight roll keyed on range/weather; "follow the traffic
    ahead" reuses the existing `visual` sighting set so in-trail inside
    3 nm is legal while wake still bites. VMC majors clear mostly
@@ -138,6 +152,12 @@ are done.
 
 ## Later — worth doing, not first
 
+- **Published missed approaches and approach step-downs** — the APPCH
+  legs are already vendored (final fixes, crossing altitudes, and the
+  climb-out after the runway fix); fly the published miss on a
+  go-around instead of the synthesized straight-ahead climb, and honor
+  the step-downs before the FAF. Availability is honest now; the
+  geometry is the part still waiting.
 - **Parallel operations, phase 2 — dual arrival streams** with the
   independent-approach separation exemption (centerlines > 4,300 ft
   run their own finals); segregated mode is the phase-1 floor it
