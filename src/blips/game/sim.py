@@ -869,6 +869,8 @@ class Sim:
         self.sector = build_sector(airport)
         self.rng = random.Random(seed)
         self.pool = pool         # live-sampled traffic, or None when offline
+        self.cast_sources = {"pool": 0, "schedule": 0, "mix": 0}
+        self.pool_dry = False    # the live pool led, then ran out mid-shift
         self.terrain = terrain   # sector MVA grid, or None for a flat world
         self.schedule = schedule or []   # vendored real routes for this field
         self.wx_sample = None    # callable(lat, lon) → echo 0..1, or None
@@ -1244,13 +1246,17 @@ class Sim:
         ``(display, (lat, lon) | None)`` for the origin (arrivals) or
         destination (departures), or None when the cast carries no route.
 
-        For arrivals and departures the vendored schedule leads: the real
-        carriers, metal and routes that serve this field, so the check-in
-        and the hover chip carry a true origin/destination.  Failing that
-        (no schedule for this field) the live pool casts whoever's actually
-        in the air nearby, and last the synthesized profile mix.  Arrivals
-        and departures are gated to what the field's runway can take — a
-        widebody never lands on a short strip.
+        For arrivals and departures the live pool leads when it can: a
+        flight sampled in the air nearby whose real route confirms the role
+        — actually inbound here, actually outbound from here — is the most
+        local, most current cast there is, so it flies before anything
+        vendored.  Each pool flight spawns at most once, so a pool that runs
+        dry mid-shift hands over silently to the vendored schedule (the
+        real carriers, metal and routes that serve this field), then to
+        route-unknown pool traffic (real metal, anonymous route), and last
+        the synthesized profile mix.  Arrivals and departures are gated to
+        what the field's runway can take on every path — a widebody never
+        lands on a short strip.  ``cast_sources`` tallies who led each cast.
 
         Given ``field`` (a satellite's airport record), the flight is cast
         as that field's own: its schedule when it has one, else whatever
@@ -1261,25 +1267,49 @@ class Sim:
             pick = self._draw_schedule(role, field=field)
             if pick is not None:
                 cs, actype, end = pick
+                self.cast_sources["schedule"] += 1
                 return cs, actype, self._far(end)
+            self.cast_sources["mix"] += 1
             return self._cast_profile(field, role)
+        pick = self._draw_pool(role, confirmed_only=True)
+        if pick is not None:
+            self.cast_sources["pool"] += 1
+            return pick
+        if (self.pool is not None and not self.pool_dry
+                and self.cast_sources["pool"] and self.pool.spent()):
+            self.pool_dry = True     # it led, and now it's out — noted once
         pick = self._draw_schedule(role)
         if pick is not None:
             cs, actype, end = pick
+            self.cast_sources["schedule"] += 1
             return cs, actype, self._far(end)
-        if self.pool is not None:
-            pick = self.pool.draw(role)
-            if pick is not None and not any(
-                    ac["callsign"] == pick[0] for ac in self.aircraft):
-                cs, actype, end = pick
-                if self._runway_ok(actype):
-                    return cs, actype, self._far(end)
-                # keep the real flight, but sub in a type its airline flies
-                # that this runway can actually take
-                fits = [t for t in FLEETS.get(cs[:3], ()) if self._runway_ok(t)]
-                if fits:
-                    return cs, self.rng.choice(fits), self._far(end)
+        pick = self._draw_pool(role)
+        if pick is not None:
+            self.cast_sources["pool"] += 1
+            return pick
+        self.cast_sources["mix"] += 1
         return self._cast_profile(self.airport, role)
+
+    def _draw_pool(self, role, confirmed_only=False):
+        """(callsign, actype, far) from the live pool, or None — runway-gated
+        like every other path.  ``confirmed_only`` asks only for flights
+        whose real route proves the role; without it, route-unknown entries
+        fill in anonymously."""
+        if self.pool is None:
+            return None
+        pick = self.pool.draw(role, confirmed_only=confirmed_only)
+        if pick is None or any(
+                ac["callsign"] == pick[0] for ac in self.aircraft):
+            return None
+        cs, actype, end = pick
+        if self._runway_ok(actype):
+            return cs, actype, self._far(end)
+        # keep the real flight, but sub in a type its airline flies
+        # that this runway can actually take
+        fits = [t for t in FLEETS.get(cs[:3], ()) if self._runway_ok(t)]
+        if fits:
+            return cs, self.rng.choice(fits), self._far(end)
+        return None
 
     def _cast_profile(self, ap, role):
         """(callsign, actype, None) — synthesized in the shape the field's

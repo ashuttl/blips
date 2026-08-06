@@ -111,7 +111,7 @@ class TrafficPool:
             return None, None
         return route[0], route[-1]
 
-    def draw(self, role):
+    def draw(self, role, confirmed_only=False):
         """A real (callsign, actype, extra) for a spawn, or None.
 
         ``role`` is "arrival", "departure" or "overflight".  Entries whose
@@ -122,7 +122,8 @@ class TrafficPool:
         exactly what belongs overhead at FL350 — for those ``extra`` is the
         route's ``(origin_leg, dest_leg)``, each a ``(place, code)`` pair, so
         the scope's hover chip can say where they're going over you to;
-        route-unknown entries fill in for any role anonymously (extra None).
+        route-unknown entries fill in for any role anonymously (extra None)
+        unless ``confirmed_only`` says a known route is the whole point.
         Wrong-direction entries never spawn.
         """
         with self._lock:
@@ -146,7 +147,7 @@ class TrafficPool:
                 with self._lock:
                     self._used.add(e["cs"])
                 return e["cs"], e["actype"], far_end
-        if anonymous:
+        if anonymous and not confirmed_only:
             # no route-confirmed flight to hand out: prefer a recognisable
             # airline over the bizjet soup that fills any 250 nm circle
             anonymous.sort(key=lambda e: (e["cs"][:3] not in TELEPHONY,
@@ -156,3 +157,19 @@ class TrafficPool:
                 self._used.add(pick["cs"])
             return pick["cs"], pick["actype"], None
         return None
+
+    def spent(self):
+        """True when nothing left could still lead an arrival or departure:
+        every unused entry's route is known and known not to touch this
+        field.  Route-unknown entries keep this False — their route may yet
+        fill in and confirm.  The pool may still hold overflights."""
+        with self._lock:
+            entries = [e for e in self._entries if e["cs"] not in self._used]
+        for e in entries:
+            origin, dest = self._route_ends(e)
+            if origin is None:
+                return False
+            if any(leg[0] in self._codes or leg[1] in self._codes
+                   for leg in (origin, dest)):
+                return False
+        return True

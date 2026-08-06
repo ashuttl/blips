@@ -1164,6 +1164,100 @@ def test_runway_gate_keeps_widebodies_off_short_fields():
     assert all(jfk._runway_ok(t) for t in wide)
 
 
+def _fake_pool(airport, entries, routes):
+    """A TrafficPool that already sampled: injected entries, canned routes —
+    the same faking test_fleet.py uses, wearing a Sim."""
+    from blips.game.fleet import TrafficPool
+
+    class _Routes:
+        def __init__(self, r):
+            self._r = r
+
+        def get(self, cs, lat=None, lon=None):
+            return self._r.get(cs)
+
+    pool = TrafficPool(airport, set(PERF))
+    pool._entries = [{"cs": cs, "actype": t,
+                      "lat": airport["lat"], "lon": airport["lon"]}
+                     for cs, t in entries]
+    pool.routes = _Routes(routes)
+    return pool
+
+
+def test_route_confirmed_pool_traffic_leads_the_cast():
+    """A live flight really inbound here spawns before anything vendored —
+    the schedule is the fallback, not the headliner — and when the pool
+    runs dry mid-shift the schedule takes over silently."""
+    ap = find_airport("ktpa")
+    s = Sim(ap, seed=1, schedule=[["DAL", "B738", "ATL", 5]])
+    s.pool = _fake_pool(ap, [("SWA123", "B738")],
+                        {"SWA123": (("Baltimore", "BWI"), ("Tampa", "TPA"))})
+    cs, actype, far = s._cast_flight("arrival")
+    assert (cs, actype) == ("SWA123", "B738")
+    assert far[0] == "Baltimore" and far[1] is not None
+    assert s.cast_sources["pool"] == 1
+    before = s.cast_sources["schedule"]
+    cs2, _t, _f = s._cast_flight("arrival")     # the pool is used once
+    assert cs2.startswith("DAL")
+    assert s.cast_sources["schedule"] == before + 1
+    assert s.pool_dry                           # it led, then ran out
+
+
+def test_wrong_direction_pool_flight_never_casts_the_wrong_role():
+    """A live flight whose real route leaves Tampa can only ever be the
+    departure; the arrival cast passes it over for the schedule."""
+    ap = find_airport("ktpa")
+    s = Sim(ap, seed=1, schedule=[["DAL", "B738", "ATL", 5]])
+    s.pool = _fake_pool(ap, [("SWA123", "B738")],
+                        {"SWA123": (("Tampa", "TPA"), ("Miami", "MIA"))})
+    cs, _t, _f = s._cast_flight("arrival")
+    assert cs.startswith("DAL")                 # SWA123 left untouched
+    cs, _t, far = s._cast_flight("departure")
+    assert cs == "SWA123" and far[0] == "Miami"
+
+
+def test_route_unknown_pool_traffic_waits_behind_the_schedule():
+    """A sampled flight with no route on file never outranks the vendored
+    schedule; it fills in only where there is no schedule at all."""
+    ap = find_airport("ktpa")
+    s = Sim(ap, seed=1, schedule=[["DAL", "B738", "ATL", 5]])
+    s.pool = _fake_pool(ap, [("AAL789", "A320")], {})
+    assert s._cast_flight("arrival")[0].startswith("DAL")
+    bare = Sim(ap, seed=1)                      # no schedule vendored in
+    bare.pool = _fake_pool(ap, [("AAL789", "A320")], {})
+    cs, _t, far = bare._cast_flight("arrival")
+    assert cs == "AAL789" and far is None       # real metal beats the mix
+
+
+def test_runway_gate_holds_on_the_pool_path():
+    """A widebody sampled inbound to a 7,200 ft field keeps its real
+    callsign but flies metal the runway takes; a carrier with nothing
+    fitting is passed over for the fallback entirely."""
+    from blips.game.sim import MIN_RWY
+    ap = find_airport("kpwm")
+    s = Sim(ap, seed=3)
+    s.pool = _fake_pool(
+        ap, [("DAL999", "B77W")],
+        {"DAL999": (("Atlanta", "ATL"), ("Portland", "PWM"))})
+    cs, actype, _far = s._cast_flight("arrival")
+    assert cs == "DAL999" and actype != "B77W"
+    assert MIN_RWY.get(actype, 0) <= 7200
+    s.pool = _fake_pool(
+        ap, [("ZZZ999", "B77W")],               # no fleet to substitute from
+        {"ZZZ999": (("Atlanta", "ATL"), ("Portland", "PWM"))})
+    assert s._cast_flight("arrival")[0] != "ZZZ999"
+
+
+def test_seeded_shifts_never_touch_the_live_pool():
+    """--seed promises a replay; the live sample would break it, so the
+    wiring skips the pool entirely on a seeded shift."""
+    from blips.game.app import _live_pool
+    from blips.game.fleet import TrafficPool
+    ap = find_airport("ktpa")
+    assert _live_pool(ap, 12345) is None
+    assert isinstance(_live_pool(ap, None), TrafficPool)
+
+
 def test_hover_chip_shows_origin_and_destination():
     """Arrivals carry 'from <city>' in the hover chip and departures 'to
     <city>' — the game's parity with the live scope's route line."""

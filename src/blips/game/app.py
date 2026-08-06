@@ -750,6 +750,17 @@ def _calm_shift(args):
     return first_shift()
 
 
+def _live_pool(airport, seed):
+    """The live traffic pool for this shift, or None: the live cast breaks
+    determinism, so a seeded shift never touches it — the replay promise
+    outranks the locality."""
+    if seed is not None:
+        return None
+    from blips.game.fleet import TrafficPool
+    from blips.game.sim import PERF
+    return TrafficPool(airport, PERF)
+
+
 def main(args):
     airport = _resolve_airport((args.game or "").strip())
     live = resolve_live(args)
@@ -759,12 +770,9 @@ def main(args):
     from blips._terrain import Terrain
     terrain = Terrain(airport["lat"], airport["lon"])
     if live:
-        from blips.game.sim import PERF
         terrain.start()   # real elevation → MVAs; flat until it lands
-        if args.seed is None:
-            # live cast breaks determinism, so seeded shifts skip it
-            from blips.game.fleet import TrafficPool
-            pool = TrafficPool(airport, PERF)
+        pool = _live_pool(airport, args.seed)
+        if pool is not None:
             pool.start()  # the real traffic near this airport, filling in
     else:
         terrain._fetch(retries=1)  # a screenshot is worth a short wait
@@ -994,6 +1002,18 @@ def main(args):
                 state["terrain_told"] = True
                 sim.say("terrain data unavailable this shift — "
                         "flat-world rules", "help")
+        # the cast's provenance gets the same one-line honesty as the
+        # ground: say when the live sample starts leading the spawns, and
+        # say when it runs out and the vendored fallback takes over
+        if pool is not None:
+            if not state.get("cast_told") and sim.cast_sources["pool"]:
+                state["cast_told"] = True
+                sim.say("live cast — spawns drawn from the real traffic "
+                        "sampled near the field", "help")
+            if sim.pool_dry and not state.get("cast_dry_told"):
+                state["cast_dry_told"] = True
+                sim.say("live traffic pool spent — the vendored schedule "
+                        "carries the rest of the cast", "help")
         # the sim's pilots see whatever radar frame the scope is showing
         rgba, pw, ph, frame_view, *_rest = weather.snapshot()
         sim.wx_sample = (_wx_sampler(rgba, pw, ph, frame_view[0])

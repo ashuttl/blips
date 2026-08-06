@@ -75,6 +75,24 @@ def test_anonymous_prefers_an_airline_over_the_bizjet_soup():
     assert pool.draw("arrival")[0] == "DAL456"
 
 
+def test_confirmed_only_never_hands_out_the_anonymous_fill():
+    # confirmed_only is the leading draw: a route-unknown entry stays in
+    # the pool for the anonymous phase rather than jumping the schedule
+    pool = _pool([("SWA123", "B738")], {})
+    assert pool.draw("arrival", confirmed_only=True) is None
+    assert pool.draw("arrival") == ("SWA123", "B738", None)
+
+
+def test_spent_when_nothing_could_still_confirm():
+    pool = _pool([("SWA123", "B738"), ("DAL456", "A320"), ("AAL789", "A320")],
+                 {"SWA123": (_BWI, _TPA), "DAL456": (_ATL, _MIA)})
+    assert not pool.spent()      # SWA123 could still lead an arrival
+    pool.draw("arrival")
+    assert not pool.spent()      # AAL789's route may yet fill in
+    pool.draw("departure")       # ...but it flies anonymously instead
+    assert pool.spent()          # DAL456 only ever passes overhead
+
+
 def test_sample_filters_the_pool_and_shuffles_with_its_own_rng(monkeypatch):
     raw = [
         {"callsign": "SWA123", "actype": "B38M", "lat": 28.0, "lon": -82.0},

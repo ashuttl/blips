@@ -289,8 +289,11 @@ spawner draws from that pool: a session at TPA is Southwest 737s and
 Breeze E-Jets, arrivals check in "with you, one three thousand, inbound
 LAL, **from Baltimore**", departures want their gate "**for Denver**".
 Flights whose real route runs the other way never spawn in the wrong
-direction. Offline it degrades to a country-plausible airline mix — and
-a field with no airline service at all (play Brunswick itself, or any
+direction, and each sampled flight spawns at most once a shift. Offline,
+or when the pool runs dry mid-shift, it degrades silently to the field's
+vendored schedule — the real carriers, metal and routes that serve it —
+then to a country-plausible airline mix; and a field with no airline
+service at all (play Brunswick itself, or any
 executive field) degrades instead to its own **traffic profile**:
 bizjets, IFR general aviation and military metal in the proportions
 its vendored signals call for, never a phantom airline.

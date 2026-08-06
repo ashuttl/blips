@@ -92,6 +92,12 @@ are done.
   still hold everything). Verified parallel: TPA, SEA (16L lands, 16C
   departs), EGLL; unchanged single/crossing: PWM, BIL. Phase 2 moved
   to Later.
+- ✅ **Live traffic leads the cast** *(locality)* — `_cast_flight` now
+  draws route-confirmed pool traffic first (right direction, runway-gated,
+  used once), degrades silently to the vendored schedule, then anonymous
+  pool metal, then the country mix; `cast_sources` tallies who led and the
+  radio notes, once, when the live sample leads or runs dry. Seeded shifts
+  still skip the pool (`_live_pool`, regression-tested).
 
 ## Safety follow-up
 
@@ -118,13 +124,7 @@ are done.
    Compile the real approach runway/final-fix/altitude data, refuse an ILS
    where none exists, and make vectors-only fallback explicit. Published
    missed approaches can follow once the basic availability is honest.
-3. **Let live traffic lead when it is actually available** *(locality)*.
-   `_cast_flight` currently draws the vendored route list first, so at the
-   375 scheduled fields the live ADS-B pool almost never influences a cast.
-   Prefer route-confirmed pool traffic, fall back to the route-presence
-   dataset, and expose the source in diagnostics before adding richer
-   time-of-day/frequency weights.
-4. **Visual approaches** *(realism + fun)*. `v 19L` with a
+3. **Visual approaches** *(realism + fun)*. `v 19L` with a
    field-in-sight roll keyed on range/weather; "follow the traffic
    ahead" reuses the existing `visual` sighting set so in-trail inside
    3 nm is legal while wake still bites. VMC majors clear mostly
@@ -159,6 +159,10 @@ are done.
 - **International sound** — per-country transition altitude (EGLL says
   "flight level" far lower), QNH/altimeter in the ATIS, "with
   information alpha" on check-in.
+- **Time-of-day and frequency weights for the cast** — the live pool and
+  schedule now lead in the right order; the richer step is weighting the
+  vendored routes by real frequency and hour (no red-eye regionals, banks
+  at the hubs) rather than the flat per-route weights.
 - **Published holds** — racetrack legs, left-turn option, EFC times;
   upgrades the two scripted crises (centre wall, runway closure) to
   play like the procedures they imitate.
