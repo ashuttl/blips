@@ -11,14 +11,27 @@ blips --game            # approach control at the airport nearest you
 blips --game tpa        # Tampa approach
 blips --game egll       # Heathrow director
 blips --game billings   # somewhere the terrain pushes back
+blips --game --calm     # the gentle opening, on request
 ```
 
 The flag is deliberately missing from `--help`. You found it; it's yours.
 
+Your first shift ever — no rated page in the shift book anywhere —
+opens gently. For about eight minutes the frequency breathes at half
+pace, every readback comes back right, and nothing goes wrong: no
+push, no flow change, no emergency. Three quiet lines appear at the
+moments they matter — how to start an arrival down, how to clear the
+approach, what a departure wants from you — each written against a
+real callsign on your scope. Then the window lifts and the shift is
+the shift. `--calm` asks for the same opening any time; a seeded shift
+never gets it uninvited, because `--seed` means the same traffic every
+time, full stop.
+
 ## The loop
 
-You take over a sector that's already busy — a couple of arrivals inbound
-from the gates, a departure climbing out. Arrivals want a runway;
+You take over a sector that's already busy — three or four arrivals
+inbound from the gates, one of them already partway down and pointed
+at the field, a departure climbing out. Arrivals want a runway;
 departures want their exit fix. You vector, climb, descend, and sequence
 them; the sim flies whatever you say. Traffic thickens the longer you
 last. The shift never ends — you do, when the picture finally gets away

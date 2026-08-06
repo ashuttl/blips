@@ -86,3 +86,25 @@ def test_airports_keep_separate_pages(tmp_path, monkeypatch):
     assert prev is None
     assert entry["best"]["score"] == 700
     assert _records.load()["KTPA"]["best"]["score"] == 1000
+
+
+def test_first_shift_reads_the_whole_book(tmp_path, monkeypatch):
+    monkeypatch.setattr(_records, "PATH", tmp_path / "records.json")
+    assert _records.first_shift()            # no book at all
+    _records.record_shift("KTPA", **_shift(rating="—", minutes=1))
+    assert _records.first_shift()            # tallied, but never rated
+    _records.record_shift("EGLL", **_shift())
+    assert not _records.first_shift()        # one rated page anywhere ends it
+
+
+def test_seeded_shifts_are_never_calm_uninvited(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from blips.game.app import _calm_shift
+    monkeypatch.setattr(_records, "PATH", tmp_path / "records.json")
+    fresh = SimpleNamespace(calm=False, seed=None)
+    assert _calm_shift(fresh)                             # empty book: calm
+    assert not _calm_shift(SimpleNamespace(calm=False, seed=123))
+    assert _calm_shift(SimpleNamespace(calm=True, seed=123))   # unless asked
+    _records.record_shift("KTPA", **_shift())
+    assert not _calm_shift(fresh)             # the book has a rated page now

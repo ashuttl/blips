@@ -721,6 +721,18 @@ def _resolve_airport(query):
     return ap
 
 
+def _calm_shift(args):
+    """A truly first shift opens calm — no rated page in the shift book
+    anywhere.  A seeded shift never does unless --calm says so outright:
+    the replay promise outranks the welcome."""
+    if getattr(args, "calm", False):
+        return True
+    if args.seed is not None:
+        return False
+    from blips.game.records import first_shift
+    return first_shift()
+
+
 def main(args):
     airport = _resolve_airport((args.game or "").strip())
     live = resolve_live(args)
@@ -743,7 +755,8 @@ def main(args):
     # keep them too; the check-in and hover chip get a true origin/dest
     from blips.game.schedules import schedule_for
     sim = Sim(airport, seed=seed, pool=pool, terrain=terrain,
-              schedule=schedule_for(airport["icao"]))
+              schedule=schedule_for(airport["icao"]),
+              calm=_calm_shift(args))
     center = [airport["lat"], airport["lon"]]
     zoom = [GAME_ZOOM]
     scenery = {"rev": -1, "pins": None, "lines": None,
