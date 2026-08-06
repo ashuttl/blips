@@ -1521,6 +1521,22 @@ class Sim:
                     f"type {ac['callsign'].lower()} d {int(down) // 100} "
                     "to start them down — ? for the rest")
 
+    def _initial_alt(self, sat=None):
+        """The level-off a fresh departure is spawned with.  Derived as a
+        pair so the LOA's promise holds by construction: the satellite's
+        initial sits a full thousand under the main flow's — or, where
+        the satellite is perched too high for 'under' to clear its own
+        pattern, a thousand over instead.  Rounding each field from its
+        own elevation broke the split at roughly one sector in eight."""
+        main = float(round((self.sector["elev"] + 3000) / 1000) * 1000)
+        if sat is None:
+            return main
+        below = main - 1000.0
+        if below >= sat["elev"] + 1500.0:
+            return below
+        return max(main + 1000.0,
+                   float(round((sat["elev"] + 2000) / 1000) * 1000))
+
     def _spawn_departure(self, sat=None):
         """A departure off the main runway — or, given ``sat``, off the
         satellite field, low in the middle of your airspace, cast as that
@@ -1536,10 +1552,8 @@ class Sim:
         exit_fix = self._gate_toward(self.sector["exits"],
                                      dest[1] if dest else None)
         # the letter of agreement keeps the two fields' climb-outs apart
-        # until they're on your frequency: satellite departures level a
-        # thousand feet under the main flow's initial altitude
-        initial = float(round(
-            (elev + (2000 if sat is not None else 3000)) / 1000) * 1000)
+        # until they're on your frequency
+        initial = self._initial_alt(sat)
         perf = PERF.get(actype) or GA_PERF[actype]
         ac = self._base(callsign, actype, lat, lon, elev + 1200.0,
                         course, min(170.0, float(perf[0])))
@@ -1864,9 +1878,7 @@ class Sim:
         holds the release too."""
         course, thr = src["dep_course"], src["dep_thr"]
         lat, lon = advance(thr[0], thr[1], course, 1.5)
-        sat = src is not self.sector
-        initial = float(round(
-            (src["elev"] + (2000 if sat else 3000)) / 1000) * 1000)
+        initial = self._initial_alt(src if src is not self.sector else None)
         for ac in self.aircraft:
             if not _controlled(ac) or ac["phase"] in (
                     "handed", "established", "cleared"):

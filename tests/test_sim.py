@@ -1498,16 +1498,26 @@ def test_the_extra_departure_timer_owes_the_same_metering(sim):
 
 
 def test_satellite_departures_level_below_the_main_flow(sim):
-    # the LOA's split: a satellite climb-out stops a thousand feet under
-    # the main field's, so two untouched departures never meet level
+    # the LOA's split: a satellite climb-out stops a thousand feet clear
+    # of the main field's, so two untouched departures never meet level
     sat = sim.sector["sat"]
     if sat is None:
         pytest.skip("no satellite at this field")
     sim._spawn_departure(sat=sat)
     dep = next(a for a in sim.aircraft if a["plan"] == "departure")
-    assert dep["tgt_alt"] == float(round((sat["elev"] + 2000) / 1000) * 1000)
-    assert dep["tgt_alt"] < float(
-        round((sim.sector["elev"] + 3000) / 1000) * 1000)
+    assert dep["tgt_alt"] == sim._initial_alt(sat)
+    assert abs(dep["tgt_alt"] - sim._initial_alt()) >= 1000.0
+
+
+def test_loa_split_is_an_invariant_of_the_derivation(sim):
+    # derived as a pair: a thousand under, or — where the satellite sits
+    # too high above the main field for 'under' to clear its pattern —
+    # a thousand over.  Never level with the main flow.
+    main = sim._initial_alt()
+    for sat_elev in range(0, 9000, 250):
+        got = sim._initial_alt({"elev": float(sat_elev)})
+        assert abs(got - main) >= 1000.0
+        assert got >= sat_elev + 1200.0   # still above the spawn altitude
 
 
 def test_flow_change_go_around_gets_the_new_runway(sim):

@@ -274,10 +274,10 @@ would say them — "November four two three tango bravo, descend and
 maintain four thousand" — and any unique suffix still keys them up. Clear them for "the ILS" and they fly *their* field's approach;
 their final is wherever their runway points, and so is the sequencing
 problem. Satellite departures pop up low in the middle of your airspace
-wanting an exit fix like anybody else — levelling a thousand feet
-under the main field's climb-outs until you say otherwise, because
-the letter of agreement keeps the two flows apart until they're on
-your frequency. When the flow turns, the
+wanting an exit fix like anybody else — levelling a full thousand feet
+clear of the main field's climb-outs (under them, or over where the
+satellite sits high) until you say otherwise, because the letter of
+agreement keeps the two flows apart until they're on your frequency. When the flow turns, the
 satellite turns with it — one wind, one direction of traffic.
 
 ## The cast

@@ -95,12 +95,12 @@ are done.
 
 ## Safety follow-up
 
-- **Make the satellite LOA altitude an invariant.** Satellite and main-field
-  initial altitudes are currently rounded independently from different field
-  elevations, so the advertised 1,000-ft split is not guaranteed: 47 of 400
-  sampled large-airport sectors with satellites produced less than 1,000 ft
-  (sometimes the same altitude). Derive the pair together in one helper,
-  reuse it in spawning and release checks, and soak-test mixed-field flows.
+- ✅ **Make the satellite LOA altitude an invariant.** The pair is now
+  derived together in `_initial_alt` (used by spawning and release
+  checks): the satellite levels a thousand under the main flow, or a
+  thousand over where it sits too high for "under" to clear its own
+  pattern — never level with it, by construction, verified across the
+  elevation space and by unattended mixed-field soak.
 
 ## Next — highest leverage remaining
 
