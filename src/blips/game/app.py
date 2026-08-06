@@ -329,7 +329,8 @@ def _gate_card(sim, name, plans):
     # a corner post the reciprocal flow uses is real but not yours right now,
     # and saying "via" for it would be a clearance nobody could fly
     want = "STAR" if entry else "SID"
-    today = [p["name"] for p in plans_for(sim.airport, sector["rwy"])
+    flow_rwy = sector["rwy"] if entry else sector["dep_rwy"]
+    today = [p["name"] for p in plans_for(sim.airport, flow_rwy)
              if p["kind"] == want
              and any(f[2] == name for f in p["spine"])]
     if today:
@@ -526,6 +527,13 @@ def _sector_pins(sim, airport):
         (thr[0], thr[1], far[0], far[1], MARKER),          # the runway
         (thr[0], thr[1], loc[0], loc[1], RING),            # the localizer
     ]
+    if sector.get("parallel"):
+        # segregated parallels: the departure runway is pavement with no
+        # localizer feather — nobody's landing there today
+        dthr = sector["dep_thr"]
+        dfar = advance(dthr[0], dthr[1], sector["dep_course"],
+                       sector["dep_len"] / 6076.0)
+        lines.append((dthr[0], dthr[1], dfar[0], dfar[1], MARKER))
     sat = sector.get("sat")
     if sat is not None:
         apt = sector["sat_apt"]
@@ -567,23 +575,32 @@ def _procedure_overlay(sim, airport, kinds, declutter):
     """
     sector = sim.sector
     gates = sector["fixes"]
-    ov = overlay_for(
-        airport, sector["rwy"], kinds=kinds, declutter=declutter,
-        entry_gates=[gates[n] for n in sector["entries"]],
-        exit_gates=[gates[n] for n in sector["exits"]])
-    lines = []
-    for kind, _name, pts in ov["paths"]:
-        color = STAR_COLOR if kind == "STAR" else SID_COLOR
-        for (la1, lo1), (la2, lo2) in zip(pts, pts[1:]):
-            lines.append((la1, lo1, la2, lo2, color))
-    pins = []
-    for lat, lon, name, kind, vectors in ov["labels"]:
-        star = kind == "STAR"
-        tail = ("⇣" if star else "⇡") if vectors else ""
-        pins.append((lat, lon, "", MUTED, f"{name}{tail}",
-                     {"label_color": STAR_LABEL if star else SID_LABEL,
-                      "row": 1, "key": ("proc", name)}))
-    return pins, lines, {p["name"]: p for p in ov["plans"]}
+    # segregated parallels compile each flow off its own end: the STARs
+    # feed the landing runway, the SIDs roll from the departing one, so a
+    # departure stroke starts on the pavement it really uses
+    if sector.get("parallel"):
+        calls = [(sector["rwy" if k == "STAR" else "dep_rwy"], (k,))
+                 for k in kinds]
+    else:
+        calls = [(sector["rwy"], kinds)]
+    pins, lines, plans = [], [], {}
+    for rwy, kk in calls:
+        ov = overlay_for(
+            airport, rwy, kinds=kk, declutter=declutter,
+            entry_gates=[gates[n] for n in sector["entries"]],
+            exit_gates=[gates[n] for n in sector["exits"]])
+        for kind, _name, pts in ov["paths"]:
+            color = STAR_COLOR if kind == "STAR" else SID_COLOR
+            for (la1, lo1), (la2, lo2) in zip(pts, pts[1:]):
+                lines.append((la1, lo1, la2, lo2, color))
+        for lat, lon, name, kind, vectors in ov["labels"]:
+            star = kind == "STAR"
+            tail = ("⇣" if star else "⇡") if vectors else ""
+            pins.append((lat, lon, "", MUTED, f"{name}{tail}",
+                         {"label_color": STAR_LABEL if star else SID_LABEL,
+                          "row": 1, "key": ("proc", name)}))
+        plans.update({p["name"]: p for p in ov["plans"]})
+    return pins, lines, plans
 
 
 def _wx_sampler(rgba, pw, ph, fbbox):
@@ -783,8 +800,11 @@ def main(args):
         if what == "gate":
             return _gate_card(sim, name, shown_plans())
         plan = shown_plans().get(name)
-        return (_proc_card(plan, sim.sector["rwy"], say_proc)
-                if plan else None)
+        if plan is None:
+            return None
+        rwy = (sim.sector["rwy"] if plan["kind"] == "STAR"
+               else sim.sector["dep_rwy"])   # a SID's card names its runway
+        return _proc_card(plan, rwy, say_proc)
 
     def ground(bbox, gw, hc, sea=None):
         """Terrain as a per-cell underlay tint: MVA above the field glows.

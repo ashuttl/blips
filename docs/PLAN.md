@@ -67,23 +67,30 @@ are done.
   hover-chip tell, escalates to emergency fuel after 6 min airborne).
   Flow change de-metronomed: 600–2,400 s reschedule, ~30% of updates
   hold the wind — the letter advances, the runway stays.
+- ✅ **Parallel-runway operations, phase 1: segregated mode**
+  *(uniqueness — the single biggest differentiator)* — a parallel pair
+  (courses within ~10°, same number, L/C/R suffixes, detected from the
+  vendored data) runs the way EGLL actually does: arrivals land the
+  longer parallel, departures roll the other, and both ends flip
+  together on a flow change. ATIS and check-ins name both runways
+  ("landing runway one niner right, departing runway one niner left"),
+  the scope draws both with the localizer only on the landing one,
+  STARs compile to the arrival end and SIDs to the departure end,
+  `i <departure end>` gets a teaching refusal, and a medical closure
+  holds approaches while departures keep rolling (single-runway fields
+  still hold everything). Verified parallel: TPA, SEA (16L lands, 16C
+  departs), EGLL; unchanged single/crossing: PWM, BIL. Phase 2 moved
+  to Later.
 
 ## Next — highest leverage remaining
 
-1. **Parallel-runway operations** *(uniqueness — the single biggest
-   differentiator)*. `build_sector` uses only `rwys[0]`; TPA, SEA, EGLL
-   all run parallels. Phase 1 is segregated mode (land the longer,
-   depart the other — EGLL's actual operation); the `i 19L` grammar and
-   per-runway wake keys already exist. Phase 2: dual arrival streams
-   with the independent-approach separation exemption (centerlines >
-   4,300 ft).
-2. **Visual approaches** *(realism + fun)*. `v 19L` with a
+1. **Visual approaches** *(realism + fun)*. `v 19L` with a
    field-in-sight roll keyed on range/weather; "follow the traffic
    ahead" reuses the existing `visual` sighting set so in-trail inside
    3 nm is legal while wake still bites. VMC majors clear mostly
    visuals in reality; also the hook for charted ones (river/bay
    visuals) later.
-3. **First-shift calm ramp** *(discoverability)*. When the shift book
+2. **First-shift calm ramp** *(discoverability)*. When the shift book
    is empty: doubled spawn intervals, hearback/emergency/flow-change
    off for ~8 minutes, and 3–4 one-time coach lines at the moment they
    apply ("type dal204 d 60 to start them down"). Also fixes the cold
@@ -93,6 +100,10 @@ are done.
 
 ## Later — worth doing, not first
 
+- **Parallel operations, phase 2 — dual arrival streams** with the
+  independent-approach separation exemption (centerlines > 4,300 ft
+  run their own finals); segregated mode is the phase-1 floor it
+  builds on.
 - **2.5 nm same-runway final separation inside 10 nm** (7110.65
   5-5-4-j) — rewards precise tight-packing; small change in
   `_separation` keyed on both established same-course.

@@ -225,6 +225,19 @@ sim flies the approach and the landing. Departures appear off the runway
 passing ~1,500 ft (the tower meters releases so they don't stack up);
 climb them, point them at their exit fix, hand them off at the edge.
 
+**A field with parallels runs them the real way.** Where the data shows
+a parallel pair — courses within a few degrees, idents sharing a number
+with L/C/R suffixes — the shift runs segregated, the way Heathrow
+actually operates: arrivals land the longer runway, departures roll the
+other, and the ATIS says so — "landing runway one niner right, departing
+runway one niner left". Both runways draw on the scope, but only the
+landing one wears a localizer feather; ask for the ILS to the other and
+you're taught — "unable, one niner left is departing traffic today".
+The STARs feed the landing runway, the SIDs climb off the departing one,
+and a flow change flips both ends together — one wind, one direction.
+Even the ambulance knows the difference: a medical landing closes the
+arrival runway while departures keep rolling next door.
+
 Range rings stay pinned to your airport when you pan, with compass
 headings marked on the second ring — "turn left heading two three zero"
 has somewhere to point.
