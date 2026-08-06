@@ -92,6 +92,20 @@ are done.
   still hold everything). Verified parallel: TPA, SEA (16L lands, 16C
   departs), EGLL; unchanged single/crossing: PWM, BIL. Phase 2 moved
   to Later.
+- ✅ **Airport operations profiles** *(uniqueness)* — an optional,
+  hand-curated table (`game/profiles.py`, every key optional) for the
+  habits the data can't derive: calm-wind flow preference with
+  flow-change rolls that lean back home (EGLL holds the 27s — the
+  westerly preference is policy), explicit arrival/departure parallels
+  (KTPA lands the shorter 19L in south flow per the airport's Informal
+  Runway Use Program), pinned satellites (Farnborough, Brunswick — the
+  latter agreeing with the search, so the pin is documentation), a
+  curated initial level-off routed through `_initial_alt` so the
+  satellite's 1,000-ft LOA split holds by construction (EGLL's 6,000
+  SID cap), and the centre crossing-restriction menu. Unprofiled
+  fields verified byte-identical to the generated sector; growth
+  beyond the three showcases stays in Later ("Expand airport
+  operations profiles").
 
 ## Safety follow-up
 
@@ -104,27 +118,18 @@ are done.
 
 ## Next — highest leverage remaining
 
-1. **Airport operations profiles** *(uniqueness)*. With segregated
-   parallels landed, the remaining gap is that generic initial
-   altitudes, satellites and wind flips still make unlike airports play
-   alike. Add an optional, data-driven profile consumed by
-   `build_sector`: runway configurations beyond the longest-lands
-   heuristic, calm-wind preference, initial/crossing altitudes,
-   transition altitude, and actual satellite ownership. Start with
-   three showcase fields (KTPA, KPWM, EGLL) and keep today's generated
-   sector as the fallback.
-2. **Make approach claims true** *(realism, locality)*. APPCH records are
+1. **Make approach claims true** *(realism, locality)*. APPCH records are
    vendored but discarded while every runway end is treated as an ILS.
    Compile the real approach runway/final-fix/altitude data, refuse an ILS
    where none exists, and make vectors-only fallback explicit. Published
    missed approaches can follow once the basic availability is honest.
-3. **Let live traffic lead when it is actually available** *(locality)*.
+2. **Let live traffic lead when it is actually available** *(locality)*.
    `_cast_flight` currently draws the vendored route list first, so at the
    375 scheduled fields the live ADS-B pool almost never influences a cast.
    Prefer route-confirmed pool traffic, fall back to the route-presence
    dataset, and expose the source in diagnostics before adding richer
    time-of-day/frequency weights.
-4. **Visual approaches** *(realism + fun)*. `v 19L` with a
+3. **Visual approaches** *(realism + fun)*. `v 19L` with a
    field-in-sight roll keyed on range/weather; "follow the traffic
    ahead" reuses the existing `visual` sighting set so in-trail inside
    3 nm is legal while wake still bites. VMC majors clear mostly

@@ -280,6 +280,18 @@ satellite sits high) until you say otherwise, because the letter of
 agreement keeps the two flows apart until they're on your frequency. When the flow turns, the
 satellite turns with it — one wind, one direction of traffic.
 
+**A few fields keep their own habits.** Most airports play from their
+data alone, but some have an operating personality no dataset can
+derive, and those carry a small hand-curated profile. Heathrow holds
+the 27s in light air because the westerly preference is government
+policy, and its departures level at six thousand the way every Heathrow
+SID says; Tampa lands its *shorter* parallel in south flow because the
+airport's runway-use program says so, not the tape measure; Portland's
+profile mostly writes down what the generated sector already found —
+Brunswick as the satellite, three thousand on departure — so the truth
+stays pinned. Everything a profile doesn't say, and every field without
+one, plays exactly as generated.
+
 ## The cast
 
 At the start of a shift, one background fetch samples the **real traffic

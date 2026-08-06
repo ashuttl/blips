@@ -32,6 +32,7 @@ from blips._geo import (
 from blips.game.procedures import (
     find_named, flow_path, join_plan, plans_for, procedures_through,
 )
+from blips.game.profiles import profile_for
 from blips.game.schedules import far_city, schedule_for
 
 SECTOR_NM = 45.0          # boundary ring radius
@@ -622,6 +623,8 @@ MAX_GATES = 5                 # corner posts per direction — a real TRACON
 MIN_GATES = 4                 # works four to six, and the scope has to read
 NEIGHBOR_BAND_NM = (8.0, 35.0)  # a nearby major is a metroplex neighbour —
                                 # its traffic you see but never work
+CALM_KT = 8.0                 # under this, a curated calm-wind preference
+                              # takes the flow instead of the coin toss
 _NAV_RANK = {"VORTAC": 0, "VOR-DME": 0, "VOR": 0, "TACAN": 1,
              "NDB-DME": 2, "NDB": 3, "DME": 4}
 
@@ -649,6 +652,11 @@ def build_sector(airport):
     A real approach control rarely works one field: the nearest airport
     with a jet runway inside the sector becomes the satellite, and some
     of the traffic is theirs.
+
+    A few fields carry a hand-curated profile (``game/profiles.py``) —
+    the habits the data can't derive: which parallel really lands, whose
+    satellite it really is, where the wind has to be before the flow
+    turns.  Everything a profile doesn't say plays exactly as generated.
     """
     from blips._airports import airports_near, fixes_near, navaids_near
     from blips.game.procedures import flow_gates
@@ -734,12 +742,19 @@ def build_sector(airport):
         want.append(name)
 
     # the satellite is a minor field you also work; a major nearby is not
-    # yours at all — it's a metroplex neighbour, so keep the two apart
+    # yours at all — it's a metroplex neighbour, so keep the two apart.
+    # A curated profile may pin the satellite by name — actual ownership
+    # instead of nearest-wins — as long as the field is really there
     sat_apt = None
-    for _dist, ap in airports_near(lat, lon, 10.0, 34.0):
-        if ap["icao"] != airport["icao"] and not ap["large"]:
-            sat_apt = ap
-            break
+    pin = profile_for(airport["icao"]).get("sat")
+    if pin and pin != airport["icao"]:
+        sat_apt = next((ap for _dist, ap in airports_near(lat, lon, 0.0, 34.0)
+                        if ap["icao"] == pin), None)
+    if sat_apt is None:
+        for _dist, ap in airports_near(lat, lon, 10.0, 34.0):
+            if ap["icao"] != airport["icao"] and not ap["large"]:
+                sat_apt = ap
+                break
 
     # neighbouring majors: their traffic flies its own procedures and you
     # navigate around it, the way a TRACON works one position beside others
@@ -792,9 +807,27 @@ def _flow_ends(airport, end):
     and both ends flip together on a flow change — one wind, one
     direction.  A single-runway field lands and departs the same
     pavement, so the two ends coincide and everything downstream reads
-    the one it means."""
+    the one it means.
+
+    A curated profile can override which parallel does what: Tampa's
+    runway-use program lands the *shorter* parallel in south flow, and
+    no tape measure will ever say so.  The profile names end idents, one
+    per flow, and the one flowing today's way wins; idents the data
+    doesn't carry drop back to the heuristic, so a stale profile
+    degrades instead of crashing the sector."""
     runway = airport["rwys"][0]                    # longest, by build sort
     ident, course, thr = _end_geometry(airport, runway, end)
+    prof = profile_for(airport["icao"])
+    if prof.get("arr") and prof.get("dep"):
+        arr = _profiled_geometry(airport, prof["arr"], course)
+        dep = _profiled_geometry(airport, prof["dep"], course)
+        if arr is not None and dep is not None:
+            aident, acourse, athr, arwy = arr
+            dident, dcourse, dthr, drwy = dep
+            return {"rwy": aident, "course": acourse, "thr": athr,
+                    "end": end, "dep_rwy": dident, "dep_course": dcourse,
+                    "dep_thr": dthr, "dep_len": drwy["len"],
+                    "parallel": arwy is not drwy}
     partner = _parallel_partner(airport, runway)
     if partner is None:
         return {"rwy": ident, "course": course, "thr": thr, "end": end,
@@ -806,6 +839,33 @@ def _flow_ends(airport, end):
     return {"rwy": ident, "course": course, "thr": thr, "end": end,
             "dep_rwy": dident, "dep_course": dcourse, "dep_thr": dthr,
             "dep_len": partner["len"], "parallel": True}
+
+
+def _profiled_geometry(airport, idents, course):
+    """The curated runway end flowing today's way — ident, course,
+    threshold and the runway it belongs to — or None when no listed
+    ident lies within a quarter turn of the flow (or the data simply
+    doesn't have it)."""
+    for rwy in airport["rwys"]:
+        for e in ("le", "he"):
+            gid, gcourse, gthr = _end_geometry(airport, rwy, e)
+            if (gid in idents and gcourse is not None
+                    and abs(turn_delta(gcourse, course)) <= 90.0):
+                return gid, gcourse, gthr, rwy
+    return None
+
+
+def _prefer_end(airport, ident):
+    """The le/he flow key of a curated calm-wind end.  The ident is
+    matched on the longest runway because its ends *define* the flow;
+    an ident the data doesn't carry means no preference at all."""
+    if not ident:
+        return None
+    runway = airport["rwys"][0]
+    for e in ("le", "he"):
+        if _end_geometry(airport, runway, e)[0] == ident:
+            return e
+    return None
 
 
 def _sat_end(sat_apt, main_course):
@@ -867,6 +927,10 @@ class Sim:
                  schedule=None, calm=False):
         self.airport = airport
         self.sector = build_sector(airport)
+        # the field's own habits, if it has any — an empty dict means
+        # every default below plays exactly as generated
+        self.profile = profile_for(airport["icao"])
+        self._prefer = _prefer_end(airport, self.profile.get("prefer"))
         self.rng = random.Random(seed)
         self.pool = pool         # live-sampled traffic, or None when offline
         self.terrain = terrain   # sector MVA grid, or None for a flat world
@@ -943,16 +1007,37 @@ class Sim:
             self._next_flow = max(self._next_flow, self.calm_until + 120.0)
             self._next_abnormal = max(self._next_abnormal, self.calm_until)
         self.wind = (360.0, 0.0)
-        self._set_wind()
+        self._set_wind(turn_home=True)
         self._say_atis()         # the shift opens with the numbers
         self._prepopulate()      # a shift starts mid-shift, not empty
 
-    def _set_wind(self):
-        """A wind that favours today's runway, held for the whole flow."""
-        course = self.sector["course"]
-        direction = round((course + self.rng.uniform(-40.0, 40.0))
-                          % 360.0 / 10.0) * 10 % 360
-        self.wind = (float(direction or 360), float(self.rng.randint(6, 16)))
+    def _set_wind(self, turn_home=False):
+        """A wind that favours today's runway, held for the whole flow.
+
+        A field with a curated calm-wind preference draws the speed
+        first: light air doesn't get to pick the flow — Heathrow sits on
+        the 27s until the wind insists otherwise.  ``turn_home`` marks
+        the calls where the flow is genuinely up for grabs (the shift's
+        open, a flow change); an in-place ATIS refresh keeps its
+        promise of same runway, new numbers."""
+        if self._prefer is None:
+            course = self.sector["course"]
+            direction = round((course + self.rng.uniform(-40.0, 40.0))
+                              % 360.0 / 10.0) * 10 % 360
+            self.wind = (float(direction or 360),
+                         float(self.rng.randint(6, 16)))
+        else:
+            speed = float(self.rng.randint(6, 16))
+            if (turn_home and speed < CALM_KT
+                    and self.sector["end"] != self._prefer):
+                self.sector.update(_flow_ends(self.airport, self._prefer))
+                if self.sector["sat_apt"] is not None:
+                    self.sector["sat"] = _sat_end(self.sector["sat_apt"],
+                                                  self.sector["course"])
+            course = self.sector["course"]
+            direction = round((course + self.rng.uniform(-40.0, 40.0))
+                              % 360.0 / 10.0) * 10 % 360
+            self.wind = (float(direction or 360), speed)
         # aloft the wind turns and strengthens — veering with height in the
         # northern hemisphere, backing in the southern, two to three-and-a-
         # half times the surface speed by the top of the gradient
@@ -1527,8 +1612,14 @@ class Sim:
         initial sits a full thousand under the main flow's — or, where
         the satellite is perched too high for 'under' to clear its own
         pattern, a thousand over instead.  Rounding each field from its
-        own elevation broke the split at roughly one sector in eight."""
-        main = float(round((self.sector["elev"] + 3000) / 1000) * 1000)
+        own elevation broke the split at roughly one sector in eight.
+
+        A curated profile may name the main field's level-off (Heathrow
+        SIDs cap at 6,000, whatever the elevation says); the satellite's
+        split is derived from that same number, so the override rides
+        the invariant instead of dodging it."""
+        main = float(self.profile.get("initial")
+                     or round((self.sector["elev"] + 3000) / 1000) * 1000)
         if sat is None:
             return main
         below = main - 1000.0
@@ -1568,9 +1659,15 @@ class Sim:
         # the LOA's jet routes; a piston pottering to its exit is exempt
         note = ""
         if self.rng.random() < 0.35 and perf[0] >= 200:
-            ac["xr"] = 1000.0 * round(
-                (self.airport["elev"]
-                 + self.rng.choice((7000.0, 9000.0, 11000.0))) / 1000.0)
+            # a curated field's LOA names its own numbers; everywhere
+            # else centre wants the generic seven, nine or eleven
+            # thousand above the field
+            menu = self.profile.get("xr")
+            ac["xr"] = (float(self.rng.choice(menu)) if menu
+                        else 1000.0 * round(
+                            (self.airport["elev"]
+                             + self.rng.choice((7000.0, 9000.0, 11000.0)))
+                            / 1000.0))
             note = f" — centre wants {say_altitude(ac['xr'])} crossing it"
         if dest:
             ac["to"] = dest[0]   # the far city, kept for the hover chip
@@ -2398,16 +2495,28 @@ class Sim:
             self._set_wind()
             self._say_atis(update=True)
             return
-        new_end = "he" if self.sector["end"] == "le" else "le"
+        old_end = self.sector["end"]
+        new_end = "he" if old_end == "le" else "le"
+        # a curated preference leans on the roll: most winds that would
+        # turn the field away from its favoured end just shift in place
+        # instead — Heathrow doesn't go easterly every other ATIS
+        if (self._prefer is not None and new_end != self._prefer
+                and self.rng.random() < 0.65):
+            new_end = old_end
         # both ends of a parallel pair flip together — one wind, one
         # direction; a single runway simply turns around
         self.sector.update(_flow_ends(self.airport, new_end))
+        self._set_wind(turn_home=True)   # the wind that turned the airport —
+                                         # or, come up calm, swung it home
+        if self.sector["end"] == old_end:
+            # the runway held after all: an update, not a turn
+            self._say_atis(update=True)
+            return
         ident, course, thr = (self.sector["rwy"], self.sector["course"],
                               self.sector["thr"])
         if self.sector["sat_apt"] is not None:
             self.sector["sat"] = _sat_end(self.sector["sat_apt"], course)
         self.sector_rev += 1
-        self._set_wind()         # the wind that turned the airport
         self._say_atis(update=True)
         for ac in self.aircraft:
             if ac["plan"] != "arrival":

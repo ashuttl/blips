@@ -11,7 +11,7 @@ from blips._geo import (
 )
 from blips.game.sim import (
     PERF, SECTOR_NM, SEP_FT, WX_CLEAR, WX_DEVIATE, Sim, _commandable,
-    _controlled, build_sector, say_runway,
+    _controlled, _flow_ends, build_sector, say_runway,
 )
 
 
@@ -405,7 +405,7 @@ def test_vertical_separation_is_enough(sim):
 
 # -- the sector ---------------------------------------------------------------
 
-def test_sector_is_deterministic_per_airport():
+def test_sector_is_deterministic_per_airport(monkeypatch):
     ap = find_airport("tpa")
     s1, s2 = build_sector(ap), build_sector(ap)
     assert s1["fixes"] == s2["fixes"]   # TPA's corner posts never move
@@ -415,6 +415,16 @@ def test_sector_is_deterministic_per_airport():
     for lat, lon in s1["fixes"].values():
         d = haversine_nm(lat, lon, ap["lat"], ap["lon"])
         assert 11.0 < d < 76.0          # searched band, or a published post
+    # and an unprofiled field can't tell the profile table exists: with
+    # the table emptied outright, its sector and its opening wind come
+    # out identical — the feature is invisible everywhere it isn't asked for
+    from blips.game import profiles
+    sea = find_airport("ksea")
+    with_table = build_sector(sea)
+    wind_with = Sim(sea, seed=3).wind
+    monkeypatch.setattr(profiles, "PROFILES", {})
+    assert build_sector(sea) == with_table
+    assert Sim(sea, seed=3).wind == wind_with
 
 
 def test_sector_gates_are_real_navaids_where_possible():
@@ -504,6 +514,99 @@ def test_single_and_crossing_runway_fields_are_unchanged():
         assert s["dep_rwy"] == s["rwy"]
         assert s["dep_thr"] == s["thr"]
         assert s["dep_course"] == s["course"]
+
+
+# -- airport operations profiles ----------------------------------------------
+
+class _Gale:
+    """A scriptable stand-in for the sim's rng: a wind speed you dial,
+    a queue of random() rolls, everything else down the middle."""
+    def __init__(self, kt, rolls=()):
+        self.kt, self.rolls = kt, list(rolls)
+
+    def randint(self, a, b):
+        return self.kt
+
+    def uniform(self, a, b):
+        return (a + b) / 2.0
+
+    def random(self):
+        return self.rolls.pop(0) if self.rolls else 1.0
+
+    def choice(self, seq):
+        return seq[0]
+
+
+def test_calm_wind_takes_a_profiled_field_to_its_preferred_end():
+    # Heathrow's westerly preference: light air doesn't get to turn the
+    # field easterly — and a wind with an opinion still does.
+    ap = find_airport("egll")
+    s = Sim(ap, seed=1)
+    assert s._prefer == "he"                        # the 27s
+    s.sector.update(_flow_ends(ap, "le"))           # parked easterly
+    s.rng = _Gale(6)                                # under the calm line
+    s._set_wind(turn_home=True)
+    assert s.sector["rwy"] == "27R" and s.sector["dep_rwy"] == "27L"
+    s.sector.update(_flow_ends(ap, "le"))
+    s.rng = _Gale(15)                               # a real easterly
+    s._set_wind(turn_home=True)
+    assert s.sector["rwy"] == "09L"                 # preference ignored
+
+
+def test_flow_change_rolls_lean_back_toward_the_preference():
+    # most winds that would turn Heathrow easterly just shift in place:
+    # the letter advances, the 27s keep the flow, nobody is re-vectored
+    s = Sim(find_airport("egll"), seed=1)
+    s.sector.update(_flow_ends(s.airport, "he"))    # on the westerlies
+    rev = s.sector_rev
+    s.rng = _Gale(15, rolls=(0.9, 0.5))   # no hold; the habit wins the lean
+    s._next_flow = 0.0
+    s._flow_tick(1.0)
+    assert s.sector["rwy"] == "27R" and s.sector_rev == rev
+    s.rng = _Gale(15, rolls=(0.9, 0.9))   # no hold; the habit loses
+    s._next_flow = 0.0
+    s._flow_tick(1.0)
+    assert s.sector["rwy"] == "09L" and s.sector_rev == rev + 1
+
+
+def test_profile_lands_tampas_shorter_parallel_in_south_flow():
+    # Tampa's runway-use program, not the tape measure: south flow rolls
+    # its turbojet departures down the long 19R and lands 19L — the
+    # 8,300-footer — which longest-lands would get exactly backwards.
+    ap = find_airport("ktpa")
+    south = _flow_ends(ap, "le")
+    assert south["rwy"] == "19L" and south["dep_rwy"] == "19R"
+    assert south["dep_len"] == 11002        # the long one departs
+    assert south["parallel"]
+    north = _flow_ends(ap, "he")            # ...and north flow lands it
+    assert north["rwy"] == "01L" and north["dep_rwy"] == "01R"
+
+
+def test_profiled_initial_rides_the_loa_invariant():
+    # Heathrow SIDs cap the climb at 6,000 whatever the elevation says,
+    # and Farnborough's number is derived from that same figure — the
+    # thousand-foot split survives the override by construction.
+    s = Sim(find_airport("egll"), seed=1)
+    assert s._initial_alt() == 6000.0
+    assert abs(s._initial_alt() - s._initial_alt(s.sector["sat"])) >= 1000.0
+
+
+def test_pinned_satellites_land_where_the_profile_says():
+    # PWM's pin agrees with the search — which is the point: it's now
+    # documentation — and EGLL's names Farnborough outright.
+    assert build_sector(find_airport("kpwm"))["sat_apt"]["icao"] == "KBXM"
+    assert build_sector(find_airport("egll"))["sat_apt"]["icao"] == "EGLF"
+
+
+def test_profiled_xr_menu_replaces_the_generic_pick():
+    # centre's numbers at a curated field are the profile's, not the
+    # seven/nine/eleven-above-the-field default
+    s = Sim(find_airport("egll"), seed=2)
+    s.aircraft.clear()
+    for _ in range(40):
+        s._spawn_departure()
+    xrs = {a["xr"] for a in s.aircraft if "xr" in a}
+    assert xrs and xrs <= {10000.0, 12000.0}
 
 
 def test_departures_roll_the_departure_parallel(sim):
