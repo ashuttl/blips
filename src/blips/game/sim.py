@@ -22,8 +22,8 @@ import random
 import time
 
 from blips._commands import (
-    CommandError, parse, resolve_callsign, say_altitude, say_digits,
-    telephony,
+    CommandError, airline_name, parse, resolve_callsign, say_altitude,
+    say_digits, telephony,
 )
 from blips._airports import find_airport
 from blips._geo import (
@@ -143,6 +143,25 @@ def _wake_size(actype):
 def _wake_cat(actype):
     """The leader's side: the category whose wake you'd be riding."""
     return WAKE.get(actype) or _wake_size(actype)
+
+
+# how a pilot names the traffic they're following on a visual — the
+# airframe families a windscreen actually tells apart; the rest is
+# honestly just "traffic"
+_TYPE_WORDS = (
+    ("B73", "seven thirty-seven"), ("B74", "seven forty-seven"),
+    ("B75", "seven fifty-seven"), ("B76", "seven sixty-seven"),
+    ("B77", "triple seven"), ("B78", "seven eighty-seven"),
+    ("A38", "A380"), ("A22", "A220"), ("A3", "Airbus"),
+    ("E1", "E-Jet"), ("E2", "E-Jet"), ("CRJ", "CRJ"),
+)
+
+
+def _type_word(actype):
+    for pfx, word in _TYPE_WORDS:
+        if actype.startswith(pfx):
+            return word
+    return "traffic"
 
 # longest runway (ft) a type realistically uses — the spawner won't cast an
 # arrival or departure onto a field whose longest runway can't take it, so a
@@ -2306,28 +2325,64 @@ class Sim:
             ac["tgt_ias"] = max(float(ac["perf"][1]), spd)
 
     def _fly_ils(self, ac):
-        """Capture and ride the localizer, then the glideslope, then land."""
+        """Capture and ride the localizer, then the glideslope, then land.
+
+        A visual (``ac["vis"]``) is the same machine relaxed: the pilot
+        maneuvers themselves onto a plausible final instead of waiting to
+        cross a needle, descending on their own profile the whole way.
+        """
         cross, along = cross_along_track(ac["lat"], ac["lon"],
                                          ac["thr"][0], ac["thr"][1],
                                          ac["course"])
         if ac["phase"] == "cleared":
-            # lead the turn: capture when starting a standard-rate turn
-            # *now* would roll out on the localizer — so a sane intercept
-            # vector (anything under ~90° across) locks on without the
-            # player having to thread a needle
             theta = abs(turn_delta(ac["hdg"], ac["course"]))
-            turn_radius = ac["gs"] / 188.5           # nm, standard rate
-            lead = turn_radius * (1.0 - math.cos(
-                math.radians(min(theta, 90.0)))) + 0.2
-            window = lead if theta < 90.0 else 0.45
-            if abs(cross) < window and along > 0.5 and theta < 110.0:
-                ac["phase"] = "established"
-                ac["turn_dir"] = None
-                self.say(f"{hail(ac)} established, "
-                         f"runway {say_runway(ac['rwy'])}", "pilot",
-                         voice=ac["callsign"])
+            if ac.get("vis"):
+                # a visual has no needle to thread: the pilot aims at a
+                # join point on the final — shortening inside the localizer
+                # where the geometry makes sense — and rolls onto it with
+                # a leading turn from as much as a base-leg angle
+                turn_radius = ac["gs"] / 188.5           # nm, standard rate
+                vlead = min(0.9, turn_radius * (1.0 - math.cos(
+                    math.radians(min(theta, 130.0)))) + 0.3)
+                if not (abs(cross) < vlead and along > 0.7
+                        and theta < 130.0):
+                    join = max(2.0, along - max(1.5, 1.2 * abs(cross)))
+                    jlat, jlon = advance(ac["thr"][0], ac["thr"][1],
+                                         (ac["course"] + 180.0) % 360.0,
+                                         join)
+                    ac["tgt_hdg"] = bearing_to(ac["lat"], ac["lon"],
+                                               jlat, jlon)
+                    ac["turn_dir"] = None
+                    # descend on a normal visual profile toward the field
+                    path = math.hypot(cross, along - join) + join
+                    elev = ac.get("felev", self.sector["elev"])
+                    prof = elev + path * GS_FT_PER_NM
+                    if prof < ac["alt"]:
+                        ac["tgt_alt"] = max(elev, prof)
+                    if not ac.get("spd_pin"):
+                        if path < 6.0:
+                            ac["tgt_ias"] = float(ac["perf"][2])
+                        elif ac["tgt_ias"] > 190.0:
+                            ac["tgt_ias"] = 180.0
+                    return
             else:
-                return
+                # lead the turn: capture when starting a standard-rate turn
+                # *now* would roll out on the localizer — so a sane intercept
+                # vector (anything under ~90° across) locks on without the
+                # player having to thread a needle
+                turn_radius = ac["gs"] / 188.5           # nm, standard rate
+                lead = turn_radius * (1.0 - math.cos(
+                    math.radians(min(theta, 90.0)))) + 0.2
+                window = lead if theta < 90.0 else 0.45
+                if not (abs(cross) < window and along > 0.5
+                        and theta < 110.0):
+                    return
+            ac["phase"] = "established"
+            ac["turn_dir"] = None
+            word = "turning final" if ac.get("vis") else "established"
+            self.say(f"{hail(ac)} {word}, "
+                     f"runway {say_runway(ac['rwy'])}", "pilot",
+                     voice=ac["callsign"])
         # established: track the centreline with a proportional nudge…
         ac["tgt_hdg"] = (ac["course"]
                          + max(-30.0, min(30.0, -cross * 40.0))) % 360.0
@@ -2491,6 +2546,66 @@ class Sim:
             worst = max(worst, self.wx_sample(plat, plon) or 0.0)
             d += step_nm
         return worst
+
+    def _spot_field(self, ac, thr):
+        """Roll for the field in sight — the gate on a visual approach.
+
+        With the weather layer off the sky is VMC everywhere and the roll
+        always succeeds.  Otherwise range, height and the radar between
+        them and the field decide: a heavy cell on the sight line is an
+        honest "negative contact", and a crew that's already looking gets
+        another, better look when you ask again.
+        """
+        if self.wx_sample is None:
+            return True
+        dist = haversine_nm(ac["lat"], ac["lon"], thr[0], thr[1])
+        to_fld = bearing_to(ac["lat"], ac["lon"], thr[0], thr[1])
+        between = self._wx_worst(ac["lat"], ac["lon"], to_fld, 0.0, dist)
+        if between >= WX_DEVIATE:
+            return False        # IMC between them and the field
+        p = (0.95 if dist < 8.0 else 0.8 if dist < 15.0
+             else 0.4 if dist < 22.0 else 0.15)
+        agl = ac["alt"] - ac.get("felev", self.sector["elev"])
+        if agl < 2500.0 and dist > 10.0:
+            p -= 0.25           # low and far: the haze owns the horizon
+        p -= between            # any echo on the line dims the view
+        if ac.get("looking_since") is not None:
+            p += 0.3            # they've been looking since you last asked
+        return self.rng.random() < min(0.98, max(0.02, p))
+
+    def _follow_lead(self, ac, rwy, thr):
+        """The traffic to follow on a visual, as a spoken lead-in phrase.
+
+        An arrival established (or maneuvering visually) ahead on the same
+        runway within ~8 nm gets named in the readback, and the pair goes
+        into the follower's ``visual`` set: sighted traffic is visual
+        separation — the 3 nm rule stops applying between them, while the
+        wake matrix on final still bites exactly as before.
+        """
+        best = None
+        my_d = haversine_nm(ac["lat"], ac["lon"], thr[0], thr[1])
+        for t in self.aircraft:
+            if t is ac or not _controlled(t) or t["plan"] != "arrival":
+                continue
+            if t.get("rwy") != rwy:
+                continue
+            if not (t["phase"] == "established"
+                    or (t["phase"] == "cleared" and t.get("vis"))):
+                continue
+            gap = haversine_nm(ac["lat"], ac["lon"], t["lat"], t["lon"])
+            lead_d = haversine_nm(t["lat"], t["lon"], thr[0], thr[1])
+            if lead_d >= my_d or gap > 8.0:
+                continue
+            if best is None or gap < best[0]:
+                best = (gap, t)
+        if best is None:
+            return ""
+        leader = best[1]
+        ac.setdefault("visual", set()).add(leader["hex"])
+        who = airline_name(leader["callsign"])
+        desc = (f"the {who} {_type_word(leader['actype'])}" if who
+                else "the traffic ahead")
+        return f"following {desc}, "
 
     def _weather_tick(self, dt):
         """Pilots don't fly into cells: they ask, then they act."""
@@ -2989,6 +3104,9 @@ class Sim:
         self.conflicts = []
         for i, a in enumerate(yours):
             for b in yours[i + 1:]:
+                if (b["hex"] in a.get("visual", ())
+                        or a["hex"] in b.get("visual", ())):
+                    continue     # visual separation: the pilot has them
                 if abs(a["alt"] - b["alt"]) >= SEP_FT:
                     continue
                 if haversine_nm(a["lat"], a["lon"],
@@ -3041,6 +3159,9 @@ class Sim:
             for b in yours[i + 1:]:
                 if a["emergency"] and b["emergency"]:
                     continue     # already lost; solid red says so
+                if (b["hex"] in a.get("visual", ())
+                        or a["hex"] in b.get("visual", ())):
+                    continue     # sighted traffic never blinks
                 if (a["phase"] == "established"
                         and b["phase"] == "established"):
                     continue
@@ -3450,7 +3571,8 @@ class Sim:
             ac["phase"] = "hold"
             ac["nav"] = ac["via_name"] = None
             return f"hold {where}, right turns"
-        if kind == "ils":
+        if kind in ("ils", "visual"):
+            vis = kind == "visual"
             if ac["plan"] != "arrival":
                 raise CommandError(f"unable — {me} is a departure")
             # a satellite arrival gets its own field's approach — the
@@ -3489,8 +3611,10 @@ class Sim:
             # where the sim can fly it (a straight-in RNAV rides this same
             # final course and slope, so an RNAV-only field plays true).
             # A field the data can't speak for keeps its ILS everywhere.
-            appr = approach_to(apt["icao"], rwy)
+            # A visual needs none of it — no plates, just eyes — which is
+            # the point of visuals: the one clearance that's always real.
             appr_word = "ILS"
+            appr = None if vis else approach_to(apt["icao"], rwy)
             if appr is not None and appr != "ILS":
                 ends = approach_ends(apt["icao"]) or {}
                 ils_at = sorted(e for e in ends if ends[e] & {"I", "L"})
@@ -3515,10 +3639,36 @@ class Sim:
                         f"that's {an} {appr} approach; the ILS serves "
                         f"runway {say_runway(steer)}")
                 appr_word = appr
-            # hopeless geometry gets a puzzled pilot, not a wasted clearance
+            # hopeless geometry gets a puzzled pilot, not a wasted
+            # clearance — a visual is judged against the field, not the
+            # localizer, so a tight base abeam the threshold that the ILS
+            # calls "inside the marker" is honest visual geometry
             cross, along = cross_along_track(ac["lat"], ac["lon"],
                                              thr[0], thr[1], course)
             theta = abs(turn_delta(ac["hdg"], course))
+            if vis:
+                dist = haversine_nm(ac["lat"], ac["lon"], thr[0], thr[1])
+                to_fld = bearing_to(ac["lat"], ac["lon"], thr[0], thr[1])
+                if dist < 1.5:
+                    raise CommandError(f"unable — {me} is right on top of "
+                                       "the field, vector us back around")
+                if abs(turn_delta(ac["hdg"], to_fld)) > 100.0:
+                    raise CommandError(f"unable — the field's behind {me}, "
+                                       "give us a vector first")
+                # the field in sight comes before the clearance; a crew
+                # that can't spot it keeps looking, and a re-ask may catch
+                # it once they've had a minute of windshield time
+                if not ac.get("field_seen") and not self._spot_field(ac,
+                                                                     thr):
+                    ac["looking_since"] = self._elapsed
+                    return "field not in sight, we're looking"
+                ac["field_seen"] = True
+                lead_in = self._follow_lead(ac, rwy, thr)
+                ac.update(phase="cleared", vis=True, rwy=rwy, course=course,
+                          thr=thr, tower_handoff=None, wake_warned=False,
+                          spd_pin=False, nav=None, via_name=None)
+                return (f"field in sight, {lead_in}cleared visual approach "
+                        f"runway {say_runway(rwy)}")
             if along < 1.0:
                 raise CommandError(f"unable — {me} is inside the marker, "
                                    "vector us back around")
@@ -3534,9 +3684,9 @@ class Sim:
                     raise CommandError(
                         f"unable — there's a cell on the final for "
                         f"{say_runway(rwy)}, {me} needs vectors around it")
-            ac.update(phase="cleared", rwy=rwy, course=course, thr=thr,
-                      tower_handoff=None, wake_warned=False, spd_pin=False,
-                      nav=None, via_name=None)
+            ac.update(phase="cleared", vis=False, rwy=rwy, course=course,
+                      thr=thr, tower_handoff=None, wake_warned=False,
+                      spd_pin=False, nav=None, via_name=None)
             return f"cleared {appr_word} runway {say_runway(rwy)} approach"
         if kind == "handoff":
             if ac["plan"] != "departure":

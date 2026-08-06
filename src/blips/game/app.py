@@ -66,6 +66,7 @@ HINT_TOKENS = (
     [("via PROC", "hint")],
     [("hold [FIX]", "hint")],
     [("i [rwy]", "hint")],
+    [("v visual", "hint")],
     [("tfc", "hint")],
     [("ho handoff", "hint")],
     [("^L", "key"), (" log", "hint")],
@@ -153,6 +154,8 @@ def help_lines(page, example=None, rwy=None):
                                "right turns"),
         _kv(f"i / i {rwy}", "cleared ILS approach — how an arrival "
                             "leaves you"),
+        _kv(f"v / v {rwy}", "cleared visual — needs the field in sight "
+                            "first"),
         _kv("tfc", "traffic call — points out the nearest VFR target"),
         _kv("ho", "handoff — near the exit fix, banks a departure"),
         [("  e.g.  ", "text"), (f"{example} l 230 d 60", "key"),

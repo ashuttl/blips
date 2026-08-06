@@ -749,6 +749,134 @@ def test_flow_holds_at_a_field_with_one_ils():
     assert s._atis_n == letter + 1
 
 
+# -- visual approaches: the field in sight, then the flying is theirs ----------
+
+def _on_final(sim, callsign, actype, nm, established=True):
+    """One arrival on the final approach course, established unless a
+    test wants it fresh and still to be cleared."""
+    thr, course = sim.sector["thr"], sim.sector["course"]
+    lat, lon = advance(*thr, (course + 180.0) % 360.0, nm)
+    ac = _arrival(sim, callsign=callsign, lat=lat, lon=lon,
+                  alt=sim.airport["elev"] + nm * 300.0, hdg=course,
+                  ias=170.0, actype=actype)
+    if established:
+        ac["phase"] = "established"
+    return ac
+
+
+def test_visual_sighted_cleared_lands_and_scores_like_an_ils(sim):
+    # weather off is VMC everywhere: the field is sighted, the clearance
+    # reads back in full, and the landing pays exactly what the ILS pays
+    thr, course = sim.sector["thr"], sim.sector["course"]
+    lat, lon = advance(*thr, (course + 180.0) % 360.0, 12.0)
+    ac = _arrival(sim, lat=lat, lon=lon, alt=3000.0, hdg=course, ias=200.0)
+    line = sim.command("100 v")
+    assert "field in sight" in line.lower()
+    assert "cleared visual approach runway" in line.lower()
+    _run(sim, 60)
+    assert ac["phase"] == "established"
+    assert any("turning final" in line for _t, line, _k in sim.radio)
+    _run(sim, 600)
+    assert ac not in sim.aircraft
+    assert sim.landed == 1
+    assert sim.score == 100
+
+
+def test_visual_needs_the_field_in_sight(sim):
+    # a heavy cell between them and the field is an honest negative
+    # contact; when the weather moves off, the re-ask finds the field
+    thr, course = sim.sector["thr"], sim.sector["course"]
+    lat, lon = advance(*thr, (course + 180.0) % 360.0, 12.0)
+    ac = _arrival(sim, lat=lat, lon=lon, alt=3000.0, hdg=course, ias=200.0)
+    sim.wx_sample = lambda lat, lon: 0.9
+    line = sim.command("100 v")
+    assert "not in sight" in line and "looking" in line
+    assert ac["phase"] == "cruise"              # no clearance issued
+    sim.wx_sample = None                        # the cell moves off: VMC
+    line = sim.command("100 v")
+    assert "field in sight" in line.lower()
+    assert ac["phase"] == "cleared"
+
+
+def test_a_crew_thats_looking_gets_a_better_second_look(sim):
+    # "we're looking" is remembered: the same murk, the same roll, and
+    # the re-ask succeeds because they've had windshield time on it
+    thr, course = sim.sector["thr"], sim.sector["course"]
+    lat, lon = advance(*thr, (course + 180.0) % 360.0, 12.0)
+    ac = _arrival(sim, lat=lat, lon=lon, alt=3000.0, hdg=course, ias=200.0)
+    sim.wx_sample = lambda lat, lon: 0.4        # murk, not a wall
+    sim.rng.random = lambda: 0.45               # a roll the first look misses
+    assert "looking" in sim.command("100 v")
+    line = sim.command("100 v")                 # still looking: better odds
+    assert "field in sight" in line.lower()
+    assert ac["phase"] == "cleared"
+
+
+def test_visual_follows_the_traffic_and_the_gap_is_the_pilots(sim):
+    # a Southwest 737 on final at 5 nm, the follower cleared 2.5 behind:
+    # the readback names the traffic, and in-trail inside 3 nm is legal —
+    # sighted traffic is visual separation, the pilot's to keep
+    leader = _on_final(sim, "SWA1234", "B738", 5.0)
+    follower = _on_final(sim, "DAL100", "B738", 7.5, established=False)
+    line = sim.command("100 v")
+    assert "following the southwest seven thirty-seven" in line.lower()
+    assert leader["hex"] in follower["visual"]
+    _run(sim, 30)
+    assert follower["phase"] == "established"
+    assert sim.busts == 0                       # 2.5 nm in trail, and legal
+
+
+def test_visual_behind_a_heavy_still_pays_the_wake_miles(sim):
+    # visual separation waives the 3 nm rule, never the wake matrix:
+    # four miles behind the triple seven is still a go-around
+    _on_final(sim, "BAW12", "B77W", 5.0)
+    follower = _on_final(sim, "DAL100", "B738", 9.0, established=False)
+    line = sim.command("100 v")
+    assert "following the speedbird triple seven" in line.lower()
+    _run(sim, 30)
+    assert follower["phase"] == "cruise"        # waved off by the wake
+    assert sim.go_arounds == 1
+    assert sim.busts == 0
+
+
+def test_visual_to_the_departure_parallel_teaches(sim):
+    ac = _arrival(sim)
+    line = sim.command(f"100 v {sim.sector['dep_rwy']}")
+    assert "departing traffic today" in line
+    assert ac["phase"] == "cruise"              # no clearance issued
+
+
+def test_visual_flies_the_base_the_ils_calls_hopeless(sim):
+    # abeam the threshold on a four-mile base — "inside the marker" to the
+    # ILS — a visual pilot just turns a tight final and lands
+    thr, course = sim.sector["thr"], sim.sector["course"]
+    lat, lon = advance(*thr, (course + 180.0) % 360.0, 0.5)
+    lat, lon = advance(lat, lon, (course + 90.0) % 360.0, 4.0)
+    ac = _arrival(sim, lat=lat, lon=lon, alt=2000.0,
+                  hdg=(course - 60.0) % 360.0, ias=180.0)
+    assert "inside the marker" in sim.command("100 i")
+    line = sim.command("100 v")
+    assert "cleared visual approach" in line.lower()
+    _run(sim, 420)
+    assert sim.go_arounds == 0
+    assert ac not in sim.aircraft               # around the corner and down
+    assert sim.landed == 1
+
+
+def test_visual_needs_no_plates():
+    # Teterboro's runway 1 has nothing straight-in published, so `i 1`
+    # refuses honestly — but a visual needs eyes, not plates: it's the
+    # one clearance that's always real
+    s = _quiet("kteb")
+    ap = s.airport
+    lat, lon = advance(ap["lat"], ap["lon"], 180.0, 10.0)
+    ac = _arrival(s, lat=lat, lon=lon, alt=3000.0, hdg=360.0, ias=200.0)
+    assert "no instrument approach" in s.command("100 i 1").lower()
+    line = s.command("100 v 1")
+    assert "cleared visual approach runway one" in line.lower()
+    assert ac["phase"] == "cleared"
+
+
 def test_metroplex_has_uncontrolled_neighbors():
     # New York is the textbook case: JFK works beside LGA and EWR.
     s = build_sector(find_airport("kjfk"))

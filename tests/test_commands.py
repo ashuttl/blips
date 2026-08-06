@@ -44,6 +44,15 @@ def test_bare_ils_and_bare_s():
     assert ins == [{"kind": "ils", "rwy": None}, {"kind": "speed", "kt": None}]
 
 
+def test_visual_parses_like_the_ils():
+    _, ins = parse("55 v 19l")
+    assert ins == [{"kind": "visual", "rwy": "19L"}]
+    _, ins = parse("55 v")
+    assert ins == [{"kind": "visual", "rwy": None}]
+    _, ins = parse("55 visual 27")
+    assert ins == [{"kind": "visual", "rwy": "27"}]
+
+
 def test_via_procedure():
     _, ins = parse("55 via cdogg4")
     assert ins == [{"kind": "procedure", "name": "CDOGG4"}]

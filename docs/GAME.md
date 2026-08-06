@@ -81,6 +81,7 @@ A command is a callsign followed by one or more instructions, chained:
 | `via CDOGG4`        | join a named SID/STAR — it flies the fixes itself |
 | `hold` / `hold LAL` | hold present position / at a fix, right turns  |
 | `i` / `i 19L`       | cleared approach — the ILS, or where none exists the runway's real one (active runway, or say which) |
+| `v` / `v 19L`       | cleared visual approach — needs the field in sight first, so VMC only |
 | `tfc`               | traffic call — points out the nearest VFR target   |
 | `ho`                | handoff — near their exit fix, this banks a departure |
 
@@ -384,8 +385,29 @@ field never turns onto its bare end — the wind shifts in place and the
 ATIS letter advances with the runway held. Military fields keep their
 approaches in the DoD FLIP and foreign fields are off the public CIFP,
 so there — and at the few circling-only fields like Aspen — the scope
-keeps its old assumption that every end has an ILS. Charted visuals and
-the curving kind of RNAV wait for the visual-approach work.
+keeps its old assumption that every end has an ILS. Charted visuals —
+the river and bay kind — and the curving breed of RNAV wait their turn.
+
+**In VMC there's a cheaper way in.** `v` asks for the visual, and the
+visual starts with the pilot's eyes, not your equipment: close in with
+the field clear of weather they spot it easily, far out or low in the
+murk they answer "field not in sight, we're looking" — and a crew
+that's looking may catch it when you ask again. A cell between them
+and the field is an honest negative contact, and weather off (`w`) is
+VMC everywhere. Once they have it, "field in sight, cleared visual
+approach runway one niner right" — and the flying is theirs: they
+maneuver onto a plausible final from geometry the ILS would refuse, a
+tight base abeam the threshold included, descending on their own
+profile. Blow the energy anyway and they still go around. Better: when
+another arrival is on final ahead, the readback names it — "following
+the Southwest seven thirty-seven, cleared visual" — and separation
+behind that traffic becomes the pilot's, the way the FAA means it: the
+three-mile rule stops applying inside the sighted pair, though the
+wake matrix on final bites exactly as hard as ever. And because a
+visual needs no plate, it works at ends the approach data can't speak
+for — the one clearance that never depends on equipment (the
+departure parallel still teaches its refusal; segregated is
+segregated).
 
 **The scope helps the way STARS does.** While an aircraft is off its
 assigned altitude the data block shows both — `DAL204 110↓080` is

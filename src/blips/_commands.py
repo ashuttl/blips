@@ -300,7 +300,8 @@ class CommandError(Exception):
 _WORDS = frozenset((
     "l", "r", "left", "right", "c", "d", "climb", "descend",
     "rs", "is", "reduce", "increase", "s", "dct", "direct",
-    "i", "ils", "ho", "handoff", "co", "hold", "tfc", "traffic",
+    "i", "ils", "v", "visual", "ho", "handoff", "co", "hold",
+    "tfc", "traffic",
     "u", "unable", "neg", "via",
 ))
 
@@ -371,6 +372,7 @@ def parse(text):
         {"kind": "direct",  "fix": "LOOSE"}
         {"kind": "procedure", "name": "CDOGG4"}       # join a SID/STAR
         {"kind": "ils",     "rwy": "19L"|None}
+        {"kind": "visual",  "rwy": "19L"|None}        # field in sight first
         {"kind": "handoff"}
         {"kind": "traffic"}                           # call the VFR target
         {"kind": "unable"}                            # decline their request
@@ -434,12 +436,13 @@ def parse(text):
                 raise CommandError("via which procedure?")
             out.append({"kind": "procedure", "name": tokens[i + 1].upper()})
             i += 2
-        elif t in ("i", "ils"):
+        elif t in ("i", "ils", "v", "visual"):
             rwy = None
             if i + 1 < len(tokens) and tokens[i + 1][0].isdigit():
                 rwy = tokens[i + 1].upper()
                 i += 1
-            out.append({"kind": "ils", "rwy": rwy})
+            out.append({"kind": "ils" if t[0] == "i" else "visual",
+                        "rwy": rwy})
             i += 1
         elif t in ("ho", "handoff", "co"):
             out.append({"kind": "handoff"})

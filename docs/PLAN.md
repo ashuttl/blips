@@ -132,6 +132,21 @@ are done.
   nothing changes across the rest of the 4,472. Approach final-fix and
   step-down geometry, and published missed approaches, wait (Later).
 
+- ✅ **Visual approaches** *(realism + fun)* — `v` / `v 19L`, gated on a
+  field-in-sight roll (range, height, and the radar between them and the
+  field; a blocking cell is an honest "negative contact", a re-ask while
+  they're looking gets a better roll, weather off is VMC everywhere).
+  Sighted, they fly a relaxed ILS through the same `_fly_ils` machinery:
+  self-maneuvered onto a plausible final from geometry the ILS refuses
+  (a tight base abeam the threshold works), own descent profile, same
+  tower switch, same energy-management go-around, same landing score.
+  With an arrival ahead on final the readback names it ("following the
+  Southwest seven thirty-seven…") and the pair enters the follower's
+  `visual` set — the 3 nm rule stops applying between them while the
+  wake matrix still bites. Needs no plates, so it's real at every end
+  of every field; the departure parallel still teaches its refusal.
+  Charted visuals (river/bay) stay in Later.
+
 ## Safety follow-up
 
 - ✅ **Make the satellite LOA altitude an invariant.** The pair is now
@@ -143,12 +158,7 @@ are done.
 
 ## Next — highest leverage remaining
 
-1. **Visual approaches** *(realism + fun)*. `v 19L` with a
-   field-in-sight roll keyed on range/weather; "follow the traffic
-   ahead" reuses the existing `visual` sighting set so in-trail inside
-   3 nm is legal while wake still bites. VMC majors clear mostly
-   visuals in reality; also the hook for charted ones (river/bay
-   visuals) later.
+*(the Next list is clear — promote from Later.)*
 
 ## Later — worth doing, not first
 
@@ -158,6 +168,9 @@ are done.
   go-around instead of the synthesized straight-ahead climb, and honor
   the step-downs before the FAF. Availability is honest now; the
   geometry is the part still waiting.
+- **Charted visual approaches** — the river/bay kind (DCA's River
+  Visual, SFO's Tipp Toe): a named ground track flown visually, cleared
+  by name. The plain visual is the hook they hang from.
 - **Parallel operations, phase 2 — dual arrival streams** with the
   independent-approach separation exemption (centerlines > 4,300 ft
   run their own finals); segregated mode is the phase-1 floor it
