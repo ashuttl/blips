@@ -11,7 +11,7 @@ from blips._geo import (
 )
 from blips.game.sim import (
     PERF, SECTOR_NM, SEP_FT, WX_CLEAR, WX_DEVIATE, Sim, _commandable,
-    _controlled, build_sector,
+    _controlled, build_sector, say_runway,
 )
 
 
@@ -471,6 +471,102 @@ def test_ex_cifp_field_still_degrades_to_synthesized_gates():
     s = build_sector(find_airport("yssy"))
     assert len(s["fixes"]) == 8
     assert any(g not in real for g in s["fixes"])   # some are synthesized
+
+
+# -- parallel runways: segregated mode ----------------------------------------
+
+def test_parallel_pair_lands_the_longer_and_departs_the_other():
+    # TPA: 19R/01L (11,002 ft) lands, 19L/01R (8,300 ft) departs; the
+    # crossing 10/28 never qualifies.  Detected from the data, not a table.
+    ap = find_airport("tpa")
+    s = build_sector(ap)
+    assert s["parallel"]
+    arr_ids = {ap["rwys"][0]["le"][0], ap["rwys"][0]["he"][0]}
+    dep_ids = {ap["rwys"][1]["le"][0], ap["rwys"][1]["he"][0]}
+    assert s["rwy"] in arr_ids                  # the longer parallel lands
+    assert s["dep_rwy"] in dep_ids              # the shorter departs
+    assert abs(turn_delta(s["course"], s["dep_course"])) < 10.0  # one flow
+    # SEA runs three parallels: 16L (11,901 ft) lands, 16C is next longest
+    sea = build_sector(find_airport("ksea"))
+    assert sea["parallel"]
+    assert sea["rwy"] in ("16L", "34R")
+    assert sea["dep_rwy"] in ("16C", "34C")
+    # EGLL — the operation this mode is named for
+    assert build_sector(find_airport("egll"))["parallel"]
+
+
+def test_single_and_crossing_runway_fields_are_unchanged():
+    # PWM's 11/29 and 18/36 cross; BIL's 10L and 07 diverge 28° — neither
+    # is a pair, so both ends read the same runway, as they always did.
+    for code in ("kpwm", "kbil"):
+        s = build_sector(find_airport(code))
+        assert not s["parallel"], code
+        assert s["dep_rwy"] == s["rwy"]
+        assert s["dep_thr"] == s["thr"]
+        assert s["dep_course"] == s["course"]
+
+
+def test_departures_roll_the_departure_parallel(sim):
+    sim._spawn_departure()
+    dep = sim.aircraft[-1]
+    d_dep = haversine_nm(dep["lat"], dep["lon"], *sim.sector["dep_thr"])
+    d_arr = haversine_nm(dep["lat"], dep["lon"], *sim.sector["thr"])
+    assert d_dep < d_arr                        # off their own pavement
+    assert abs(turn_delta(dep["hdg"], sim.sector["dep_course"])) < 0.5
+    # and the check-in names the runway they actually rolled from
+    assert any(f"off runway {say_runway(sim.sector['dep_rwy'])}" in line
+               for _t, line, _k in sim.radio)
+
+
+def test_ils_to_the_departure_parallel_teaches(sim):
+    thr, course = sim.sector["thr"], sim.sector["course"]
+    lat, lon = advance(*thr, (course + 180.0) % 360.0, 12.0)
+    ac = _arrival(sim, lat=lat, lon=lon, alt=3000.0, hdg=course, ias=180.0)
+    line = sim.command(f"100 i {sim.sector['dep_rwy']}")
+    assert "departing traffic today" in line
+    assert f"landing {say_runway(sim.sector['rwy'])}" in line
+    assert ac["phase"] == "cruise"              # no clearance issued
+    # bare `i` is the arrival end, as ever
+    line = sim.command("100 i")
+    assert "cleared ils" in line.lower()
+    assert ac["rwy"] == sim.sector["rwy"]
+
+
+def test_flow_change_flips_both_parallel_ends_together(sim):
+    before = (sim.sector["rwy"], sim.sector["dep_rwy"])
+    sim._next_flow = 0.0
+    sim._flow_tick(1.0)
+    after = (sim.sector["rwy"], sim.sector["dep_rwy"])
+    assert after[0] != before[0] and after[1] != before[1]
+    assert after[0] != after[1]                 # still segregated
+    assert abs(turn_delta(sim.sector["course"],
+                          sim.sector["dep_course"])) < 10.0
+
+
+def test_procedures_serve_their_own_parallel(sim):
+    assert sim.sector["parallel"]
+    assert sim._rwy_for("STAR") == sim.sector["rwy"]
+    assert sim._rwy_for("SID") == sim.sector["dep_rwy"]
+
+
+def test_closure_holds_approaches_but_not_departures_at_a_parallel_field(sim):
+    sim._rwy_closed_until = sim._elapsed + 300.0
+    _arrival(sim)
+    assert "runway's closed" in sim.command("100 i")   # approaches refused
+    sim._next_departure = 0.0                   # tower has one ready
+    sim._spawn_tick(1.0)
+    assert sum(a["plan"] == "departure" for a in sim.aircraft) == 1
+
+
+def test_closure_still_holds_departures_at_a_single_runway_field():
+    s = Sim(find_airport("kpwm"), seed=4)
+    s._next_arrival = s._next_request = 1e9
+    s._next_vfr = s._next_over = s._next_sat_dep = 1e9
+    s.aircraft.clear()
+    s._rwy_closed_until = s._elapsed + 300.0
+    s._next_departure = 0.0
+    s._spawn_tick(1.0)
+    assert not any(a["plan"] == "departure" for a in s.aircraft)
 
 
 def test_metroplex_has_uncontrolled_neighbors():
@@ -1811,7 +1907,10 @@ def test_atis_opens_the_shift_and_the_letter_advances():
     first = s.radio[0]
     assert first[2] == "atis"
     assert "information alpha" in first[1]
-    assert f"runway {s.sector['rwy']}" in first[1]
+    # TPA runs segregated parallels, so the broadcast names both ends
+    assert f"landing runway {say_runway(s.sector['rwy'])}" in first[1]
+    assert (f"departing runway {say_runway(s.sector['dep_rwy'])}"
+            in first[1])
     s._next_flow = 0.0
     t = s.start
     s._last_tick = t

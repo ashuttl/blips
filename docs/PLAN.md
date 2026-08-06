@@ -78,6 +78,20 @@ are done.
   uncleared arrival, first departure), each off a real callsign.
   Seeded shifts are never calm-adjusted unless `--calm` is explicit —
   determinism first.
+- ✅ **Parallel-runway operations, phase 1: segregated mode**
+  *(uniqueness — the single biggest differentiator)* — a parallel pair
+  (courses within ~10°, same number, L/C/R suffixes, detected from the
+  vendored data) runs the way EGLL actually does: arrivals land the
+  longer parallel, departures roll the other, and both ends flip
+  together on a flow change. ATIS and check-ins name both runways
+  ("landing runway one niner right, departing runway one niner left"),
+  the scope draws both with the localizer only on the landing one,
+  STARs compile to the arrival end and SIDs to the departure end,
+  `i <departure end>` gets a teaching refusal, and a medical closure
+  holds approaches while departures keep rolling (single-runway fields
+  still hold everything). Verified parallel: TPA, SEA (16L lands, 16C
+  departs), EGLL; unchanged single/crossing: PWM, BIL. Phase 2 moved
+  to Later.
 
 ## Safety follow-up
 
@@ -90,19 +104,15 @@ are done.
 
 ## Next — highest leverage remaining
 
-1. **Airport operations profiles + parallel runways** *(uniqueness — the
-   single biggest differentiator)*. `build_sector` uses only `rwys[0]`;
-   TPA, SEA, EGLL all run parallels, and generic initial altitudes,
-   satellites and wind flips make unlike airports play alike. Add an
-   optional, data-driven profile consumed by `build_sector`: arrival and
-   departure runway configurations, calm-wind preference, initial/crossing
-   altitudes, transition altitude, and actual satellite ownership. Start
-   with three showcase fields (KTPA, KPWM, EGLL) and keep today's generated
-   sector as the fallback. Phase 1 uses segregated parallels (land the
-   longer, depart the other — EGLL's actual operation); the `i 19L` grammar
-   and per-runway wake keys already exist. Phase 2 adds dual arrival streams
-   with the independent-approach separation exemption (centerlines >
-   4,300 ft).
+1. **Airport operations profiles** *(uniqueness)*. With segregated
+   parallels landed, the remaining gap is that generic initial
+   altitudes, satellites and wind flips still make unlike airports play
+   alike. Add an optional, data-driven profile consumed by
+   `build_sector`: runway configurations beyond the longest-lands
+   heuristic, calm-wind preference, initial/crossing altitudes,
+   transition altitude, and actual satellite ownership. Start with
+   three showcase fields (KTPA, KPWM, EGLL) and keep today's generated
+   sector as the fallback.
 2. **Make approach claims true** *(realism, locality)*. APPCH records are
    vendored but discarded while every runway end is treated as an ILS.
    Compile the real approach runway/final-fix/altitude data, refuse an ILS
@@ -122,6 +132,10 @@ are done.
    visuals) later.
 ## Later — worth doing, not first
 
+- **Parallel operations, phase 2 — dual arrival streams** with the
+  independent-approach separation exemption (centerlines > 4,300 ft
+  run their own finals); segregated mode is the phase-1 floor it
+  builds on.
 - **2.5 nm same-runway final separation inside 10 nm** (7110.65
   5-5-4-j) — rewards precise tight-packing; small change in
   `_separation` keyed on both established same-course.

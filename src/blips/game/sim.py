@@ -657,7 +657,7 @@ def build_sector(airport):
 
     runway = airport["rwys"][0]                    # longest, by build sort
     end = rng.choice(("le", "he"))                 # today's flow
-    ident, course, thr = _end_geometry(airport, runway, end)
+    ident, course, _thr = _end_geometry(airport, runway, end)
 
     fixes, names, entries, exits = {}, set(), [], []
     taken = {"STAR": set(), "SID": set()}          # octants already gated
@@ -752,13 +752,60 @@ def build_sector(airport):
         if len(neighbors) >= 3:
             break
 
-    return {
+    sector = {
         "fixes": fixes, "entries": entries, "exits": exits,
-        "rwy": ident, "course": course, "thr": thr, "end": end,
         "elev": airport["elev"], "sat_apt": sat_apt,
         "sat": _sat_end(sat_apt, course) if sat_apt else None,
         "neighbors": neighbors,
     }
+    sector.update(_flow_ends(airport, end))
+    return sector
+
+
+def _parallel_partner(airport, runway):
+    """The segregated-ops partner of the longest runway: another runway
+    whose magnetic course lies within ~10° and whose ident shares the
+    number with an L/C/R suffix — detected from the data, never a table.
+    Heathrow's 09L pairs with 09R, Tampa's 19R with 19L; Billings'
+    crossing 10L and 07 don't qualify.  The runways arrive sorted
+    longest-first, so the first match is the longest remaining parallel
+    (Seattle lands 16L and departs 16C)."""
+    ident, course = runway["le"][0], runway["le"][1]
+    if not (ident and ident[-1].isalpha() and course is not None):
+        return None
+    digits = "".join(c for c in ident if c.isdigit())
+    for other in airport["rwys"]:
+        oid, ocourse = other["le"][0], other["le"][1]
+        if (other is not runway and oid and oid[-1].isalpha()
+                and ocourse is not None
+                and "".join(c for c in oid if c.isdigit()) == digits
+                and abs(turn_delta(ocourse, course)) <= 10.0):
+            return other
+    return None
+
+
+def _flow_ends(airport, end):
+    """One flow direction's runway geometry — arrivals and departures both.
+
+    A field with a parallel pair runs segregated the way Heathrow really
+    does: arrivals land the longer parallel, departures roll the other,
+    and both ends flip together on a flow change — one wind, one
+    direction.  A single-runway field lands and departs the same
+    pavement, so the two ends coincide and everything downstream reads
+    the one it means."""
+    runway = airport["rwys"][0]                    # longest, by build sort
+    ident, course, thr = _end_geometry(airport, runway, end)
+    partner = _parallel_partner(airport, runway)
+    if partner is None:
+        return {"rwy": ident, "course": course, "thr": thr, "end": end,
+                "dep_rwy": ident, "dep_course": course, "dep_thr": thr,
+                "dep_len": runway["len"], "parallel": False}
+    dident, dcourse, dthr = min(
+        (_end_geometry(airport, partner, e) for e in ("le", "he")),
+        key=lambda geom: abs(turn_delta(geom[1], course)))
+    return {"rwy": ident, "course": course, "thr": thr, "end": end,
+            "dep_rwy": dident, "dep_course": dcourse, "dep_thr": dthr,
+            "dep_len": partner["len"], "parallel": True}
 
 
 def _sat_end(sat_apt, main_course):
@@ -771,7 +818,10 @@ def _sat_end(sat_apt, main_course):
     return {"code": sat_apt["iata"] or sat_apt["icao"][-3:],
             "name": sat_apt["city"] or sat_apt["name"],
             "elev": sat_apt["elev"],
-            "rwy": ident, "course": course, "thr": thr}
+            "rwy": ident, "course": course, "thr": thr,
+            # a satellite works one runway both ways; the mirror keys let
+            # the departure machinery read any field the same way
+            "dep_rwy": ident, "dep_course": course, "dep_thr": thr}
 
 
 def _edge_point(home, outer, inner, edge_nm):
@@ -935,9 +985,16 @@ class Sim:
     def _say_atis(self, update=False):
         head = ("ATIS update, information" if update else "information")
         d, k = self.wind
+        if self.sector["parallel"]:
+            # segregated parallels say it the real way: which runway
+            # lands and which departs, both ends on the broadcast
+            using = (f"landing runway {say_runway(self.sector['rwy'])}, "
+                     f"departing runway "
+                     f"{say_runway(self.sector['dep_rwy'])}")
+        else:
+            using = f"landing and departing runway {self.sector['rwy']}"
         self.say(f"{head} {_NATO[self._atis_n % len(_NATO)]} — wind "
-                 f"{int(d):03d} at {int(k)}, landing and departing runway "
-                 f"{self.sector['rwy']}", "atis", voice="ATIS")
+                 f"{int(d):03d} at {int(k)}, {using}", "atis", voice="ATIS")
 
     def _prepopulate(self):
         """The sector you take over already has traffic in it — enough
@@ -1088,9 +1145,17 @@ class Sim:
             self._navpoints_rev = (self.sector_rev, rwy)
         return self._navpoints.get(ident)
 
+    def _rwy_for(self, kind):
+        """Which runway a procedure kind serves today: the STARs feed the
+        landing runway, the SIDs roll from the departing one — the same
+        pavement at a single-runway field, segregated at a parallel."""
+        return (self.sector["rwy"] if kind == "STAR"
+                else self.sector["dep_rwy"])
+
     def _procs_available(self, kind):
         """The names of the SIDs or STARs that serve today's runway."""
-        return [p["name"] for p in plans_for(self.airport, self.sector["rwy"])
+        return [p["name"]
+                for p in plans_for(self.airport, self._rwy_for(kind))
                 if p["kind"] == kind]
 
     def _no_such_proc(self, me, name, want):
@@ -1117,7 +1182,7 @@ class Sim:
         if avail:
             noun = "arrivals" if want == "STAR" else "departures"
             return (f"unable — unfamiliar with {name}; the {noun} to "
-                    f"runway {say_runway(self.sector['rwy'])} are "
+                    f"runway {say_runway(self._rwy_for(want))} are "
                     f"{', '.join(avail)}")
         return f"unable — {me} is unfamiliar with {name}"
 
@@ -1140,8 +1205,10 @@ class Sim:
             why = (f"unable {name} — {res.get('join')} is "
                    f"{res.get('dist_nm', 0.0):.0f} miles from us")
         else:
+            want = ("SID" if ac is not None and ac["plan"] == "departure"
+                    else "STAR")
             return (f"unable {name} — nothing of it serves runway "
-                    f"{say_runway(self.sector['rwy'])}")
+                    f"{say_runway(self._rwy_for(want))}")
         alt = self._joinable_instead(ac, name) if ac is not None else None
         return f"{why}, {alt} would work from here" if alt \
             else f"{why}, we'll take vectors"
@@ -1149,11 +1216,12 @@ class Sim:
     def _joinable_instead(self, ac, exclude):
         """A procedure of the right kind this aircraft could actually join."""
         want = "STAR" if ac["plan"] == "arrival" else "SID"
+        rwy = self._rwy_for(want)
         best = None
-        for plan in plans_for(self.airport, self.sector["rwy"]):
+        for plan in plans_for(self.airport, rwy):
             if plan["kind"] != want or plan["name"] == exclude:
                 continue
-            res = join_plan(self.airport, self.sector["rwy"], plan["name"],
+            res = join_plan(self.airport, rwy, plan["name"],
                             (ac["lat"], ac["lon"]), hdg=ac["hdg"])
             if res["nav"] and (best is None or res["dist_nm"] < best[0]):
                 best = (res["dist_nm"], plan["name"])
@@ -1461,8 +1529,8 @@ class Sim:
             "departure",
             field=self.sector["sat_apt"] if sat is not None else None)
         src = sat or self.sector
-        course = src["course"]
-        thr = src["thr"]
+        course = src["dep_course"]                       # segregated ops:
+        thr = src["dep_thr"]                             # their own pavement
         lat, lon = advance(thr[0], thr[1], course, 1.5)  # rolling, airborne
         elev = src["elev"]
         exit_fix = self._gate_toward(self.sector["exits"],
@@ -1495,7 +1563,7 @@ class Sim:
         self.aircraft.append(ac)
         off = (f"off {sat['name']}, runway {say_runway(sat['rwy'])}"
                if sat is not None
-               else f"off runway {say_runway(self.sector['rwy'])}")
+               else f"off runway {say_runway(self.sector['dep_rwy'])}")
         tail = f", for {dest[0]}" if dest else ""
         self.say(f"{hail(ac)} {off}, "
                  f"passing {say_altitude(ac['alt'])} for "
@@ -1794,7 +1862,7 @@ class Sim:
         is how a real tower gets successive IFR departures apart.  Anybody
         else low over the departure end (a go-around, a crossing vector)
         holds the release too."""
-        course, thr = src["course"], src["thr"]
+        course, thr = src["dep_course"], src["dep_thr"]
         lat, lon = advance(thr[0], thr[1], course, 1.5)
         sat = src is not self.sector
         initial = float(round(
@@ -1873,7 +1941,9 @@ class Sim:
             self._spawn_arrival()
             self._next_arrival = slow * max(
                 35.0, self.rng.expovariate(rate / 3600.0))
-        if self._rwy_closed():
+        if self._rwy_closed() and not self.sector["parallel"]:
+            # the equipment owns a single runway both ways; a parallel
+            # field's departures keep rolling on their own pavement
             self._next_departure = max(self._next_departure, 15.0)
         if self._next_departure <= 0 and active < cap:
             # tower meters releases: nobody rolls into the climb-out
@@ -1899,7 +1969,8 @@ class Sim:
             if (self._release_blocked(src)
                     or self._opposing_final(src["course"],
                                             sat=sat is not None)
-                    or (sat is None and self._rwy_closed())):
+                    or (sat is None and self._rwy_closed()
+                        and not self.sector["parallel"])):
                 self._next_sat_dep = 20.0
             else:
                 self._spawn_departure(sat=sat)
@@ -2315,10 +2386,12 @@ class Sim:
             self._set_wind()
             self._say_atis(update=True)
             return
-        runway = self.airport["rwys"][0]
         new_end = "he" if self.sector["end"] == "le" else "le"
-        ident, course, thr = _end_geometry(self.airport, runway, new_end)
-        self.sector.update(rwy=ident, course=course, thr=thr, end=new_end)
+        # both ends of a parallel pair flip together — one wind, one
+        # direction; a single runway simply turns around
+        self.sector.update(_flow_ends(self.airport, new_end))
+        ident, course, thr = (self.sector["rwy"], self.sector["course"],
+                              self.sector["thr"])
         if self.sector["sat_apt"] is not None:
             self.sector["sat"] = _sat_end(self.sector["sat_apt"], course)
         self.sector_rev += 1
@@ -2663,9 +2736,14 @@ class Sim:
                                               + self.rng.uniform(180.0,
                                                                  300.0))
                     self.bell = True
+                    # at a parallel field the ambulance closes only the
+                    # runway it's parked on — departures keep their own
+                    rolling = (f" — departures still rolling runway "
+                               f"{self.sector['dep_rwy']}"
+                               if self.sector["parallel"] else "")
                     self.say(f"runway {self.sector['rwy']} closed — "
                              "equipment meeting the emergency, expect "
-                             "delays", "atis")
+                             f"delays{rolling}", "atis")
                     for other in self.aircraft:
                         if other["phase"] == "cleared":
                             other["phase"] = "cruise"
@@ -3091,7 +3169,7 @@ class Sim:
                 mine = "an arrival" if ac["plan"] == "arrival" else "a departure"
                 raise CommandError(f"unable — {proc['n']} is {is_a}, "
                                    f"{me} is {mine}")
-            res = join_plan(self.airport, self.sector["rwy"], proc,
+            res = join_plan(self.airport, self._rwy_for(want), proc,
                             (ac["lat"], ac["lon"]), hdg=ac["hdg"])
             nav = res["nav"]
             if not nav:
@@ -3205,6 +3283,13 @@ class Sim:
                     raise CommandError(f"unable — no runway {ins['rwy']} "
                                        f"at {apt['icao']}")
                 rwy, course, tlat, tlon = end
+                if (sat is None and self.sector["parallel"]
+                        and rwy == self.sector["dep_rwy"]):
+                    # segregated ops: the other parallel is takeoffs only
+                    raise CommandError(
+                        f"unable — {say_runway(rwy)} is departing traffic "
+                        f"today, we're landing "
+                        f"{say_runway(self.sector['rwy'])}")
                 thr = (tlat, tlon)
             # hopeless geometry gets a puzzled pilot, not a wasted clearance
             cross, along = cross_along_track(ac["lat"], ac["lon"],
