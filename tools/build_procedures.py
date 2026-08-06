@@ -26,6 +26,12 @@ Fix coordinates are NOT baked in — they resolve at runtime against the
 already-vendored fixes/navaids, so this stays small and never drifts from
 them.
 
+The APPCH records carry more than legs: the procedure ident's first letter
+is the approach type (``I06`` is the ILS to runway 6, ``R31`` the RNAV,
+``V-A`` a VOR that only circles), and the game reads that spelling to know
+which runway ends really have a localizer (see procedures.approach_ends).
+A rebuild against a fresh CIFP cycle refreshes availability for free.
+
 ARINC 424-18, fixed width 132: proc ident cols 14-19, route type 20,
 transition ident 21-25, sequence 27-29, fix ident 30-34, fix section 37-38,
 path/terminator 48-49, altitude description 83, altitude 85-89, speed

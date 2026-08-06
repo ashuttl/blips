@@ -80,7 +80,7 @@ A command is a callsign followed by one or more instructions, chained:
 | `dct LAL`           | proceed direct a fix                           |
 | `via CDOGG4`        | join a named SID/STAR — it flies the fixes itself |
 | `hold` / `hold LAL` | hold present position / at a fix, right turns  |
-| `i` / `i 19L`       | cleared ILS approach (active runway, or say which) |
+| `i` / `i 19L`       | cleared approach — the ILS, or where none exists the runway's real one (active runway, or say which) |
 | `tfc`               | traffic call — points out the nearest VFR target   |
 | `ho`                | handoff — near their exit fix, this banks a departure |
 
@@ -351,6 +351,26 @@ there; ask for more than 190 on final and you're offered exactly that
 instead. Clear them pointed away and you'll hear
 about it. Blow the energy management — still hot or high on short final —
 and they **go around**, back into your pattern for another try.
+
+**The ILS is equipment, not pavement.** Where the vendored plates know
+a field — 733 US airports carry real approach records — `i` only claims
+an ILS that exists. Ask for the ILS to an end that hasn't got one and
+you're taught: "unable — no ILS to runway four left, that's an RNAV
+approach; the ILS serves runway four right". An end with nothing
+straight-in at all is refused outright. A field with no ILS anywhere —
+Palm Springs, Lihue — clears its real approach by its real name,
+"cleared RNAV runway three one right approach", and flies the same
+final course and slope; what the sim flies is a straight-in final, and
+a straight-in RNAV *is* one, so the words finally match the equipment.
+The data leans on the sector too: where parallels split the equipment,
+arrivals land the ILS runway (Kennedy lands 13L and departs the longer
+13R), the shift opens on the flow the instruments serve, and a one-ILS
+field never turns onto its bare end — the wind shifts in place and the
+ATIS letter advances with the runway held. Military fields keep their
+approaches in the DoD FLIP and foreign fields are off the public CIFP,
+so there — and at the few circling-only fields like Aspen — the scope
+keeps its old assumption that every end has an ILS. Charted visuals and
+the curving kind of RNAV wait for the visual-approach work.
 
 **The scope helps the way STARS does.** While an aircraft is off its
 assigned altitude the data block shows both — `DAL204 110↓080` is

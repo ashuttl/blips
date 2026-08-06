@@ -569,6 +569,83 @@ def test_closure_still_holds_departures_at_a_single_runway_field():
     assert not any(a["plan"] == "departure" for a in s.aircraft)
 
 
+# -- honest approaches: the ILS is equipment, not pavement ---------------------
+
+def _quiet(icao, seed=4):
+    s = Sim(find_airport(icao), seed=seed)
+    s.hearback_p = 0.0
+    s.react_s = (0.0, 0.0)
+    s._next_arrival = s._next_departure = s._next_request = 1e9
+    s._next_vfr = s._next_over = s._next_sat_dep = s._next_neighbor = 1e9
+    s._balloon_event = 2
+    s._next_abnormal = 1e9
+    s.wind = (360.0, 0.0)
+    s._aloft = (0.0, 1.0)
+    s.aircraft.clear()
+    s.radio.clear()
+    return s
+
+
+def test_ils_to_an_end_without_one_teaches_the_parallel_that_has_it():
+    # Boston's 4L is RNAV-only; the ILS next door on 4R is the real answer
+    s = _quiet("kbos")
+    ac = _arrival(s)
+    line = s.command("100 i 4L")
+    assert "no ils to runway four left" in line.lower()
+    assert "rnav approach" in line.lower()
+    assert "the ils serves runway four right" in line.lower()
+    assert ac["phase"] == "cruise"              # no clearance issued
+
+
+def test_an_end_with_no_approach_at_all_is_refused():
+    # Teterboro publishes nothing straight-in to runway 1 — and the sector
+    # opens on 19, the only flow its plates serve
+    s = _quiet("kteb")
+    assert s.sector["rwy"] == "19"
+    _arrival(s)
+    line = s.command("100 i 1")
+    assert "no instrument approach to runway one" in line.lower()
+    assert "the ils serves runway" in line.lower()
+
+
+def test_an_rnav_only_field_clears_the_rnav_by_name():
+    # Palm Springs has no ILS anywhere: `i` clears the approach that
+    # actually exists, by its own name, and it flies the same final
+    s = _quiet("kpsp")
+    thr, course = s.sector["thr"], s.sector["course"]
+    lat, lon = advance(*thr, (course + 180.0) % 360.0, 12.0)
+    ac = _arrival(s, lat=lat, lon=lon, alt=s.sector["elev"] + 3500.0,
+                  hdg=course, ias=180.0)
+    line = s.command("100 i")
+    assert "cleared rnav runway" in line.lower()
+    assert "ils" not in line.lower()
+    assert ac["phase"] == "cleared"
+
+
+def test_arrivals_land_the_parallel_with_the_ils():
+    # Kennedy's longer 13R has no ILS of its own; the data lands arrivals
+    # on 13L and rolls departures off 13R.  San Jose's ILSes live on the
+    # shorter 12R/30L in both directions.
+    s = build_sector(find_airport("kjfk"))
+    assert (s["rwy"], s["dep_rwy"]) in (("13L", "13R"), ("31L", "31R"))
+    sj = build_sector(find_airport("ksjc"))
+    assert sj["rwy"] in ("12R", "30L")
+    assert sj["dep_rwy"] in ("12L", "30R")
+
+
+def test_flow_holds_at_a_field_with_one_ils():
+    # Brunswick's only ILS points down 01R: the sector opens on it, and
+    # when the wind turns the field doesn't — the broadcast just advances
+    s = _quiet("kbxm")
+    s.flow_hold_p = 0.0
+    assert s.sector["rwy"] == "01R"
+    letter = s._atis_n
+    s._next_flow = 0.0
+    s._flow_tick(1.0)
+    assert s.sector["rwy"] == "01R"
+    assert s._atis_n == letter + 1
+
+
 def test_metroplex_has_uncontrolled_neighbors():
     # New York is the textbook case: JFK works beside LGA and EWR.
     s = build_sector(find_airport("kjfk"))

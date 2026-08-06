@@ -7,8 +7,8 @@ import random
 from blips._airports import find_airport
 from blips._geo import haversine_nm
 from blips.game.procedures import (
-    find_named, flow_path, join_plan, overlay_for, plans_for,
-    procedures_for, procedures_through,
+    approach_ends, approach_to, find_named, flow_path, join_plan,
+    overlay_for, plans_for, procedures_for, procedures_through,
 )
 
 
@@ -258,3 +258,30 @@ def test_a_gate_knows_which_procedure_owns_it():
     # "via RADDY" should be answerable, not a shrug.
     owners = dict(procedures_through("KSEA", "RADDY"))
     assert owners.get("CHINS5") == "STAR"
+
+
+# -- approach availability: what the APPCH records actually say ---------------
+
+def test_approach_ends_read_the_vendored_appch_records():
+    ends = approach_ends("KTPA")
+    assert "I" in ends["19R"] and "I" in ends["1L"]    # the parallels' ILSes
+    assert approach_to("KTPA", "01L") == "ILS"         # leading zero forgiven
+    assert approach_to("KTPA", "28") == "RNAV"         # the crossing runway
+
+
+def test_an_rnav_only_field_says_so():
+    # Palm Springs really has no ILS in any direction
+    assert approach_to("KPSP", "31L") == "RNAV"
+    assert approach_to("KPSP", "13R") == "RNAV"
+    ends = approach_ends("KPSP")
+    assert not any(kinds & {"I", "L"} for kinds in ends.values())
+
+
+def test_fields_the_data_cannot_speak_for_stay_unknown():
+    assert approach_ends("EGLL") is None       # off the CIFP entirely
+    assert approach_to("EGLL", "27L") is None
+    assert approach_ends("KADW") is None       # military: DoD FLIP, not CIFP
+    assert approach_ends("KASE") is None       # Aspen only circles in
+    # ...and an end that simply has nothing straight-in reads as empty,
+    # which is knowledge, not ignorance
+    assert approach_to("KTEB", "1") == ""
