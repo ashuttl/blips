@@ -750,7 +750,7 @@ def test_shift_starts_populated():
     s = Sim(find_airport("tpa"), seed=1)
     arrivals = [a for a in s.aircraft if a["plan"] == "arrival"]
     departures = [a for a in s.aircraft if a["plan"] == "departure"]
-    assert len(arrivals) >= 2 and len(departures) >= 1
+    assert 3 <= len(arrivals) <= 4 and len(departures) >= 1
     # one is already partway in: well inside its own entry gate (measured
     # against the gate, not the other arrivals — TPA has a near corner)
     inside = []
@@ -779,6 +779,131 @@ def test_shift_opens_workable():
                 assert dist > 14.0, (icao, seed, a["callsign"])
                 assert a["alt"] - apt["elev"] <= dist * 350.0 + 1000.0, (
                     icao, seed, a["callsign"], a["alt"], dist)
+
+
+def test_warm_open_inbound_is_mid_descent():
+    # one prepopulated arrival is already partway in and part-descended,
+    # pointed at the field — the open has something to work immediately
+    for seed in range(3):
+        s = Sim(find_airport("tpa"), seed=seed)
+        arrivals = [a for a in s.aircraft if a["plan"] == "arrival"]
+        near = min(arrivals, key=lambda a: haversine_nm(
+            a["lat"], a["lon"], s.airport["lat"], s.airport["lon"]))
+        dist = haversine_nm(near["lat"], near["lon"],
+                            s.airport["lat"], s.airport["lon"])
+        assert dist <= 26.0, (seed, dist)
+        assert near["alt"] <= s.airport["elev"] + dist * 350.0
+        brg = bearing_to(near["lat"], near["lon"],
+                         s.airport["lat"], s.airport["lon"])
+        assert abs(turn_delta(near["hdg"], brg, None)) < 30.0
+
+
+def test_no_lull_before_the_first_push(sim):
+    # the 0.75 quiet-spell multiplier waits for the first push: before
+    # the first bank a lull isn't a breather, it's dead air
+    base, rate = sim._spawn_rate()
+    assert rate == base
+    sim._pushes = 1                # the first bank has come and gone
+    base, rate = sim._spawn_rate()
+    assert rate == pytest.approx(base * 0.75)
+
+
+# -- the first shift opens gently ----------------------------------------------
+
+def _calm_sim():
+    """A calm-shift TPA sector, parked the same way as the sim fixture."""
+    s = Sim(find_airport("tpa"), seed=1, calm=True)
+    s._next_arrival = s._next_departure = s._next_request = 1e9
+    s._next_vfr = s._next_over = s._next_sat_dep = 1e9
+    s._balloon_event = 2
+    s.flow_hold_p = 0.0
+    s.hearback_p = 0.0
+    s.wind = (360.0, 0.0)
+    s._aloft = (0.0, 1.0)
+    s.react_s = (0.0, 0.0)
+    s.aircraft.clear()
+    s.trails.clear()
+    s.radio.clear()
+    return s
+
+
+def test_calm_shift_parks_the_events_past_the_window():
+    s = Sim(find_airport("tpa"), seed=1, calm=True)
+    assert s.calm_until == 480.0
+    assert s._next_push >= s.calm_until + 60.0
+    assert s._next_flow >= s.calm_until + 120.0
+    assert s._next_abnormal >= s.calm_until
+    # an ordinary shift has no window at all
+    assert Sim(find_airport("tpa"), seed=1).calm_until == 0.0
+
+
+def test_calm_window_doubles_the_spawn_gaps():
+    s = _calm_sim()
+    s.rng.expovariate = lambda lam: 100.0   # a fixed draw isolates the ×2
+    s._next_arrival = 0.0
+    s._spawn_tick(1.0)
+    assert s._next_arrival == 200.0         # doubled inside the window
+    s.aircraft.clear()
+    s._elapsed = s.calm_until               # the window has lifted
+    s._next_arrival = 0.0
+    s._spawn_tick(1.0)
+    assert s._next_arrival == 100.0         # back to the normal draw
+
+
+def test_calm_window_hears_perfectly():
+    s = _calm_sim()
+    s.hearback_p = 1.0                      # every copy would go wrong…
+    s._elapsed = 300.0                      # …past the 3-minute grace
+    _arrival(s)
+    s.command("100 r 270")
+    assert s.hearbacks == 0                 # but the window holds
+    s._elapsed = s.calm_until + 1.0
+    s.command("100 r 90")
+    assert s.hearbacks == 1                 # lifted: hearback ramps in
+
+
+def test_calm_shift_opens_with_coach_lines_once_each():
+    s = Sim(find_airport("tpa"), seed=1, calm=True)
+    helps = [line for _, line, kind in s.radio if kind == "help"]
+    assert len(helps) == 2                  # first check-in, first departure
+    assert any("to start them down" in line for line in helps)
+    assert any("ho at the edge" in line for line in helps)
+    # the whispers use a real callsign off the scope
+    assert any(a["callsign"].lower() in line
+               for line in helps for a in s.aircraft)
+    # park the shift and run: neither line ever repeats
+    s._next_arrival = s._next_departure = s._next_request = 1e9
+    s._next_vfr = s._next_over = s._next_sat_dep = 1e9
+    s._balloon_event = 2
+    s._next_abnormal = 1e9
+    _run(s, 30)
+    helps = [line for _, line, kind in s.radio if kind == "help"]
+    assert len([l for l in helps if "start them down" in l]) == 1
+    assert len([l for l in helps if "ho at the edge" in l]) == 1
+
+
+def test_approach_coach_waits_for_a_close_uncleared_arrival():
+    s = _calm_sim()
+    ac = _arrival(s, lat=s.airport["lat"] + 0.5)   # ~30 nm out: too far
+    _run(s, 2)
+    assert not [1 for _, line, kind in s.radio if kind == "help"]
+    ac["lat"] = s.airport["lat"] + 0.2             # ~12 nm, still uncleared
+    _run(s, 2)
+    helps = [line for _, line, kind in s.radio if kind == "help"]
+    assert len(helps) == 1
+    assert "clears the approach" in helps[0]
+    assert ac["callsign"].lower() in helps[0]
+    _run(s, 10)                                     # once means once
+    assert len([1 for _, line, kind in s.radio if kind == "help"]) == 1
+
+
+def test_no_coach_lines_off_the_calm_shift(sim):
+    # the ordinary fixture is seeded and not calm: even a close,
+    # uncleared arrival earns no whisper — determinism keeps its promise
+    assert not [1 for _, line, kind in sim.radio if kind == "help"]
+    _arrival(sim, lat=sim.airport["lat"] + 0.2)
+    _run(sim, 5)
+    assert not [1 for _, line, kind in sim.radio if kind == "help"]
 
 
 def test_departure_handoff_rules(sim):

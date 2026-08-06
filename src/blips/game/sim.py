@@ -814,7 +814,7 @@ class Sim:
     """The sector, its traffic, and the frequency.  Feed-compatible."""
 
     def __init__(self, airport, seed=None, pool=None, terrain=None,
-                 schedule=None):
+                 schedule=None, calm=False):
         self.airport = airport
         self.sector = build_sector(airport)
         self.rng = random.Random(seed)
@@ -881,6 +881,17 @@ class Sim:
         self.hearbacks_caught = 0  # ...and corrected before they stuck
         self.react_s = (1.5, 3.5)  # seconds between readback and hands
         self._atis_n = 0
+        # a first shift opens gently: for the first eight minutes the
+        # spawn gaps double, readbacks come back perfect, and the first
+        # push, flow change and crisis all wait out the window — then
+        # the shift ramps in exactly as it always does.  Coach lines
+        # (one each, at the moment they matter) ride the same switch.
+        self.calm_until = 480.0 if calm else 0.0
+        self._coached = set()    # which coach lines have been said
+        if calm:
+            self._next_push = max(self._next_push, self.calm_until + 60.0)
+            self._next_flow = max(self._next_flow, self.calm_until + 120.0)
+            self._next_abnormal = max(self._next_abnormal, self.calm_until)
         self.wind = (360.0, 0.0)
         self._set_wind()
         self._say_atis()         # the shift opens with the numbers
@@ -929,9 +940,11 @@ class Sim:
                  f"{self.sector['rwy']}", "atis", voice="ATIS")
 
     def _prepopulate(self):
-        """The sector you take over already has traffic in it."""
-        for _ in range(6):
-            if sum(a["plan"] == "arrival" for a in self.aircraft) >= 2:
+        """The sector you take over already has traffic in it — enough
+        that the first minutes are a shift, not a waiting room."""
+        want = self.rng.randint(3, 4)
+        for _ in range(12):
+            if sum(a["plan"] == "arrival" for a in self.aircraft) >= want:
                 break
             self._spawn_arrival(allow_sat=False, handin=False)
         arrivals = [a for a in self.aircraft if a["plan"] == "arrival"]
@@ -976,6 +989,19 @@ class Sim:
         del self.radio[:-30]
         if voice is not None and self.speaker is not None:
             self.speaker.speak(line, voice)
+
+    def _calm(self):
+        """Inside the first-shift gentle-opening window?"""
+        return self._elapsed < self.calm_until
+
+    def _coach(self, key, line):
+        """A stage whisper for the first shift: one line, once, at the
+        moment it matters — and only on a calm shift.  Everyone else's
+        frequency stays clean."""
+        if not self.calm_until or key in self._coached:
+            return
+        self._coached.add(key)
+        self.say(line, "help")
 
     # -- spawning -----------------------------------------------------------
     def _new_callsign(self):
@@ -1420,6 +1446,12 @@ class Sim:
         self.say(f"{self.airport['city'] or 'Approach'} approach, "
                  f"{hail(ac)} with you, {say_altitude(ac['alt'])}, "
                  f"{lead}", "checkin", voice=ac["callsign"])
+        # the first arrival on frequency earns the first whisper: a real
+        # command, off a real callsign, at a sane altitude for this field
+        down = 1000.0 * round((self.airport["elev"] + 5000.0) / 1000.0)
+        self._coach("descend",
+                    f"type {ac['callsign'].lower()} d {int(down) // 100} "
+                    "to start them down — ? for the rest")
 
     def _spawn_departure(self, sat=None):
         """A departure off the main runway — or, given ``sat``, off the
@@ -1469,6 +1501,15 @@ class Sim:
                  f"passing {say_altitude(ac['alt'])} for "
                  f"{say_altitude(initial)}, requesting {exit_fix}{tail}"
                  f"{note}", "checkin", voice=ac["callsign"])
+        # the first departure earns its whisper too — a climb centre will
+        # actually accept (never below their crossing restriction)
+        up = max(1000.0 * round((self.airport["elev"] + 10000.0) / 1000.0),
+                 ac.get("xr", 0.0))
+        cs = ac["callsign"].lower()
+        self._coach("departure",
+                    f"{cs} wants altitude and their gate — {cs} c "
+                    f"{int(up) // 100}, then {cs} dct {exit_fix}, then "
+                    f"{cs} ho at the edge")
 
     # -- the sky that isn't yours --------------------------------------------
     def _spawn_vfr(self):
@@ -1780,6 +1821,22 @@ class Sim:
                 return True
         return False
 
+    def _spawn_rate(self):
+        """(base, arrival) rate in aircraft per hour, right now.
+
+        The base ramps with the shift and pushes multiply it; between
+        pushes the sector idles at three-quarters — but not before the
+        first push has come and gone.  A lull is a breather between
+        banks; before the first bank it's just dead air, so the early
+        off-push rate floors at the base itself.
+        """
+        base = min(34.0, 16.0 + self._elapsed / 75.0)   # per hour, ramping
+        base += min(6.0, max(0.0, self._elapsed - 1350.0) / 975.0)
+        push = min(2.8, 2.3 + 0.1 * self._pushes)   # pushes learn your name
+        off = 0.75 if self._pushes else 1.0
+        return base, base * (push if self._elapsed < self._push_until
+                             else off)
+
     def _spawn_tick(self, dt):
         self._next_arrival -= dt
         self._next_departure -= dt
@@ -1803,13 +1860,12 @@ class Sim:
         # the shift at minute eighty.  The ambient sky stays where it is;
         # the growth is all traffic you work.
         cap = 16 + min(5, int(self._elapsed / 1200.0))
-        base = min(34.0, 16.0 + self._elapsed / 75.0)   # per hour, ramping
-        base += min(6.0, max(0.0, self._elapsed - 1350.0) / 975.0)
-        push = min(2.8, 2.3 + 0.1 * self._pushes)   # pushes learn your name
-        rate = base * (push if self._elapsed < self._push_until else 0.75)
+        base, rate = self._spawn_rate()
+        # a calm first shift breathes at half pace inside its window
+        slow = 2.0 if self._calm() else 1.0
         if self._next_arrival <= 0 and active < cap:
             self._spawn_arrival()
-            self._next_arrival = max(
+            self._next_arrival = slow * max(
                 35.0, self.rng.expovariate(rate / 3600.0))
         if self._rwy_closed():
             self._next_departure = max(self._next_departure, 15.0)
@@ -1825,7 +1881,7 @@ class Sim:
             else:
                 self._spawn_departure()
                 # departures follow the day, not the arrival push
-                self._next_departure = max(
+                self._next_departure = slow * max(
                     45.0, self.rng.expovariate(base * 0.7 / 3600.0))
         self._next_sat_dep -= dt
         if self._next_sat_dep <= 0 and active < cap:
@@ -2153,6 +2209,7 @@ class Sim:
         self._flow_tick(dt)
         self._center_tick(dt)
         self._handin_tick(dt)
+        self._coach_tick()
         self._emergency_tick(dt)
         self._nordo_tick(dt)
         self._return_tick(dt)
@@ -2295,6 +2352,26 @@ class Sim:
                 continue
             ac.update(pre_ho=False, dim=False)
             self._check_in(ac)
+
+    def _coach_tick(self):
+        """The approach whisper waits for the moment it matters: the
+        first arrival close-in and still without a clearance."""
+        if not self.calm_until or "approach" in self._coached:
+            return
+        for ac in self.aircraft:
+            if (ac["plan"] != "arrival" or not _commandable(ac)
+                    or ac.get("sat")
+                    or ac["phase"] not in ("cruise", "hold")
+                    or haversine_nm(ac["lat"], ac["lon"],
+                                    self.airport["lat"],
+                                    self.airport["lon"]) > 15.0):
+                continue
+            cs = ac["callsign"].lower()
+            self._coach("approach",
+                        f"{cs} is getting close — point them at the "
+                        f"localizer with a heading, then {cs} i clears "
+                        "the approach")
+            return
 
     # -- abnormals share one clock ---------------------------------------------
     def _abnormal_ok(self):
@@ -2825,6 +2902,7 @@ class Sim:
     def _mishear_roll(self, ac, instructions):
         """Index of the instruction to mishear this transmission, or None."""
         if (self.hearback_p <= 0.0 or self._elapsed < 180.0
+                or self._calm()          # first-shift window: perfect copies
                 or ac["squawk"] == "7700"
                 or self.rng.random() >= self.hearback_p):
             return None

@@ -22,6 +22,15 @@ def load():
         return {}
 
 
+def first_shift():
+    """True while no page in the book carries a rated best — the mark of
+    a player who has never finished a real shift anywhere.  The game
+    reads this once, at the top of a shift, to decide whether to open
+    gently."""
+    return not any((entry or {}).get("best")
+                   for entry in load().values())
+
+
 def record_shift(icao, *, score, rating, minutes, landed, handed, busts,
                  offered=0):
     """Fold one shift into the book; returns (entry, previous_best).

@@ -67,6 +67,17 @@ are done.
   hover-chip tell, escalates to emergency fuel after 6 min airborne).
   Flow change de-metronomed: 600–2,400 s reschedule, ~30% of updates
   hold the wind — the letter advances, the runway stays.
+- ✅ **First-shift calm ramp + warm open** *(discoverability, fun)* —
+  every shift now opens warm: 3–4 prepopulated arrivals (one already
+  mid-descent, pointed at the field) and no 0.75 off-push lull until
+  the first push has fired. A truly first shift (no rated page in the
+  shift book anywhere, or explicit `--calm`) opens gently: ~8 minutes
+  of doubled spawn gaps, zero hearback, push/flow-change/abnormals
+  parked past the window, and three one-shot coach lines in the game's
+  voice at the moments they matter (first check-in, first close-in
+  uncleared arrival, first departure), each off a real callsign.
+  Seeded shifts are never calm-adjusted unless `--calm` is explicit —
+  determinism first.
 
 ## Next — highest leverage remaining
 
@@ -83,14 +94,6 @@ are done.
    3 nm is legal while wake still bites. VMC majors clear mostly
    visuals in reality; also the hook for charted ones (river/bay
    visuals) later.
-3. **First-shift calm ramp** *(discoverability)*. When the shift book
-   is empty: doubled spawn intervals, hearback/emergency/flow-change
-   off for ~8 minutes, and 3–4 one-time coach lines at the moment they
-   apply ("type dal204 d 60 to start them down"). Also fixes the cold
-   open generally — measured up to 7 minutes of dead air in the first
-   10; prepopulate 3–4 arrivals with one mid-descent and floor the
-   early rate.
-
 ## Later — worth doing, not first
 
 - **2.5 nm same-runway final separation inside 10 nm** (7110.65

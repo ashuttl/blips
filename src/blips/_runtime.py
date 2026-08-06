@@ -55,6 +55,10 @@ def blips_parser():
     # it reproduces regardless of who's really flying today)
     p.add_argument("--seed", type=int, default=None,
                    help=argparse.SUPPRESS)
+    # the first-shift welcome, on demand: a gentle opening window with
+    # coach lines (automatic when the shift book has no rated page yet)
+    p.add_argument("--calm", action="store_true",
+                   help=argparse.SUPPRESS)
     return p
 
 
