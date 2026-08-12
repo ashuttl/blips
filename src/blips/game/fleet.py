@@ -20,6 +20,7 @@ import threading
 
 from blips._adsb import fetch_point
 from blips._commands import TELEPHONY
+from blips._geo import bearing_to, haversine_nm, turn_delta
 from blips._routes import RouteLookup
 from blips._runtime import debug_log
 
@@ -66,9 +67,12 @@ class TrafficPool:
         self._perf = perf_types
         self._codes = {c for c in (airport["iata"], airport["icao"]) if c}
         self.routes = RouteLookup()
-        self._entries = []       # [{cs, actype, lat, lon}]
+        self._entries = []       # [{cs, actype, lat, lon, alt, gs, track, vrate}]
         self._used = set()
         self._lock = threading.Lock()
+        self.sampled = threading.Event()   # set once the fetch has resolved,
+                                           # success or not — the shift's
+                                           # opening curtain waits on it
 
     def start(self):
         threading.Thread(target=self._sample, daemon=True).start()
@@ -79,6 +83,7 @@ class TrafficPool:
                 self.airport["lat"], self.airport["lon"], 250)
         except Exception as exc:
             debug_log(f"traffic sample failed: {exc}")
+            self.sampled.set()
             return
         seen = set()
         entries = []
@@ -90,11 +95,15 @@ class TrafficPool:
                 continue
             seen.add(cs)
             entries.append({"cs": cs, "actype": actype,
-                            "lat": ac["lat"], "lon": ac["lon"]})
+                            "lat": ac["lat"], "lon": ac["lon"],
+                            "alt": ac.get("alt"), "gs": ac.get("gs"),
+                            "track": ac.get("track"),
+                            "vrate": ac.get("vrate")})
         self._rng.shuffle(entries)
         with self._lock:
             self._entries = entries
         debug_log(f"traffic pool: {len(entries)} flights via {source}")
+        self.sampled.set()
         # warm the route cache nearest-first: close-in flights are the
         # likeliest to be this airport's own traffic, so their origins
         # and destinations are on the radio soonest
@@ -103,6 +112,81 @@ class TrafficPool:
             + (e["lon"] - self.airport["lon"]) ** 2))
         for e in by_distance:
             self.routes.get(e["cs"], e["lat"], e["lon"])
+
+    def opening(self, sector_nm, elev):
+        """The real picture at sample time, classified for a shift's open:
+        ``{"arrivals", "handins", "departures"}``, each nearest-first.
+
+        ``arrivals`` are genuinely inbound and already inside the ring —
+        the sector you inherit; ``handins`` are the real arrival stream
+        still outside the boundary, so centre can work them across on
+        their own true ETA; ``departures`` are climb-outs caught
+        mid-departure.  Each entry is the sampled dict plus ``dist`` and,
+        when its route has already resolved, ``far`` — the origin leg for
+        an inbound, the destination leg for an outbound.
+
+        Geometry does the classifying (the route cache is seconds old at
+        curtain time); a route that has resolved confirms an inbound the
+        track alone wouldn't, and vetoes a passer-by that happens to
+        point here.  Nothing is marked used — the sim ``take``s exactly
+        what it admits, and everything else stays castable."""
+        home = (self.airport["lat"], self.airport["lon"])
+        out = {"arrivals": [], "handins": [], "departures": []}
+        with self._lock:
+            entries = [dict(e) for e in self._entries
+                       if e["cs"] not in self._used]
+        for e in entries:
+            alt, gs, track = e.get("alt"), e.get("gs"), e.get("track")
+            if alt is None or gs is None or track is None or gs < 90.0:
+                continue     # on the ground, or too partial to trust
+            d = haversine_nm(e["lat"], e["lon"], home[0], home[1])
+            to_field = bearing_to(e["lat"], e["lon"], home[0], home[1])
+            closing = abs(turn_delta(track, to_field)) <= 60.0
+            leaving = abs(turn_delta(track,
+                                     (to_field + 180.0) % 360.0)) <= 60.0
+            vrate = e.get("vrate") or 0.0
+            origin, dest = self._route_ends(e)
+            here = lambda leg: (leg[0] in self._codes
+                                or leg[1] in self._codes)
+            inbound = (here(dest) if origin is not None
+                       else closing and alt <= elev + 26000.0
+                       and vrate < 500.0)
+            # beyond the ring a route-unknown flight has to be pointed
+            # nearly straight here: a 60° cone at 100 nm sweeps up real
+            # traffic bound for the airport down the road
+            tight = abs(turn_delta(track, to_field)) <= 35.0
+            outbound = (here(origin) if origin is not None
+                        else leaving and vrate > 300.0
+                        and alt <= elev + 18000.0)
+            e["dist"] = d
+            # the closest handful is the outgoing controller's traffic —
+            # already sequenced, some of it nearly on final — so the shift
+            # inherits the 12 nm-to-boundary band, not the short final
+            if (inbound and 12.0 <= d <= sector_nm - 2.0
+                    and elev + 2500.0 <= alt <= elev + 17000.0):
+                if origin is not None:
+                    e["far"] = origin
+                out["arrivals"].append(e)
+            elif (inbound and (origin is not None or tight)
+                    and sector_nm - 2.0 < d <= 110.0
+                    and alt <= elev + 26000.0):
+                if origin is not None:
+                    e["far"] = origin
+                out["handins"].append(e)
+            elif (outbound and 3.0 <= d <= sector_nm * 0.7
+                    and elev + 1200.0 <= alt <= elev + 20000.0):
+                if origin is not None:
+                    e["far"] = dest
+                out["departures"].append(e)
+        for flights in out.values():
+            flights.sort(key=lambda e: e["dist"])
+        return out
+
+    def take(self, cs):
+        """Mark a flight the opening admitted, so the cast never re-draws
+        it — the opening's counterpart to ``draw`` marking its own."""
+        with self._lock:
+            self._used.add(cs)
 
     def _route_ends(self, entry):
         """(origin_leg, dest_leg) or (None, None) while unknown."""

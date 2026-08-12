@@ -297,12 +297,28 @@ one, plays exactly as generated.
 
 At the start of a shift, one background fetch samples the **real traffic
 currently within 250 nm** of your airport (same community ADS-B feed the
-scope watches) and their real routes fill in from the route API. The
-spawner draws from that pool: a session at TPA is Southwest 737s and
-Breeze E-Jets, arrivals check in "with you, one three thousand, inbound
-LAL, **from Baltimore**", departures want their gate "**for Denver**".
-Flights whose real route runs the other way never spawn in the wrong
-direction, and each sampled flight spawns at most once a shift. Offline,
+scope watches) and their real routes fill in from the route API.
+
+**The picture you inherit is the real one.** The open holds its curtain
+a few seconds for that sample, and then the sky you take over is the sky
+that was actually there: the flights genuinely inbound — really
+descending on your field, already inside your ring — check in from where
+they really are, at their real altitude, on their real track; the
+arrival stream still out beyond the boundary is spawned at its true
+positions as centre's dim strips, so the opening bank crosses your
+boundary in the real order at the real times; and a climb-out caught
+mid-departure checks in passing its real altitude, wanting its real
+exit. The short final stays with the outgoing controller — you inherit
+the sector, not their landing — the radio says so ("the picture you
+inherit is the real one — seven inbound and one departing off the live
+feed"), and the vendored open only tops up what reality didn't supply.
+
+From there the spawner draws from the same pool: a session at TPA is
+Southwest 737s and Breeze E-Jets, arrivals check in "with you, one three
+thousand, inbound LAL, **from Baltimore**", departures want their gate
+"**for Denver**". Flights whose real route runs the other way never spawn
+in the wrong direction, and each sampled flight spawns at most once a
+shift. Offline,
 or when the pool runs dry mid-shift, it degrades silently to the field's
 vendored schedule — the real carriers, metal and routes that serve it —
 then to a country-plausible airline mix; and a field with no airline

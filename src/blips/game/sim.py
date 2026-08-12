@@ -37,6 +37,7 @@ from blips.game.profiles import profile_for
 from blips.game.schedules import far_city, schedule_for
 
 SECTOR_NM = 45.0          # boundary ring radius
+CURTAIN_S = 6.0           # how long the open holds for the live sample
 DESPAWN_NM = 60.0         # grace past the farthest gate (arrivals spawn
                           # a few nm outside their fix; never despawn there)
 TURN_RATE = 3.0           # deg/s, standard rate
@@ -1058,7 +1059,14 @@ class Sim:
         self.wind = (360.0, 0.0)
         self._set_wind(turn_home=True)
         self._say_atis()         # the shift opens with the numbers
-        self._prepopulate()      # a shift starts mid-shift, not empty
+        if pool is not None:
+            # the live sample is seconds out: hold the curtain briefly so
+            # the picture you inherit can be the real one (tick() opens it
+            # the moment the sample lands, or on the timeout, whichever)
+            self._curtain = CURTAIN_S
+        else:
+            self._curtain = None
+            self._prepopulate()  # a shift starts mid-shift, not empty
 
     def _set_wind(self, turn_home=False):
         """A wind that favours today's runway, held for the whole flow.
@@ -1132,32 +1140,218 @@ class Sim:
 
     def _prepopulate(self):
         """The sector you take over already has traffic in it — enough
-        that the first minutes are a shift, not a waiting room."""
+        that the first minutes are a shift, not a waiting room.  When the
+        live sample landed in time the real sky gets first billing: the
+        flights genuinely inbound and outbound right now open the shift
+        as themselves, and the vendored open only tops up what reality
+        didn't supply."""
+        live = self._prepopulate_live() if self.pool is not None else 0
         want = self.rng.randint(3, 4)
         for _ in range(12):
-            if sum(a["plan"] == "arrival" for a in self.aircraft) >= want:
+            if sum(a["plan"] == "arrival" and not a.get("pre_ho")
+                   for a in self.aircraft) >= want:
                 break
             self._spawn_arrival(allow_sat=False, handin=False)
-        arrivals = [a for a in self.aircraft if a["plan"] == "arrival"]
-        if len(arrivals) > 1:
-            # one of them is already partway in and part-descended — but
-            # no closer than a fresh pair of hands can still work, and no
-            # higher than a normal profile would have it at that range
-            ac = arrivals[-1]
-            here = haversine_nm(ac["lat"], ac["lon"],
-                                self.airport["lat"], self.airport["lon"])
-            ac["lat"], ac["lon"] = advance(
-                ac["lat"], ac["lon"], ac["hdg"],
-                max(0.0, min(18.0, here - 15.0)))
-            dist = haversine_nm(ac["lat"], ac["lon"],
-                                self.airport["lat"], self.airport["lon"])
-            prof = 1000.0 * ((self.airport["elev"] + dist * 320.0) // 1000)
-            ac["alt"] = ac["tgt_alt"] = min(ac["alt"], max(
-                self.airport["elev"] + 5000.0, prof))
-        self._spawn_departure()
+        if not live:
+            arrivals = [a for a in self.aircraft if a["plan"] == "arrival"]
+            if len(arrivals) > 1:
+                # one of them is already partway in and part-descended — but
+                # no closer than a fresh pair of hands can still work, and no
+                # higher than a normal profile would have it at that range
+                # (a live open skips this: reality already has somebody
+                # partway in, at wherever they really are)
+                ac = arrivals[-1]
+                here = haversine_nm(ac["lat"], ac["lon"],
+                                    self.airport["lat"], self.airport["lon"])
+                ac["lat"], ac["lon"] = advance(
+                    ac["lat"], ac["lon"], ac["hdg"],
+                    max(0.0, min(18.0, here - 15.0)))
+                dist = haversine_nm(ac["lat"], ac["lon"],
+                                    self.airport["lat"], self.airport["lon"])
+                prof = 1000.0 * ((self.airport["elev"] + dist * 320.0) // 1000)
+                ac["alt"] = ac["tgt_alt"] = min(ac["alt"], max(
+                    self.airport["elev"] + 5000.0, prof))
+        if not any(a["plan"] == "departure" for a in self.aircraft):
+            self._spawn_departure()
         # the sky you take over was never empty either
         self._spawn_overflight()
         self._spawn_vfr()
+
+    def _prepopulate_live(self):
+        """The opening picture drawn from the sampled sky.  Flights really
+        inbound and already inside the ring check in from where they
+        really are; the real arrival stream still outside crosses the
+        boundary on its own true ETA — centre's dim strips, the ordinary
+        hand-in machinery, fed real state; a climb-out caught
+        mid-departure wants its real exit.  Admitted flights are kept
+        mutually separated — the real sky is, but two straight-line
+        stand-ins for curving traffic needn't stay that way — and
+        anything dropped stays in the pool for the ordinary cast.
+        Returns how many arrivals reality supplied inside the ring, so
+        the vendored open knows how much is left to top up."""
+        try:
+            picture = self.pool.opening(SECTOR_NM, self.airport["elev"])
+        except Exception:        # a sample gone sideways opens the old way
+            return 0
+        counts = {}
+        for bucket, cap, spawn in (
+                ("arrivals", 5,
+                 lambda e: self._spawn_real_arrival(e, handin=False)),
+                ("handins", 6,
+                 lambda e: self._spawn_real_arrival(e, handin=True)),
+                ("departures", 2, self._spawn_real_departure)):
+            n = 0
+            for e in picture.get(bucket, ()):
+                if n >= cap:
+                    break
+                if self._admit_real(e) and spawn(e):
+                    n += 1
+            counts[bucket] = n
+        inbound = counts["arrivals"] + counts["handins"]
+        parts = ([f"{inbound} inbound"] if inbound else []) + (
+            [f"{counts['departures']} departing"]
+            if counts["departures"] else [])
+        if parts:
+            self.say("the picture you inherit is the real one — "
+                     + " and ".join(parts) + " off the live feed", "help")
+        return counts["arrivals"]
+
+    def _admit_real(self, e):
+        """No real spawn lands on top of another.  The sampled sky is
+        separated — real controllers saw to that — but the sim flies
+        straight-line stand-ins for traffic that was curving, so the
+        opening admits only a mutually clear set; a dropped flight is
+        still in the pool for the cast to use properly later."""
+        for other in self.aircraft:
+            if other["callsign"] == e["cs"]:
+                return False
+            if (abs(other["alt"] - e["alt"]) < SEP_FT
+                    and haversine_nm(other["lat"], other["lon"],
+                                     e["lat"], e["lon"]) < SEP_NM * 1.3):
+                return False
+        return True
+
+    def _spawn_real_arrival(self, e, handin):
+        """An arrival seeded from a really-inbound flight: its true
+        position, altitude, track and speed, the gate its own bearing
+        owns, and its real origin when the route has resolved.  Inside
+        the ring it is already yours and checks in; outside it rides the
+        ordinary hand-in machinery — centre's dim strip, descending
+        toward the gate band, checking in the moment it really crosses
+        your boundary."""
+        actype = e["actype"]
+        if not self._runway_ok(actype):
+            return False
+        lat, lon, d = e["lat"], e["lon"], e["dist"]
+        elev = float(self.airport["elev"])
+        cap = 1000.0 * ((elev + d * 450.0) // 1000)
+        if handin:
+            # a far-out cruiser is trimmed to something a real descent
+            # profile could still get down from the boundary
+            alt = 100.0 * round(
+                max(elev + 2500.0, min(float(e["alt"]), cap)) / 100.0)
+        else:
+            # inside the ring the real altitude *is* the altitude — the
+            # pattern makes the room — but somebody genuinely stuck high
+            # is left to the cast rather than handed over as a mess
+            if float(e["alt"]) > cap + 3000.0:
+                return False
+            alt = 100.0 * round(max(elev + 2500.0,
+                                    min(float(e["alt"]),
+                                        elev + 17000.0)) / 100.0)
+        to_field = bearing_to(lat, lon,
+                              self.airport["lat"], self.airport["lon"])
+        track = float(e["track"])
+        hdg = track if abs(turn_delta(track, to_field)) <= 60.0 else to_field
+        perf = PERF.get(actype) or GA_PERF[actype]
+        # indicated off the sampled groundspeed, the ~2 %-per-thousand-
+        # feet of true airspeed unwound
+        ias = max(170.0, min(float(perf[0]),
+                             float(e["gs"]) / (1.0 + alt * 2e-5)))
+        ac = self._base(e["cs"], actype, lat, lon, alt, hdg, ias)
+        entry = self._gate_toward(self.sector["entries"], (lat, lon))
+        far = self._far(e.get("far"))
+        pace = 4500.0 / float(perf[0])
+        ac.update(plan="arrival", fix=entry, rwy=self.sector["rwy"],
+                  thr=self.sector["thr"], course=self.sector["course"],
+                  felev=elev, par=d * pace + 300.0, real=True)
+        if far:
+            ac["from"] = far[0]
+            ac["checkin"] = f"inbound from {far[0]}"
+        else:
+            ac["checkin"] = ""   # the route may still resolve in time
+        if handin:
+            # centre descends the stream toward the gate's band on the
+            # way across, the same stagger a synthetic hand-in gets
+            base = 110 + 10 * self.sector["entries"].index(entry)
+            floor = 100.0 * ((elev + 6000) // 100 + 10)
+            band = 100.0 * (base + self.rng.choice((0, 20)))
+            # centre descends toward the band but never climbs an
+            # arrival that's really lower — low is where they are
+            ac["tgt_alt"] = min(alt, max(floor, min(band, cap)))
+            ac.update(pre_ho=True, dim=True)
+        self.aircraft.append(ac)
+        self.pool.take(e["cs"])
+        if not handin:
+            self._check_in(ac)
+        return True
+
+    def _spawn_real_departure(self, e):
+        """A climb-out caught mid-departure: real position, altitude and
+        track, still bound for the level-off centre expects, wanting the
+        exit its resolved destination — or failing that its own climb-out
+        — points at."""
+        actype = e["actype"]
+        if not self._runway_ok(actype):
+            return False
+        lat, lon = e["lat"], e["lon"]
+        elev = float(self.airport["elev"])
+        alt = 100.0 * round(float(e["alt"]) / 100.0)
+        far = self._far(e.get("far"))
+        if far and far[1]:
+            exit_fix = self._gate_toward(self.sector["exits"], far[1])
+        else:
+            # no destination on file yet: the exit their track points at
+            ahead = advance(lat, lon, float(e["track"]), 60.0)
+            exit_fix = self._gate_toward(self.sector["exits"], ahead)
+        initial = self._initial_alt()
+        # a climber already at or past the level-off has been re-cleared
+        # upward in reality — never "passing four thousand for four
+        # thousand" on the radio
+        tgt = max(initial, 1000.0 * math.ceil((alt + 500.0) / 1000.0))
+        perf = PERF.get(actype) or GA_PERF[actype]
+        ias = min(float(perf[0]),
+                  max(200.0, float(e["gs"]) / (1.0 + alt * 2e-5)))
+        ac = self._base(e["cs"], actype, lat, lon, alt, float(e["track"]),
+                        ias)
+        ac.update(plan="departure", fix=exit_fix, tgt_alt=tgt,
+                  tgt_ias=float(perf[0]), phase="cruise", real=True)
+        # centre's letter of agreement bites mid-climb the same as it
+        # does off the runway (see _spawn_departure)
+        note = ""
+        if self.rng.random() < 0.35 and perf[0] >= 200:
+            menu = self.profile.get("xr")
+            ac["xr"] = (float(self.rng.choice(menu)) if menu
+                        else 1000.0 * round(
+                            (elev + self.rng.choice(
+                                (7000.0, 9000.0, 11000.0))) / 1000.0))
+            note = f" — centre wants {say_altitude(ac['xr'])} crossing it"
+        if far:
+            ac["to"] = far[0]
+        self.aircraft.append(ac)
+        self.pool.take(e["cs"])
+        tail = f", for {far[0]}" if far else ""
+        self.say(f"{hail(ac)} with you, passing {say_altitude(ac['alt'])} "
+                 f"for {say_altitude(tgt)}, requesting {exit_fix}{tail}"
+                 f"{note}", "checkin", voice=ac["callsign"])
+        up = max(1000.0 * round((elev + 10000.0) / 1000.0),
+                 ac.get("xr", 0.0))
+        cs = ac["callsign"].lower()
+        self._coach("departure",
+                    f"{cs} wants altitude and their gate — {cs} c "
+                    f"{int(up) // 100}, then {cs} dct {exit_fix}, then "
+                    f"{cs} ho at the edge")
+        return True
 
     # -- Feed interface -----------------------------------------------------
     def snapshot(self):
@@ -2494,6 +2688,14 @@ class Sim:
             return
         self._elapsed += dt
 
+        if self._curtain is not None:
+            self._curtain -= dt
+            sampled = getattr(self.pool, "sampled", None)
+            if self._curtain <= 0 or (sampled is not None
+                                      and sampled.is_set()):
+                self._curtain = None
+                self._prepopulate()
+
         if self._rwy_closed_until and not self._rwy_closed():
             self._rwy_closed_until = 0.0
             self.say(f"runway {self.sector['rwy']} back open — "
@@ -2735,6 +2937,16 @@ class Sim:
                                 self.airport["lat"], self.airport["lon"])
             if dist > SECTOR_NM:
                 continue
+            if ac.get("real") and not ac["checkin"]:
+                # the roster was seconds old at the curtain; most routes
+                # resolve while centre is still working the strip across
+                routes = getattr(self.pool, "routes", None)
+                route = (routes.get(ac["callsign"], ac["lat"], ac["lon"])
+                         if routes is not None else None)
+                far = self._far(route[0]) if route else None
+                if far:
+                    ac["from"] = far[0]
+                    ac["checkin"] = f"inbound from {far[0]}"
             ac.update(pre_ho=False, dim=False)
             self._check_in(ac)
 

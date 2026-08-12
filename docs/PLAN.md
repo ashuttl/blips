@@ -147,6 +147,24 @@ are done.
   of every field; the departure parallel still teaches its refusal.
   Charted visuals (river/bay) stay in Later.
 
+- ✅ **Live traffic as the scenario generator** *(locality, fun)* — the
+  open holds a ~6 s curtain for the ADS-B sample, then the picture you
+  inherit is the real one: genuinely-inbound flights (route-confirmed,
+  or classified by closing geometry, descent state and altitude band)
+  check in from their true position, altitude and track inside the ring;
+  the real arrival stream outside the boundary rides the existing
+  hand-in machinery as centre's dim strips, so the opening bank crosses
+  on its true ETA in its true order (routes that resolve late still get
+  their "from Baltimore" at check-in time); and a climb-out caught
+  mid-departure wants its real exit — resolved destination, else the
+  gate its own track points at. The opening admits only a mutually
+  separated set; the short final (< 12 nm) stays with the outgoing
+  controller; dropped or unused flights stay in the pool for the
+  ordinary cast; the vendored open tops up what reality didn't supply;
+  seeded shifts never touch it (pool=None, as ever). Verified live at
+  KBOS: 181-flight sample → 2 real arrivals in-ring, 5 real hand-ins
+  inbound on their own ETAs, 1 real departure climbing to PATSS.
+
 ## Safety follow-up
 
 - ✅ **Make the satellite LOA altitude an invariant.** The pair is now
@@ -162,6 +180,13 @@ are done.
 
 ## Later — worth doing, not first
 
+- **Replay against reality** — the opening is the real traffic now, so
+  the natural next question is scoreable: re-sample the feed every ~10
+  minutes alongside the shift ledger and let a finished shift answer
+  "how did your sequence compare with what the real controllers did
+  with the same bank?" (order flown, spacing on final, who landed by
+  minute 30). The UI is the unsolved part — probably a post-shift card
+  before a live split view.
 - **Published missed approaches and approach step-downs** — the APPCH
   legs are already vendored (final fixes, crossing altitudes, and the
   climb-out after the runway fix); fly the published miss on a
