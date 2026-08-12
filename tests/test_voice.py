@@ -67,3 +67,34 @@ def test_no_voices_at_all_is_survivable():
     sp = _make({})
     assert sp._voice_for("DAL500") is None        # speak with the system default
     assert sp._voice_for("ATIS") is None
+
+
+# --- the piper company -----------------------------------------------------
+
+from blips.game.voice import _ACCENT, _PIPER_MODELS, _PiperBackend
+
+
+def test_piper_pools_cover_every_accent_bucket():
+    # every accent an airline can ask for resolves to a real, non-empty pool
+    voices = _PiperBackend.voices()
+    for locale in set(_ACCENT.values()) | {"en_US"}:
+        assert voices[locale], locale
+    # and every token is a (known model, in-range speaker id)
+    for pool in voices.values():
+        for model, sid in pool:
+            assert 0 <= sid < _PIPER_MODELS[model]
+
+
+def test_piper_casting_splits_the_atlantic():
+    sp = _make(_PiperBackend.voices())
+    assert sp._voice_for("BAW451")[0] == "en_GB-vctk-medium"   # Speedbird
+    assert sp._voice_for("EIN23")[0] == "en_GB-vctk-medium"    # Shamrock
+    assert sp._voice_for("UAL889")[0] == "en_US-libritts_r-medium"
+    # a flight keeps its voice here too
+    assert sp._voice_for("BAW451") == sp._voice_for("BAW451")
+
+
+def test_piper_atis_is_fixed():
+    sp = _make(_PiperBackend.voices())
+    sp._atis_pref = _PiperBackend.atis_pref
+    assert sp._voice_for("ATIS") == _PiperBackend.atis_pref[0]

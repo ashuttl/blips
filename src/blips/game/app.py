@@ -981,10 +981,12 @@ def main(args):
                 sim.speaker = None
                 desk("voices off")
             elif not Speaker.available():
-                desk("voices need macOS ‘say’")
+                desk(Speaker.hint())
             else:
+                fetching = Speaker.needs_download()
                 sim.speaker = Speaker()
-                desk("voices on")
+                desk("voices on — fetching voices (~150 MB), first call "
+                     "will be late" if fetching else "voices on")
             return True
         return False
 

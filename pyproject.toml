@@ -14,6 +14,10 @@ classifiers = [
     "Programming Language :: Python :: 3",
 ]
 
+[project.optional-dependencies]
+# pilot voices off macOS: local neural TTS (macOS uses the system `say`)
+voice = ["piper-tts>=1.6"]
+
 [project.urls]
 Homepage = "https://github.com/ashuttl/blips"
 Issues = "https://github.com/ashuttl/blips/issues"

@@ -120,7 +120,7 @@ vendored table — `RPA` reads back as Brickyard, `BAW` as Speedbird.
 Words the sim understands without a callsign: `pause`, `q`/`quit`,
 `w`/`weather`, `log`/`r` (toggle the tape), `proc` (and `arr`/`star`,
 `dep`/`sid`, `plate` — the procedure overlay), `voice` (speak the
-frequency aloud — macOS only), and `?`, which pauses the shift and
+frequency aloud), and `?`, which pauses the shift and
 draws the **help card** over the footer: the radio verbs one per line
 with a worked example off a callsign that's actually on frequency, the
 altitudes-in-hundreds rule, the desk keys and the mouse — and `?` again
@@ -130,17 +130,24 @@ is empty; Esc clears it; up-arrow recalls history. The empty bar wears
 the whole radio grammar as its hint, wrapped to however wide your
 terminal really is, so `? help` never falls off the edge.
 
-On macOS, `voice` turns the pilots' words into speech through the system
-`say` command. It's a radio, so it stays half-duplex — one transmission
-at a time, and a call that lands while another is playing gets stepped
-on. Each flight keeps **one voice for its whole life** on your frequency,
-cast by the airline's nationality wherever the machine has the accent for
-it: Speedbird speaks in a London voice, Shamrock in a Dublin one, Air
-India in Rishi, Qantas in Karen — everyone else in a neutral US voice,
+`voice` turns the pilots' words into speech. It's a radio, so it stays
+half-duplex — one transmission at a time, and a call that lands while
+another is playing gets stepped on. Each flight keeps **one voice for
+its whole life** on your frequency, cast by the airline's nationality
+wherever the machine has the accent for it: Speedbird speaks in a London
+voice, Shamrock in a Dublin one — everyone else in a neutral US voice,
 and the ATIS in its own flat recording. Off it comes clean the way
-the log always has; you never hear your own side. (More accents means
-more voices — the range comes from whatever voices are installed under
-System Settings → Accessibility → Spoken Content.)
+the log always has; you never hear your own side.
+
+On macOS the voices are the system `say` command's; more accents means
+more voices, and the range comes from whatever is installed under
+System Settings → Accessibility → Spoken Content. Everywhere else the
+voices are [Piper](https://github.com/OHF-Voice/piper1-gpl), a local
+neural TTS: install with `pip install blips[voice]`, and the first time
+you key the radio blips fetches two multi-speaker models (~150 MB, once,
+into `~/.cache/blips/voices`) — roughly nine hundred American voices and
+a hundred from a British corpus that carry the UK-school buckets.
+Synthesis is pure CPU and faster than the words come out.
 
 ## The sector
 
