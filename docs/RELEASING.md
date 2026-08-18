@@ -43,9 +43,16 @@ when the first tag is ready to push. No PyPI token belongs in GitHub secrets.
 8. In a clean temporary environment, verify the public artifact:
 
    ```sh
+   cd /tmp
    uvx --refresh blips --version
    uvx --refresh blips --location jfk --print --no-weather
    ```
+
+   Do this outside the source checkout. From inside a project also named
+   `blips`, uv may resolve the editable project recorded in `uv.lock` instead
+   of PyPI. When staying in the checkout is useful, pass `--no-sources` to
+   force the registry—for example
+   `uv tool install --force --no-sources 'blips[voice]'`.
 
 9. Create GitHub release notes for the tag and only then announce the release.
 
