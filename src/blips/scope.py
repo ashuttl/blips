@@ -1050,7 +1050,8 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
     # reticle: range rings + crosshair, stamped over the map last. Anchored
     # at the view centre by default (a drag slews the scope head under them);
     # with rings_at they anchor to that fixed point instead and ride the map.
-    # Rings yield to text (blips/labels); the crosshair always wins.
+    # Rings yield to text (blips/labels); the crosshair beats scenery but
+    # yields to traffic — a data block passing over the anchor stays whole.
     rlat, rlon = rings_at if rings_at is not None else (lat, lon)
     reticle = {}
     hcol = int((rlon - minlon) / (maxlon - minlon) * graph_w)
@@ -1106,7 +1107,8 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
                         and all(p not in overlays for p in pad)):
                     for (c, _r), ch in zip(cells, label):
                         reticle[(c, row)] = (ch, RING)
-    if 0 <= hcol < graph_w and 0 <= hrow < height_cells:
+    if (0 <= hcol < graph_w and 0 <= hrow < height_cells
+            and (hcol, hrow) not in air):
         reticle[(hcol, hrow)] = ("+", MARKER)
 
     # pointer focus: nearest blip within a few cells of the mouse
