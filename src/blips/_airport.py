@@ -136,11 +136,20 @@ def board(ap, aircraft, routes, max_nm=400.0):
             inbound = (ac.get("vrate") or 0) < 300 and not ac.get("ground")
             outbound = not inbound
         if inbound and not ac.get("ground"):
+            # the far end: the last stop before here that isn't here
+            other = next((leg for leg in reversed(route[:-1])
+                          if not _leg_codes(leg) & codes), None)
+            if other is None:
+                continue
             gs = ac.get("gs") or 0
             eta = d / gs * 60.0 if gs > 60 else None
-            arrivals.append((ac, route[0], d, eta))
+            arrivals.append((ac, other, d, eta))
         elif outbound and d <= max_nm:
-            departures.append((ac, route[-1], d, None))
+            other = next((leg for leg in route[1:]
+                          if not _leg_codes(leg) & codes), None)
+            if other is None:
+                continue
+            departures.append((ac, other, d, None))
     arrivals.sort(key=lambda e: e[2])
     departures.sort(key=lambda e: e[2])
     return arrivals, departures

@@ -45,10 +45,16 @@ def test_board_sorts_and_classifies():
            _ac("c", 40.0, -75.0, None, 0, ground=True, callsign="CCC3"),
            _ac("d", 40.2, -75.0, 5000, 0, 2500, callsign="DDD4")]
     routes = {"AAA1": (far, here), "BBB2": (far, here),
-              "CCC3": (here, far), "DDD4": (here, here)}
+              "CCC3": (here, far), "DDD4": (here, far, here)}
     arrivals, departures = board(AP, sky, routes)
     assert [e[0]["callsign"] for e in arrivals] == ["BBB2", "AAA1"]
     assert {e[0]["callsign"] for e in departures} == {"CCC3", "DDD4"}
+    # a round trip names its far stop, not here
+    assert all(e[1][1] == "FAR" for e in arrivals + departures)
+    # and one that never leaves (here → here) isn't on the board at all
+    routes["DDD4"] = (here, here)
+    _arr, deps = board(AP, sky, routes)
+    assert "DDD4" not in {e[0]["callsign"] for e in deps}
 
 
 def test_metar_summary():

@@ -53,6 +53,9 @@ LOST_S = 60.0            # a selected flight unseen this long: "signal lost"
 ZOOM_STEP = 1.5          # + and -
 WHEEL_STEP = 1.25        # a wheel notch
 LABEL_MODES = ("auto", "full", "callsign", "off")
+STAR_INK = (72, 150, 160)     # arrivals, as the game paints them: teal
+SID_INK = (170, 140, 90)      # departures: a dim amber
+PROC_ZOOM = 4.0               # wider than this, a field's procedures are a knot
 
 
 def _geometry():
@@ -103,6 +106,7 @@ class ScopeApp(LiveApp):
         self._panel_rects = []
         self._search_rect = None
         self._result_rows = {}    # screen row → result index
+        self._procs = None        # (key, overlay) for the airport on the card
         self._lock = threading.Lock()
 
     # -- running ---------------------------------------------------------------
@@ -506,6 +510,16 @@ class ScopeApp(LiveApp):
             self.search.cursor = min(self.search.cursor,
                                      max(0, len(self.results) - 1))
 
+        procs = self._procedures(aircraft)
+        proc_paths, proc_pins = [], []
+        if procs and self.camera.zoom <= PROC_ZOOM:
+            for kind, _name, pts in procs["paths"]:
+                proc_paths.append((pts, STAR_INK if kind == "STAR" else SID_INK,
+                                   True))
+            for lat, lon, name, kind, _vec in procs["labels"]:
+                ink = STAR_INK if kind == "STAR" else SID_INK
+                proc_pins.append((lat, lon, "", ink, name,
+                                  {"label_color": ink, "key": ("proc", name)}))
         floating, rects = self._panels(cols, rows, aircraft, routes)
         self._panel_rects = rects
         frame = render_scope(
@@ -515,7 +529,9 @@ class ScopeApp(LiveApp):
             show_ground=self.toggles["g"], weather=self.weather,
             show_weather=self.toggles["w"], drag_offset=self.drag_preview,
             routes=self.routes, hover_card=self._hover_lines,
-            selected=self.selected, route_geo=self._route_geo(),
+            selected=self.selected,
+            route_geo=(self._route_geo() or []) + proc_paths,
+            pins=proc_pins, pin_card=self._pin_card,
             aircraft_filter=self._filter_fn(), label_mode=self.label_mode,
             airport_focus=self.airport["icao"] if self.airport else None,
             header_extra=self._header_extra(),
@@ -525,6 +541,105 @@ class ScopeApp(LiveApp):
         body, _, chip = frame.partition("\x00")
         return overlay(body, chip + floating,
                        motion=False if self.search_open else None)
+
+    def _runways(self, aircraft):
+        """(landing, departing) runway idents at the card's airport: the
+        ones traffic is seen using, else the end facing into the METAR's
+        wind for both, else (None, None)."""
+        ap = self.airport
+        near = [a for a in aircraft
+                if haversine_nm(ap["lat"], ap["lon"], a["lat"], a["lon"]) < 15]
+        landing, departing = runways_in_use(ap, near)
+        land = max(landing, key=landing.get) if landing else None
+        dep = max(departing, key=departing.get) if departing else None
+        if land and dep:
+            return land, dep
+        report = self.metars.get(ap["icao"])
+        wdir = report.get("wdir") if report else None
+        if isinstance(wdir, (int, float)):
+            ends = [(abs((e[1] - wdir + 180) % 360 - 180), e[0])
+                    for r in ap.get("rwys") or () for e in (r.get("le"), r.get("he"))
+                    if e and e[1] is not None]
+            if ends:
+                into = min(ends)[1]
+                return land or into, dep or into
+        return land or dep, dep or land
+
+    def _procedures(self, aircraft):
+        """The SIDs and STARs serving the card airport's runways in use,
+        from the game's vendored FAA procedures — or None (no airport on
+        the card, no procedures on file, no runway known)."""
+        ap = self.airport
+        if not ap:
+            return None
+        try:
+            from blips.game.procedures import overlay_for, procedures_for
+        except Exception:
+            return None
+        if not procedures_for(ap["icao"]):
+            return None
+        land, dep = self._runways(aircraft)
+        if not (land or dep):
+            return None
+        key = (ap["icao"], land, dep)
+        if self._procs is None or self._procs[0] != key:
+            out = {"paths": [], "labels": [], "plans": []}
+            for rwy, kinds in ((land, ("STAR",)), (dep, ("SID",))):
+                if not rwy:
+                    continue
+                ov = overlay_for(ap, rwy, kinds=kinds, declutter=False,
+                                 radius_nm=60.0)
+                for k in out:
+                    out[k] += ov[k]
+            out["runways"] = (land, dep)
+            self._procs = (key, out)
+        return self._procs[1]
+
+    def _star_for(self, ac):
+        """The STAR an arrival is flying, by which one's track it sits on
+        (within 2 nm), or None."""
+        if not self._procs:
+            return None
+        from blips.game.procedures import _dist_to_path
+        best = None
+        for plan in self._procs[1]["plans"]:
+            if plan["kind"] != "STAR":
+                continue
+            paths = [plan["spine"]] + [pts for _n, pts in plan["branches"]]
+            for pts in paths:
+                if len(pts) < 2:
+                    continue
+                d = _dist_to_path((ac["lat"], ac["lon"]),
+                                  [(f[0], f[1]) for f in pts])
+                if d <= 2.0 and (best is None or d < best[0]):
+                    best = (d, plan["name"])
+        return best[1] if best else None
+
+    def _pin_card(self, key):
+        """Chip lines for a procedure label under the pointer."""
+        from blips._color import fg
+        if not (isinstance(key, tuple) and key[0] == "proc" and self._procs):
+            return None
+        names = key[1].split("/")
+        mut = fg(*ensure_contrast(MUTED, CHIP_BG, 3.0))
+        lines = []
+        for plan in self._procs[1]["plans"]:
+            if plan["name"] not in names:
+                continue
+            ink = STAR_INK if plan["kind"] == "STAR" else SID_INK
+            land, dep = self._procs[1]["runways"]
+            rwy = land if plan["kind"] == "STAR" else dep
+            what = "arrival" if plan["kind"] == "STAR" else "departure"
+            lines.append(f"{fg(*ensure_contrast(ink, CHIP_BG, 3.0))}{plan['name']}"
+                         f" {mut}{what} · runway {rwy}")
+            fixes = " ".join(f[2] for f in plan["spine"] if f[2])
+            if fixes:
+                lines.append(mut + fixes)
+            top, bottom = plan.get("top"), plan.get("bottom")
+            if top or bottom:
+                window = " – ".join(f"{v:,} ft" for v in (bottom, top) if v)
+                lines.append(mut + "published " + window)
+        return lines or None
 
     def _header_extra(self):
         out = []
@@ -719,6 +834,15 @@ class ScopeApp(LiveApp):
                 bits.append("departing " + " ".join(
                     sorted(departing, key=lambda k: -departing[k])))
             lines.append([("in use (seen) ", DIM), (" · ".join(bits), GOOD)])
+        if self._procs and self._procs[0][0] == ap["icao"]:
+            stars = sorted({p["name"] for p in self._procs[1]["plans"]
+                            if p["kind"] == "STAR"})
+            sids = sorted({p["name"] for p in self._procs[1]["plans"]
+                           if p["kind"] == "SID"})
+            if stars:
+                lines.append([("arrivals ", DIM), (" ".join(stars), STAR_INK)])
+            if sids:
+                lines.append([("departures ", DIM), (" ".join(sids), SID_INK)])
         arrivals, departures = board(ap, aircraft, routes)
         row = 2 + len(lines)
 
@@ -728,10 +852,14 @@ class ScopeApp(LiveApp):
             alt = (f"FL{ac['alt'] / 100:03.0f}" if (ac.get("alt") or 0) >= 18000
                    else "ground" if ac.get("ground")
                    else f"{(ac.get('alt') or 0):,.0f}")
-            return [(f"{ac['callsign']:<9}", blip_color(ac)),
+            row_ = [(f"{ac['callsign']:<9}", blip_color(ac)),
                     (f"{verb} {other[1]:<4}", mut),
                     (f" {dist:>4.0f} nm", DIM), (f"  {alt:>6}", DIM),
                     (f"  {when}", mut)]
+            star = self._star_for(ac) if verb == "from" and dist < 80 else None
+            if star:
+                row_.append((f"  {star}", STAR_INK))
+            return row_
 
         for title, items, verb in (("Arrivals", arrivals, "from"),
                                    ("Departures", departures, "to")):
