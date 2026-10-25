@@ -44,24 +44,55 @@ uvx blips --location jfk
 ```sh
 blips                              # centre on your approximate location
 blips --location jfk               # or any place name
+blips --location "portland maine"  # a place with its state or country
 blips --location 51.47,-0.45 --zoom 1.5
+blips --find "DL 1673"             # open with a search
 blips --no-weather                 # leave out the weather-radar underlay
 blips --print                      # one static frame for scripts or captures
 ```
 
-Drag to pan, use `+` and `-` to zoom, and hover or click an aircraft for its
-full data readout and route when one is known.
+Scroll to zoom about the pointer, drag or use the arrow keys to pan, and
+hover over an aircraft for a quick readout. Click it to pin its card: the
+airline and aircraft type, its route with the distance and time to go,
+altitude and the altitude the crew has selected, speed, and the wind and
+temperature where it's flying. Its route is drawn as great-circle arcs,
+and `f` follows it across the map. Click an airport's label, or press
+`a`, for that airport's weather, the runways seen in use and its
+arrivals and departures.
+
+## Find a flight
+
+Press `/` and type. Results follow your typing:
+
+- a flight by callsign (`DAL1673`), flight number (`DL 1673`, `UA123`),
+  registration (`N812DN`, `G-EUPT`) or hex code. Anything on screen
+  answers at once. A moment after you stop typing, the rest of the
+  world is asked too, so Enter flies you to a flight on the other side
+  of the planet and follows it.
+- a route: `BOS-SFO`, `to LHR`, `from JFK`, matched against the routes
+  blips has looked up for the traffic it has seen.
+- an airport by code or name: `PWM`, `Heathrow`.
+- a filter: an airline (`delta`), a type (`737`, `A388`, `dreamliner`),
+  `military`, `emergency`, `heavies`, `above FL300`. Filters are named
+  in the header, and `x` clears them.
+- anything else is taken as a place to go.
 
 | Key | Action |
 | --- | --- |
-| `+` / `-` | Zoom in / out |
-| drag | Pan the scope |
-| hover / click | Inspect an aircraft |
-| `t` | Toggle trails |
-| `r` | Toggle range rings |
-| `g` | Toggle ground traffic |
-| `w` | Toggle weather radar |
-| `space` | Pause the glide animation |
+| `/` | Search |
+| scroll · `+` / `-` | Zoom |
+| drag · arrows | Pan |
+| click | Select a flight (click again to follow) or an airport |
+| `Tab` | Select the next flight out from the centre |
+| `f` | Follow the selected flight |
+| `c` / `h` | Centre on the selection / fly home |
+| `a` | Card for the airport nearest the centre |
+| `x` | Clear filters |
+| `l` | Labels: auto, all, callsign only, off |
+| `t` `r` `g` `w` | Trails, range rings, ground traffic, weather |
+| `space` | Pause the glide |
+| `esc` | Close the card, then clear filters |
+| `?` | Help |
 | `q` | Quit |
 
 ## There's also a game
@@ -88,19 +119,25 @@ voices in full.
 With no `--location`, blips asks ipinfo.io for an approximate location from
 your IP address. Pass a place or coordinates to avoid that lookup. Place-name
 search uses Open-Meteo. Live mode necessarily sends the visible area's centre
-and radius to the selected aircraft and weather providers; no blips account or
-telemetry service is involved.
+and radius to the selected aircraft and weather providers, the callsigns and
+positions of traffic in view to the route service, and your search terms to
+the aircraft providers; no blips account or telemetry service is involved.
 
 <details>
 <summary><strong>Data sources and coverage</strong></summary>
 
-- **Aircraft** — [adsb.lol](https://adsb.lol),
-  [airplanes.live](https://airplanes.live) and
+- **Aircraft** — [adsb.lol](https://adsb.lol) and
   [adsb.fi](https://adsb.fi), elected by coverage for the current view and
-  polled once every five seconds. These community feeds depend on volunteer
-  receivers, so coverage is thinner over oceans and sparsely populated land.
-- **Routes** — demand-driven callsign lookups from
-  [adsb.im](https://adsb.im), requested only for an aircraft being inspected.
+  polled once every five seconds; a view wider than their 250 nm reach is
+  swept in tiles, a second apart. Search looks flights up worldwide on the
+  same services. These community feeds depend on volunteer receivers, so
+  coverage is thinner over oceans and sparsely populated land.
+- **Routes** — callsign lookups from [adsb.im](https://adsb.im), in
+  batches for the airline traffic in view, kept on disk for a few hours.
+- **Airport weather** — METARs from the
+  [Aviation Weather Center](https://aviationweather.gov/).
+- **Airlines and aircraft types** — distilled from
+  [OpenFlights](https://openflights.org/data.php), with corrections.
 - **Weather radar** — [LibreWXR](https://librewxr.net) worldwide, with NEXRAD
   from the [Iowa Environmental Mesonet](https://mesonet.agron.iastate.edu/)
   over the continental US and [RainViewer](https://www.rainviewer.com/) as a

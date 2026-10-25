@@ -1206,7 +1206,8 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
         status = f"{'▶' if playing else '⏸'} {age}"
         if error:
             status += " · feed unavailable, retrying"
-        elif fetching and fetch_started and now - fetch_started > 5:
+        elif (fetching and fetch_started and now - fetch_started > 5
+              and not sweep):
             status += f" · still fetching… {now - fetch_started:.0f}s"
 
     place = header_note if header_note else _place(lat, lon)
