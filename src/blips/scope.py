@@ -22,7 +22,6 @@ Usage: blips [--location LAT,LNG | PLACE] [--zoom DEG] [--print]
 import functools
 import math
 import os
-import signal
 import sys
 import threading
 import time
@@ -36,7 +35,7 @@ from blips._basemap import (
 from blips._color import BG_PRIMARY, BOLD, RESET, bg, fg, interp_stops, lerp
 from blips._framebuffer import get_terminal_size, visible_len
 from blips._geo import advance, bearing_to, haversine_nm
-from blips._live import live_loop
+from blips._live import live_loop, nudge
 from blips._location import geocode_place, get_location
 from blips._radar_sources import get_source
 from blips._runtime import blips_parser, resolve_live
@@ -198,7 +197,7 @@ class Feed:
         self._picker = SourcePicker()  # sticky best-aggregator-for-here
         self._wake = threading.Event()
         self._lock = threading.Lock()
-        self._nudge = nudge  # SIGWINCH-poke the live loop after each poll
+        self._nudge = nudge  # wake the live loop after each poll
 
     def set_view(self, lat, lon, radius_nm):
         view = (round(lat, 4), round(lon, 4), round(radius_nm))
@@ -271,12 +270,7 @@ class Feed:
                 with self._lock:
                     self.error = str(exc)
             if self._nudge:
-                # repaint now that data landed (rides the live loop's
-                # existing SIGWINCH self-pipe wakeup; harmless if coalesced)
-                try:
-                    os.kill(os.getpid(), signal.SIGWINCH)
-                except Exception:
-                    pass
+                nudge()  # repaint now that data landed
             self._wake.wait(REFRESH_S)
             self._wake.clear()
 
@@ -373,10 +367,7 @@ class WeatherFeed:
                     with self._lock:
                         self.error = str(exc)
                 if self._nudge:
-                    try:
-                        os.kill(os.getpid(), signal.SIGWINCH)
-                    except Exception:
-                        pass
+                    nudge()
                 self._wake.wait(WEATHER_REFRESH_S)
             else:
                 self._wake.wait()  # idle until toggled on

@@ -381,8 +381,9 @@ class _Console:
                 return True
             self.buffer = ""
             return True
-        if action in ("back", "fwd"):
-            return self._history(-1 if action == "back" else 1)
+        if action in ("up", "down"):
+            # shell-style: up reaches back for older commands
+            return self._history(-1 if action == "up" else 1)
         ctrl = {"key:ctrl-l": "log", "key:ctrl-p": "pause",
                 "key:ctrl-o": "proc", "key:ctrl-v": "voice",
                 "key:ctrl-w": "weather", "key:ctrl-b": "labels"}.get(action)

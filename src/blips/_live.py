@@ -1,455 +1,702 @@
-"""Live mode: alternate screen rendering with auto-refresh and input handling.
+"""Live mode: the alternate screen, input, and a frame whenever it's due.
 
-Provides the live_loop() function that runs a render callback in a loop on the
-terminal's alternate screen buffer, with support for:
+live_loop() runs a render callback on the terminal's alternate screen and
+calls it again whenever something happens — a key, a wheel notch, a drag,
+a resize, a timer, or a background fetch landing (nudge()).  LiveApp is
+the class a view with state subclasses: its hook methods become the
+loop's callbacks.
 
-- Auto-refresh on a configurable interval
-- Immediate re-render on terminal resize (SIGWINCH)
-- Keyboard navigation (arrows, q to quit, n to reset)
-- Mouse wheel scrubbing (SGR and legacy X10/VT200 encoding)
-- Alert modal interaction (click to open, scroll to read, q/click to dismiss)
+A sibling of linecast's terminal.live, carrying over what that loop
+learned since blips forked from it:
 
-Mouse protocol references:
-  - SGR (1006): https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h3-Extended-coordinates
-  - Legacy X10:  https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h3-Normal-tracking-mode
+- Frames are paced to the terminal.  Each goes out with a cursor position
+  query after it, and the next waits for the reply, so a terminal slower
+  than the loop is never handed a backlog to play out after the input
+  stops; keys and wheel notches that arrive meanwhile fold into the next
+  frame.  A terminal that never answers is asked once, then left alone.
+- Each frame is one synchronized update (DEC mode 2026), with every row
+  addressed and autowrap off, so a terminal never shows half a frame and
+  a row drawn wider than measured clips instead of shifting the rest.
+- Background threads wake the loop with nudge(), a self-pipe write; no
+  more signalling our own process with SIGWINCH.
+- Ctrl-Z hands the terminal back before stopping; SIGTERM and SIGHUP
+  restore it on the way out; a crash in a worker thread is reported once
+  the screen is back.
+
+POSIX only, as blips is.
 """
 
 import os
+import re
+import signal
 import sys
+import termios
+import threading
 import time as _time
+import tty
+
+from blips import _keys
+
+# ---------------------------------------------------------------------------
+# Frames
+# ---------------------------------------------------------------------------
+_AUTOWRAP_OFF = "\033[?7l"
+_AUTOWRAP_ON = "\033[?7h"
+_SYNC_BEGIN = "\033[?2026h"
+_SYNC_END = "\033[?2026l"
+_CPR_QUERY = "\033[6n"
+_MOTION_ON = "\033[?1003h"
+_MOTION_OFF = "\033[?1003l"
+# how long the next frame waits for the terminal to say it read the last
+_ACK_WAIT_S = 1.0
+_ACK_FIRST_WAIT_S = 0.25
+
+
+def frame_body(text):
+    r"""A frame with every row addressed, so no row can shift the ones below.
+
+    The clear comes before the row, not after: with autowrap off a row that
+    reaches the last column leaves the cursor on that cell, and a clear from
+    there would take the cell's glyph with it.
+    """
+    return "".join(f"\033[{row};1H\033[K{line}"
+                   for row, line in enumerate(text.split("\n"), 1))
+
+
+def frame_paint(body, floating="", rows=None):
+    r"""Everything the loop writes for one frame, as one string: a
+    synchronized update, autowrap off, the screen below the body cleared,
+    the addressed rows, and the cursor-addressed ``floating`` overlay on
+    top.  ``rows`` is the terminal's height; when the body fills it the
+    clear below is skipped (terminals clamp the row after the last to the
+    last row, and the clear would blank the footer mid-update)."""
+    n = body.count("\n") + 1
+    clear_below = (f"\033[{n + 1};1H\033[J"
+                   if rows is None or n < rows else "")
+    return (f"{_SYNC_BEGIN}{_AUTOWRAP_OFF}{clear_below}{frame_body(body)}"
+            f"\033[0m{floating}\033[0m{_AUTOWRAP_ON}{_SYNC_END}")
+
+
+def overlay(body, floating="", motion=None):
+    """A frame with something floating over it — a chip, a panel, the
+    search field — on the channel the loop draws after the body, where
+    clearing lines can't touch it.  ``motion=False`` turns any-motion mouse
+    reporting off for this frame (a text field wants that: a torn motion
+    report reads as Esc); the loop turns it back on for frames that don't
+    say so."""
+    if motion is False:
+        floating = _MOTION_OFF + floating
+    if not floating:
+        return body
+    return f"{body}\x00{floating}"
 
 
 # ---------------------------------------------------------------------------
-# Mouse decoding
+# The terminal
 # ---------------------------------------------------------------------------
-def _decode_sgr_mouse(seq):
-    """Decode an SGR mouse sequence payload like b'<64;10;20M'.
-
-    SGR encoding (mode 1006) sends: CSI < Cb ; Cx ; Cy M/m
-    where M = press, m = release.
-    """
-    if not seq.startswith(b'<') or seq[-1:] not in (b'M', b'm'):
-        return None
-    try:
-        parts = seq[1:-1].decode("ascii").split(";")
-        cb, cx, cy = int(parts[0]), int(parts[1]), int(parts[2])
-    except (ValueError, IndexError, UnicodeDecodeError):
-        return None
-    return ('mouse', cb, cx, cy, seq[-1:] == b'm')
+_current = None  # the _Terminal a loop is running on, for nudge()
 
 
-def _decode_legacy_mouse(payload):
-    """Decode legacy X10/VT200 mouse payload bytes (Cb, Cx, Cy).
+class _Terminal:
+    """Cbreak input plus a wakeup any thread can pull."""
 
-    Legacy encoding sends: CSI M Cb Cx Cy
-    where each byte is the value + 32 (to avoid control characters).
-    """
-    if len(payload) != 3:
-        return None
-    cb = payload[0] - 32
-    cx = payload[1] - 32
-    cy = payload[2] - 32
-    if cb < 0 or cx < 1 or cy < 1:
-        return None
-    is_rel = (cb & 0b11) == 0b11 and not (cb & 0x40)
-    return ('mouse', cb, cx, cy, is_rel)
+    def __init__(self, fd):
+        self.fd = fd
+        self._closed = False
+        self.suspend_pending = False
+        self._old_settings = None
+        self._prev_handlers = {}
+        self._wake_lock = threading.Lock()
+        self._wake_r, self._wake_w = os.pipe()
+        os.set_blocking(self._wake_r, False)
+        os.set_blocking(self._wake_w, False)
 
+    def install(self):
+        global _current
 
-def _normalize_wheel_cb(cb):
-    """Return canonical wheel code 64 (up) / 65 (down), or None.
-
-    Wheel events set bit 6 (0x40). The low two bits encode direction:
-    0 = scroll up, 1 = scroll down. Modifier keys (shift/ctrl/meta) set
-    bits 2–4 but don't change the direction, so we mask them off.
-    """
-    if not (cb & 0x40):
-        return None
-    base = cb & 0b11
-    if base in (0, 1):
-        return 64 + base
-    return None
-
-
-def _read_key(fd, raw=False):
-    """Read a keypress from stdin in cbreak mode. Returns action string or None.
-
-    Fully consumes CSI/SS3 escape sequences so leftover bytes don't leak.
-    Uses a longer timeout (150ms) to avoid splitting mouse escape sequences
-    when the system is busy (e.g. after a re-render).
-
-    With ``raw=True`` every printable character comes back as 'key:<char>'
-    (case preserved, space included) instead of the shortcut mappings —
-    for callers that own a text input, like the game's command bar.
-    Escape sequences, enter, and backspace decode the same either way.
-    """
-    import select as _sel
-
-    def _read_byte():
-        try:
-            data = os.read(fd, 1)
-        except OSError:
-            return None
-        return data or None
-
-    def _read_byte_timeout(timeout=0.15):
-        if _sel.select([fd], [], [], timeout)[0]:
-            return _read_byte()
-        return None
-
-    b = _read_byte()
-    if b is None:
-        return None
-
-    if b == b'\033':
-        # Use 150ms timeout — 50ms is too short when the system is busy
-        # rendering; mouse release sequences (\033[<0;x;ym) can arrive late
-        # and the \033 gets read as a bare ESC.
-        b2 = _read_byte_timeout(0.15)
-        if b2 is None:
-            return 'escape'
-
-        if b2 == b'[':
-            seq = bytearray()
-            while True:
-                c = _read_byte_timeout(0.15)
-                if c is None:
-                    break
-                seq.extend(c)
-                # Legacy mouse: \033[M Cb Cx Cy
-                if c == b'M' and len(seq) == 1:
-                    tail = bytearray()
-                    for _ in range(3):
-                        c_tail = _read_byte_timeout(0.15)
-                        if c_tail is None:
-                            return None
-                        tail.extend(c_tail)
-                    return _decode_legacy_mouse(bytes(tail))
-                c0 = c[0]
-                if (65 <= c0 <= 90) or (97 <= c0 <= 122) or c0 == 126:
-                    break
-
-            action = _decode_sgr_mouse(bytes(seq))
-            if action is not None:
-                return action
-
-            final = bytes(seq[-1:]) if seq else b''
-            return {
-                b'A': 'fwd',
-                b'B': 'back',
-                b'C': 'fwd',
-                b'D': 'back',
-            }.get(final)
-
-        if b2 == b'O':
-            # SS3 sequence (some terminals use for arrows)
-            b3 = _read_byte_timeout(0.15)
-            if b3 is not None:
-                return {
-                    b'A': 'fwd',
-                    b'B': 'back',
-                    b'C': 'fwd',
-                    b'D': 'back',
-                }.get(b3)
-        return 'escape'
-
-    if b in (b'\r', b'\n'):
-        return 'key:enter'
-    if b in (b'\x7f', b'\x08'):
-        return 'key:backspace'
-    if raw:
-        # desk controls: Ctrl-B/L/O/P/V/W reach the app as raw bytes under cbreak
-        # (Ctrl-C still signals; Ctrl-S/Q stay with flow control, so avoided)
-        ctrl = {b'\x02': 'b', b'\x0c': 'l', b'\x10': 'p', b'\x0f': 'o',
-                b'\x16': 'v', b'\x17': 'w'}.get(b)
-        if ctrl is not None:
-            return f'key:ctrl-{ctrl}'
-        if len(b) == 1 and 32 <= b[0] < 127:
-            return f"key:{b.decode('ascii')}"
-        return None
-    if b in (b'q', b'Q'):
-        return 'quit'
-    if b in (b'o', b'O'):
-        return 'open'
-    if b in (b'n', b'N', b' '):
-        return 'reset'
-    if b in (b'+', b'='):
-        return 'key:+'
-    if b in (b'-', b'_'):
-        return 'key:-'
-    if b in (b't', b'T'):
-        return 'key:t'
-    if len(b) == 1 and 32 < b[0] < 127:
-        # any other printable key: pass through to on_action (lowercased)
-        return f"key:{b.decode('ascii').lower()}"
-    return None
-
-
-# ---------------------------------------------------------------------------
-# Live loop
-# ---------------------------------------------------------------------------
-def live_loop(render_fn, interval=60, mouse=False, on_open=None, scroll_step=15,
-              auto_play=False, play_interval=0.6, on_action=None, on_drag=None,
-              intercept=None, raw_keys=False):
-    """Run render_fn() in a loop on the alternate screen buffer.
-
-    render_fn: callable(offset_minutes=0) returning (display_string, metadata)
-               or just display_string.
-               If mouse=True, also receives mouse_pos=(col, row) or None
-               and active_alert=int_or_None.
-               Scroll/arrow keys adjust offset_minutes to scrub through time.
-    interval: seconds between refreshes.
-    mouse: if True, enable SGR mouse tracking and pass mouse_pos to render_fn.
-    on_open: optional callback(alert_index) called when user presses 'o' on a modal.
-    scroll_step: minutes to advance/retreat per scroll or arrow key event.
-    auto_play: if True, run an animation loop instead of time-scrubbing.
-               render_fn also receives play_frame (monotonic frame counter) and
-               playing (bool). Space toggles play/pause — pausing homes
-               play_frame to 0 (the caller's "home" frame, e.g. the present);
-               scroll/arrows step one frame and pause in place; play_interval
-               sets the frame rate.
-    on_action: optional callback(key) for miscellaneous single-character keys
-               not otherwise handled (currently '+' and '-'). Return a truthy
-               value to trigger an immediate re-render; return falsy to leave
-               the loop waiting as before. Default None preserves existing
-               behavior exactly.
-    on_drag: optional callback(dcol, drow, done) for left-button drags.
-             Fired with the cumulative cell delta from the press position:
-             during the drag with done=False (live preview) and once on
-             release with done=True (commit). Return a truthy value to
-             trigger an immediate re-render. Requires mouse. Default None
-             preserves existing behavior exactly.
-    intercept: optional callback(action) consulted for every decoded keyboard
-               action ('fwd', 'quit', 'key:t', …; mouse events excluded)
-               BEFORE the built-in handling. Return truthy to consume the
-               action and trigger a re-render — this is how a caller-drawn
-               menu takes over the arrow keys. Default None preserves
-               existing behavior exactly.
-    raw_keys: if True, printable keys arrive as 'key:<char>' with case and
-              spaces preserved, bypassing the q/space/n shortcut mappings —
-              for callers that own a text input (the game's command bar).
-              The caller's intercept should handle everything; it may raise
-              SystemExit to leave the loop cleanly.
-    Re-renders immediately on terminal resize (SIGWINCH) or input.
-    """
-    import select, signal, termios, tty
-
-    # Self-pipe for async-signal-safe SIGWINCH wakeup.
-    # threading.Event.set() is NOT safe in signal handlers (its internal
-    # lock can deadlock when SIGWINCH re-enters itself during rapid resize).
-    # os.write() to a pipe is async-signal-safe per POSIX.
-    wake_r, wake_w = os.pipe()
-    os.set_blocking(wake_r, False)
-    os.set_blocking(wake_w, False)
-
-    def _on_winch(*_):
-        try:
-            os.write(wake_w, b'\x00')
-        except OSError:
-            pass
-
-    signal.signal(signal.SIGWINCH, _on_winch)
-
-    is_apple_terminal = os.environ.get('TERM_PROGRAM') == 'Apple_Terminal'
-
-    fd = sys.stdin.fileno()
-    old_settings = termios.tcgetattr(fd)
-    offset = 0
-    playing = auto_play
-    play_frame = 0
-    mouse_pos = None
-    drag_start = None    # (col, row) of left-button press while on_drag is set
-    active_alert = None  # index of alert whose modal is open, or None
-    modal_scroll = 0     # scroll offset within the modal
-    alert_row_map = {}   # 0-based line index → alert index
-
-    init = "\033[?1049h\033[?25l"
-    if mouse:
-        # Enable both legacy and SGR mouse reporting for broad compatibility.
-        init += "\033[?1000h\033[?1002h\033[?1003h\033[?1006h"
-        # Alternate-scroll mode helps terminals that don't report wheel as mouse.
-        if is_apple_terminal:
-            init += "\033[?1007h"
-    sys.stdout.write(init)
-    sys.stdout.flush()
-    try:
-        tty.setcbreak(fd)
-        # cbreak leaves IEXTEN on, which keeps Ctrl-V as the terminal's
-        # `lnext` ("quote next key") — it swallows our Ctrl-V and waits for
-        # another keystroke.  Drop IEXTEN so every control key we listen for
-        # reaches the app as a plain byte instead of being intercepted.
-        mode = termios.tcgetattr(fd)
-        mode[3] &= ~termios.IEXTEN
-        termios.tcsetattr(fd, termios.TCSANOW, mode)
-
-        while True:
-            kwargs = {}
-            if mouse:
-                kwargs.update(mouse_pos=mouse_pos, active_alert=active_alert,
-                              modal_scroll=modal_scroll)
-            if auto_play:
-                kwargs.update(play_frame=play_frame, playing=playing)
-            result = render_fn(offset_minutes=offset, **kwargs)
-            # render_fn may return (output, metadata) or just output
-            if isinstance(result, tuple):
-                output, alert_row_map = result
-            else:
-                output = result
-                alert_row_map = {}
-            # Separate cursor-positioned overlay from main output (\x00 delimiter)
-            parts = output.split('\x00', 1)
-            main_out = parts[0]
-            overlay = parts[1] if len(parts) > 1 else ""
-            # \033[H homes cursor; \033[K clears line remainders;
-            # \033[J clears below; overlay draws on top after clear
-            padded = main_out.replace('\n', '\033[K\n')
-            sys.stdout.write(f"\033[H{padded}\033[K\033[J\033[0m{overlay}\033[0m")
-            sys.stdout.flush()
-            # Drain any pending SIGWINCH notifications.
+        # os.write to a pipe is async-signal-safe; threading.Event.set()
+        # is not, and deadlocks when SIGWINCH re-enters during a resize
+        def _on_winch(*_):
+            w = self._wake_w
+            if w is None:
+                return
             try:
-                os.read(wake_r, 512)
+                os.write(w, b'\x00')
             except OSError:
                 pass
 
-            # Wait for input, resize, or timeout
-            wait = play_interval if (auto_play and playing) else interval
-            deadline = _time.time() + wait
-            while True:
-                remaining = deadline - _time.time()
-                if remaining <= 0:
-                    if auto_play and playing:
-                        play_frame += 1  # advance the animation
+        self._prev_handlers[signal.SIGWINCH] = signal.signal(
+            signal.SIGWINCH, _on_winch)
+
+        # SIGTERM/SIGHUP/SIGQUIT through SystemExit, so a closed terminal or
+        # `pkill blips` still runs the finally that gives the screen back
+        def _exit_on_signal(signum, _frame):
+            sys.exit(128 + signum)
+
+        for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT):
+            try:
+                self._prev_handlers[sig] = signal.signal(sig, _exit_on_signal)
+            except (ValueError, OSError):
+                pass
+
+        # Ctrl-Z only asks: the loop gives the terminal back between frames
+        # and stops itself (suspend())
+        def _on_tstp(*_):
+            self.suspend_pending = True
+            _on_winch()
+
+        try:
+            if signal.getsignal(signal.SIGTSTP) is not signal.SIG_IGN:
+                self._prev_handlers[signal.SIGTSTP] = signal.signal(
+                    signal.SIGTSTP, _on_tstp)
+        except (ValueError, OSError):
+            pass
+        _current = self
+
+    def set_cbreak(self):
+        self._old_settings = termios.tcgetattr(self.fd)
+        tty.setcbreak(self.fd)
+        try:
+            mode = termios.tcgetattr(self.fd)
+            # cbreak leaves IEXTEN on, which keeps Ctrl-V as the terminal's
+            # `lnext` ("quote next key") — drop it so every control key we
+            # listen for reaches the app as a plain byte
+            mode[3] &= ~termios.IEXTEN
+            # ^\ (and ctrl-4, which macOS's screenshot shortcut sends on its
+            # way through) would SIGQUIT past the finally block: disable it
+            vdisable = getattr(termios, "_POSIX_VDISABLE", None)
+            if vdisable is None:
+                vdisable = os.fpathconf(self.fd, "PC_VDISABLE")
+            mode[6][termios.VQUIT] = vdisable
+            termios.tcsetattr(self.fd, termios.TCSANOW, mode)
+        except (OSError, ValueError, IndexError, termios.error):
+            pass
+
+    def wake(self):
+        with self._wake_lock:
+            if self._wake_w is None:
+                return
+            try:
+                os.write(self._wake_w, b'\x00')
+            except OSError:
+                pass
+
+    def drain(self):
+        """Discard wakeups queued before the frame about to be drawn."""
+        if self._wake_r is None:
+            return
+        try:
+            os.read(self._wake_r, 512)
+        except OSError:
+            pass
+
+    def wait(self, timeout):
+        """Block up to `timeout`: 'input', 'wake' or 'timeout'."""
+        if _keys._pending:
+            return 'input'
+        import select
+        try:
+            ready, _, _ = select.select(
+                [self.fd, self._wake_r], [], [], max(0.0, timeout))
+        except (InterruptedError, OSError, ValueError):
+            return 'timeout'
+        # input first: an animating view has a wakeup pending nearly always,
+        # and a key must not wait behind it
+        if self.fd in ready:
+            return 'input'
+        if self._wake_r in ready:
+            self.drain()
+            return 'wake'
+        return 'timeout'
+
+    def settle(self, timeout, replies=1):
+        """Read and drop what the terminal is still sending, up to its reply
+        to the last query, so none of it lands on the shell's prompt."""
+        if self._closed:
+            return
+        if timeout > 0:
+            deadline = _time.monotonic() + timeout
+            buf = b""
+            while _time.monotonic() < deadline:
+                if not _keys.wait_readable(self.fd, deadline - _time.monotonic()):
                     break
                 try:
-                    ready, _, _ = select.select([fd, wake_r], [], [], min(0.1, remaining))
-                except (InterruptedError, OSError):
-                    continue
-                if wake_r in ready:
-                    try:
-                        os.read(wake_r, 512)
-                    except OSError:
-                        pass
+                    chunk = os.read(self.fd, 4096)
+                except OSError:
                     break
-                if fd in ready:
-                    action = _read_key(fd, raw_keys)
-                    if (intercept is not None and action is not None
-                            and not isinstance(action, tuple)
-                            and intercept(action)):
-                        break
-                    if action == 'quit':
-                        if active_alert is not None:
-                            active_alert = None
-                            modal_scroll = 0
-                            break
-                        return
-                    elif action == 'escape':
-                        # With mouse tracking, bare ESC is almost always a
-                        # split mouse sequence (release bytes arriving late).
-                        # Only honour ESC to dismiss when mouse is off.
-                        if not mouse and active_alert is not None:
-                            active_alert = None
-                            break
-                    elif action == 'open':
-                        if active_alert is not None and on_open:
-                            on_open(active_alert)
-                            break
-                    elif action == 'fwd':
-                        if auto_play:
-                            playing = False
-                            play_frame += 1
-                        else:
-                            offset += scroll_step
-                        if select.select([fd], [], [], 0)[0]:
-                            continue  # coalesce rapid scrolling
-                        break
-                    elif action == 'back':
-                        if auto_play:
-                            playing = False
-                            play_frame -= 1
-                        else:
-                            offset -= scroll_step
-                        if select.select([fd], [], [], 0)[0]:
-                            continue  # coalesce rapid scrolling
-                        break
-                    elif action == 'reset':
-                        if auto_play:
-                            playing = not playing  # space = play/pause
-                            if not playing:
-                                play_frame = 0  # pause returns to the home frame
-                        else:
-                            offset = 0
-                        break
-                    elif on_action is not None and isinstance(action, str) and action.startswith('key:'):
-                        if on_action(action[4:]):
-                            break
-                    elif mouse and isinstance(action, tuple) and action[0] == 'mouse':
-                        _, cb, cx, cy, is_rel = action
-                        wheel_cb = _normalize_wheel_cb(cb)
-                        if wheel_cb in (64, 65):
-                            if active_alert is not None:
-                                # Scroll the modal
-                                modal_scroll += 3 if wheel_cb == 65 else -3
-                                modal_scroll = max(0, modal_scroll)
-                            elif auto_play:
-                                playing = False
-                                play_frame += 1 if wheel_cb == 64 else -1
-                            else:
-                                offset += scroll_step if wheel_cb == 64 else -scroll_step
-                            if select.select([fd], [], [], 0)[0]:
-                                continue  # coalesce rapid scrolling
-                            break
-                        if is_rel:
-                            # Button release — completes a drag gesture if one
-                            # started; otherwise ignore.
-                            if drag_start is not None:
-                                dcol, drow = cx - drag_start[0], cy - drag_start[1]
-                                drag_start = None
-                                if on_drag(dcol, drow, True):
-                                    break
-                            continue
-                        if (cb & 0b11) == 0 and not (cb & 0x20):
-                            # Left button press (not release, not motion)
-                            if on_drag is not None:
-                                drag_start = (cx, cy)
-                            row_idx = cy - 1  # 1-based → 0-based
-                            if active_alert is not None:
-                                # Click while modal open — dismiss
-                                active_alert = None
-                                modal_scroll = 0
-                                break
-                            elif row_idx in alert_row_map:
-                                active_alert = alert_row_map[row_idx]
-                                modal_scroll = 0
-                                break
-                        if cb & 32:
-                            if drag_start is not None:
-                                # mid-drag: live preview with cumulative delta
-                                dcol, drow = cx - drag_start[0], cy - drag_start[1]
-                                if on_drag(dcol, drow, False):
-                                    if select.select([fd], [], [], 0)[0]:
-                                        continue  # coalesce rapid drag motion
-                                    break
-                                continue
-                            # Hover-capable terminals.
-                            mouse_pos = (cx, cy)
-                            if select.select([fd], [], [], 0)[0]:
-                                continue  # coalesce rapid motion: render once at the final position
-                            break
-                        # Fallback for terminals without motion reporting:
-                        # update pointer on press so tooltip can still appear.
-                        if (cb & 0b11) in (0, 1, 2):
-                            mouse_pos = (cx, cy)
-                            break
-    except (KeyboardInterrupt, SystemExit):
-        pass
-    finally:
-        os.close(wake_r)
-        os.close(wake_w)
-        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-        cleanup = ""
-        if mouse:
-            cleanup += "\033[?1006l\033[?1003l\033[?1002l\033[?1000l"
-            if is_apple_terminal:
-                cleanup += "\033[?1007l"
-        cleanup += "\033[?25h\033[?1049l"
-        sys.stdout.write(cleanup)
+                if not chunk:
+                    break
+                buf += chunk
+                if len(re.findall(rb"\033\[\d+;\d+R", buf)) >= replies:
+                    break
+        _keys.flush_pending()
+        try:
+            termios.tcflush(self.fd, termios.TCIFLUSH)
+        except (OSError, termios.error):
+            pass
+
+    def suspend(self, hand_back):
+        """Ctrl-Z: give the terminal back, stop, and take it again on `fg`."""
+        self.suspend_pending = False
+        quiet = {}
+        for sig in (signal.SIGTTIN, signal.SIGTTOU):
+            quiet[sig] = signal.signal(sig, signal.SIG_IGN)
+        try:
+            hand_back()
+            if self._old_settings is not None:
+                try:
+                    termios.tcsetattr(self.fd, termios.TCSADRAIN,
+                                      self._old_settings)
+                except termios.error:
+                    pass
+            handler = signal.signal(signal.SIGTSTP, signal.SIG_DFL)
+            try:
+                signal.raise_signal(signal.SIGTSTP)
+            finally:
+                signal.signal(signal.SIGTSTP, handler)
+        finally:
+            for sig, previous in quiet.items():
+                signal.signal(sig, previous)
+        self.set_cbreak()
+
+    def close(self):
+        global _current
+        if self._closed:
+            return
+        self._closed = True
+        if _current is self:
+            _current = None
+        _keys.flush_pending()
+        # the signal handlers go back before the pipe closes: a fetch that
+        # lands after the loop still nudges, and its write must not go to
+        # whatever file reused the pipe's descriptor number
+        for sig, handler in self._prev_handlers.items():
+            try:
+                signal.signal(sig, handler)
+            except (ValueError, OSError, TypeError):
+                pass
+        with self._wake_lock:
+            for fd in (self._wake_r, self._wake_w):
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            self._wake_r = self._wake_w = None
+        if self._old_settings is not None:
+            try:
+                termios.tcsetattr(self.fd, termios.TCSADRAIN,
+                                  self._old_settings)
+            except Exception:
+                pass  # the tty may already be gone (SIGHUP)
+
+
+def nudge():
+    """Ask a running live loop to repaint now, from any thread.  Does
+    nothing when no loop is running, so background work can call it
+    unconditionally."""
+    term = _current
+    if term is not None:
+        term.wake()
+
+
+def running():
+    """Whether a live loop has the terminal right now."""
+    return _current is not None
+
+
+class _WorkerWatch:
+    """Catch a crash in a background thread while the screen is taken, and
+    say so once it's given back — a traceback printed onto the alternate
+    screen would vanish with it."""
+
+    def __init__(self):
+        self.crashes = []
+        self._prev = None
+
+    def install(self):
+        self._prev = threading.excepthook
+
+        def hook(args):
+            if args.exc_type is SystemExit:
+                return
+            self.crashes.append(args)
+
+        threading.excepthook = hook
+
+    def uninstall(self):
+        if self._prev is not None:
+            threading.excepthook = self._prev
+
+    def report(self):
+        if not self.crashes:
+            return
+        import traceback
+        args = self.crashes[0]
+        name = getattr(args.thread, "name", "a background thread")
+        print(f"blips: {name} crashed during the session:", file=sys.stderr)
+        traceback.print_exception(args.exc_type, args.exc_value,
+                                  args.exc_traceback, file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
+# The loop
+# ---------------------------------------------------------------------------
+def live_loop(render_fn, interval=60, mouse=False, auto_play=False,
+              play_interval=0.6, on_action=None, on_drag=None,
+              intercept=None, raw_keys=False, on_wheel=None, on_click=None,
+              text_mode=None, play_gate=None, hover_idle=None, **_legacy):
+    """Run render_fn() in a loop on the alternate screen buffer.
+
+    render_fn: callable(**frame) returning the frame as a string, optionally
+               with a cursor-addressed overlay after a ``\\x00`` (overlay()).
+               Receives mouse_pos=(col, row) or None when mouse is on, and
+               play_frame / playing when auto_play is.
+    interval, play_interval: seconds to the next frame while idle / while
+               playing — numbers, or callables asked before each wait (an
+               animating view returns a short one while it moves).
+    mouse: SGR mouse tracking with motion: hover, drags, clicks, the wheel.
+    auto_play: space toggles play/pause; render_fn gets play_frame, which
+               advances each play_interval (play_gate() may hold it).
+    on_action(key): a key the loop doesn't own ('+', 'w', '/' …, case as
+               typed; arrows arrive as 'up', 'down', 'left', 'right').
+               Truthy to repaint.
+    on_drag(dcol, drow, done): a left-button drag's cumulative cell delta,
+               live (done=False) and on release (done=True).
+    on_click(col, row): a press and release on the same cell, fired before
+               the zero-delta on_drag commit.  Truthy to repaint.
+    on_wheel(direction, col, row): +1 up / -1 down at the pointer.  Truthy
+               to repaint.  Without it the wheel steps play_frame.
+    intercept(action): consulted for every key action before the loop's
+               own handling; truthy consumes it and repaints.
+    text_mode(): while truthy, printable input arrives at intercept as
+               'char:<c>' (see _keys.read_key) — a caller-drawn text field.
+    raw_keys: every printable as 'key:<c>' (the game's command bar).
+    hover_idle: seconds of a still pointer after which mouse_pos goes back
+               to None, as if it had left the window (None: never).
+    """
+    _LiveLoop(render_fn, interval=interval, mouse=mouse, auto_play=auto_play,
+              play_interval=play_interval, on_action=on_action,
+              on_drag=on_drag, intercept=intercept, raw_keys=raw_keys,
+              on_wheel=on_wheel, on_click=on_click, text_mode=text_mode,
+              play_gate=play_gate, hover_idle=hover_idle).run()
+
+
+class _LiveLoop:
+    def __init__(self, render_fn, *, interval, mouse, auto_play,
+                 play_interval, on_action, on_drag, intercept, raw_keys,
+                 on_wheel, on_click, text_mode, play_gate, hover_idle):
+        self.render_fn = render_fn
+        self.interval = interval
+        self.mouse = mouse
+        self.auto_play = auto_play
+        self.play_interval = play_interval
+        self.on_action = on_action
+        self.on_drag = on_drag
+        self.intercept = intercept
+        self.raw_keys = raw_keys
+        self.on_wheel = on_wheel
+        self.on_click = on_click
+        self.text_mode = text_mode
+        self.play_gate = play_gate
+        self.hover_idle = hover_idle
+
+        self.playing = auto_play
+        self.play_frame = 0
+        self.mouse_pos = None
+        self.hover_until = 0.0
+        self.drag_start = None
+
+        self.term = None
+        self.pacing_on = os.environ.get("BLIPS_FRAME_SYNC", "1").strip().lower() \
+            not in ("0", "false", "off", "no")
+        self.answered = None   # None until asked, then whether it ever replied
+        self.owed = 0          # cursor queries sent and not yet answered
+        self.init = self.restore = ""
+
+    # -- the run -----------------------------------------------------------
+    def run(self):
+        is_apple = os.environ.get('TERM_PROGRAM') == 'Apple_Terminal'
+        self.init = "\033[?1049h\033[?25l"
+        self.restore = _SYNC_END
+        if self.mouse:
+            self.init += "\033[?1000h\033[?1002h\033[?1003h\033[?1006h"
+            self.restore += "\033[?1006l\033[?1003l\033[?1002l\033[?1000l"
+            if is_apple:
+                # alternate-scroll, for a terminal that doesn't report the
+                # wheel as mouse buttons
+                self.init += "\033[?1007h"
+                self.restore += "\033[?1007l"
+        self.restore += f"{_AUTOWRAP_ON}\033[?25h\033[?1049l"
+
+        self.term = _Terminal(sys.stdin.fileno())
+        self.term.install()
+        watch = _WorkerWatch()
+        watch.install()
+        try:
+            self.term.set_cbreak()
+            sys.stdout.write(self.init)
+            sys.stdout.flush()
+            while True:
+                if self._hold() == 'quit':
+                    return
+                if self.term.suspend_pending:
+                    self._suspend()
+                self._paint()
+                if self._idle() == 'quit':
+                    return
+        except KeyboardInterrupt:
+            pass
+        finally:
+            self._give_back()
+            watch.uninstall()
+            watch.report()
+
+    def _wait_s(self):
+        return _ACK_WAIT_S if self.answered else _ACK_FIRST_WAIT_S
+
+    def _hold(self):
+        """Hold the next frame until the terminal has read the last one;
+        input meanwhile changes the state the frame is drawn from."""
+        if not (self.pacing_on and self.owed):
+            return None
+        until = _time.monotonic() + self._wait_s()
+        while self.owed:
+            left = until - _time.monotonic()
+            if left <= 0:
+                if not self.answered:
+                    self.pacing_on = False  # never answers: stop asking
+                self.owed = 0
+                break
+            event = self.term.wait(min(0.1, left))
+            if self.term.suspend_pending:
+                break
+            if event == 'input' and self._on_input() == 'quit':
+                return 'quit'
+        return None
+
+    def _suspend(self):
+        def hand_back():
+            sys.stdout.write(self.restore)
+            sys.stdout.flush()
+            self.term.settle(0)
+
+        self.term.suspend(hand_back)
+        self.owed = 0
+        sys.stdout.write(self.init)
         sys.stdout.flush()
+
+    def _paint(self):
+        # drain wakeups BEFORE rendering: a fetch that lands mid-render
+        # nudges again, and that nudge must survive to the next frame
+        self.term.drain()
+        kwargs = {}
+        if self.mouse:
+            kwargs["mouse_pos"] = self.mouse_pos
+        if self.auto_play:
+            kwargs.update(play_frame=self.play_frame, playing=self.playing)
+        output = self.render_fn(**kwargs)
+        if isinstance(output, tuple):
+            output = output[0]
+        body, _, floating = output.partition('\x00')
+        if self.mouse and _MOTION_OFF not in floating:
+            floating = _MOTION_ON + floating
+        try:
+            rows = os.get_terminal_size().lines
+        except OSError:
+            rows = None
+        ask = ""
+        if self.pacing_on:
+            ask = _CPR_QUERY
+            self.owed += 1
+            if self.answered is None:
+                self.answered = False
+        sys.stdout.write(frame_paint(body, floating, rows) + ask)
+        sys.stdout.flush()
+
+    def _idle(self):
+        """Wait for the next frame to be due: input that changes the view,
+        a wakeup or a resize, or the interval running out."""
+        if self.auto_play and self.playing:
+            wait = self.play_interval
+        else:
+            wait = self.interval
+        wait = wait() if callable(wait) else wait
+        deadline = _time.time() + wait
+        owed = False   # a coalesced input is waiting for its repaint
+        while True:
+            if owed and not _keys.wait_readable(self.term.fd, 0):
+                return None
+            remaining = deadline - _time.time()
+            if remaining <= 0:
+                if self.auto_play and self.playing and (
+                        self.play_gate is None or self.play_gate()):
+                    self.play_frame += 1
+                return None
+            if (self.hover_idle and self.mouse_pos is not None
+                    and self.drag_start is None):
+                left = self.hover_until - _time.monotonic()
+                if left <= 0:
+                    self.mouse_pos = None  # a still pointer: drop the chip
+                    return None
+                remaining = min(remaining, left)
+            event = self.term.wait(min(remaining, 0.5))
+            if event == 'wake':
+                return None
+            if event == 'input':
+                verdict = self._on_input()
+                if verdict == 'quit':
+                    return 'quit'
+                if verdict == 'repaint':
+                    return None
+                if verdict == 'coalesce':
+                    owed = True
+
+    def _give_back(self):
+        term = self.term
+        try:
+            sys.stdout.write(self.restore + (_CPR_QUERY if self.pacing_on else ""))
+            sys.stdout.flush()
+        except Exception:
+            pass  # tty may already be gone (SIGHUP)
+        try:
+            term.settle(self._wait_s() if self.pacing_on else 0,
+                        replies=self.owed + 1)
+        except Exception:
+            pass
+        finally:
+            term.close()
+
+    # -- input -------------------------------------------------------------
+    def _coalesce_or_repaint(self):
+        """Paint now, or hold the paint while more input is waiting — so a
+        burst of scrolling or dragging paints once, at its end."""
+        return 'coalesce' if _keys.wait_readable(self.term.fd, 0) else 'repaint'
+
+    def _on_input(self):
+        """Read one key or mouse event and apply it: 'quit', 'repaint',
+        'coalesce', or None when nothing on screen changed."""
+        text = bool(self.text_mode is not None and self.text_mode())
+        action = _keys.read_key(self.term.fd, text=text, raw=self.raw_keys)
+        if action == 'ack':
+            self.answered = True
+            self.owed = max(0, self.owed - 1)
+            return None
+        if isinstance(action, tuple):
+            if not self.mouse:
+                return None
+            self.hover_until = _time.monotonic() + (self.hover_idle or 0)
+            return self._on_mouse(*action[1:])
+        if action is None:
+            return None
+        if self.intercept is not None and self.intercept(action):
+            return self._coalesce_or_repaint()
+        if action == 'quit':
+            return 'quit'
+        if action == 'reset':
+            if self.auto_play:
+                self.playing = not self.playing  # space = play/pause
+                if not self.playing:
+                    self.play_frame = 0
+            return 'repaint'
+        if self.on_action is not None:
+            key = action[4:] if action.startswith('key:') else action
+            if self.on_action(key):
+                return self._coalesce_or_repaint()
+        return None
+
+    def _on_mouse(self, cb, cx, cy, is_rel):
+        wheel = _keys.wheel_code(cb)
+        if wheel in (64, 65):
+            direction = 1 if wheel == 64 else -1
+            if self.on_wheel is not None:
+                handled = self.on_wheel(direction, cx, cy)
+                return self._coalesce_or_repaint() if handled else None
+            if self.auto_play:
+                self.playing = False
+                self.play_frame += direction
+                return self._coalesce_or_repaint()
+            return None
+        if is_rel:
+            if self.drag_start is None:
+                return None
+            dcol, drow = cx - self.drag_start[0], cy - self.drag_start[1]
+            self.drag_start = None
+            clicked = (dcol == 0 and drow == 0 and self.on_click is not None
+                       and self.on_click(cx, cy))
+            dragged = self.on_drag is not None and self.on_drag(dcol, drow, True)
+            return 'repaint' if (clicked or dragged) else None
+        if (cb & 0b11) == 0 and not (cb & 0x20):
+            # left button press: where a drag (or a click) starts
+            if self.on_drag is not None or self.on_click is not None:
+                self.drag_start = (cx, cy)
+        if cb & 0x20:
+            if self.drag_start is not None and (cb & 0b11) == 0:
+                dcol, drow = cx - self.drag_start[0], cy - self.drag_start[1]
+                if self.on_drag is not None and self.on_drag(dcol, drow, False):
+                    return self._coalesce_or_repaint()
+                return None
+            self.mouse_pos = (cx, cy)
+            return self._coalesce_or_repaint()
+        if (cb & 0b11) in (0, 1, 2):
+            # no motion reporting: a press still places the pointer
+            self.mouse_pos = (cx, cy)
+            return 'repaint'
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Live apps
+# ---------------------------------------------------------------------------
+class LiveApp:
+    """A live view: state, the hooks that change it, and one render per
+    repaint.  Override the hooks you need; the loop's tuning is the class
+    attributes.  A hook left as the base's is not handed to the loop."""
+
+    interval = 5.0
+    play_interval = 0.5
+    mouse = True
+    auto_play = True
+    hover_idle = None
+
+    def render(self, **frame):
+        raise NotImplementedError
+
+    def on_action(self, key):
+        return False
+
+    def on_drag(self, dcol, drow, done):
+        return False
+
+    def on_click(self, col, row):
+        return False
+
+    def on_wheel(self, direction, col, row):
+        return False
+
+    def intercept(self, action):
+        return False
+
+    def text_mode(self):
+        return False
+
+    def frame_interval(self):
+        """Seconds to the next frame while idle (called before each wait)."""
+        return self.interval
+
+    def glide_interval(self):
+        """Seconds to the next frame while playing."""
+        return self.play_interval
+
+    def _hooks(self):
+        hooks = {}
+        for name in ("on_action", "on_drag", "on_click", "on_wheel",
+                     "intercept", "text_mode"):
+            if getattr(type(self), name) is not getattr(LiveApp, name):
+                hooks[name] = getattr(self, name)
+        return hooks
+
+    def run(self):
+        live_loop(self.render, interval=self.frame_interval,
+                  play_interval=self.glide_interval, mouse=self.mouse,
+                  auto_play=self.auto_play, hover_idle=self.hover_idle,
+                  **self._hooks())

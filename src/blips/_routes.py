@@ -22,6 +22,7 @@ import time
 
 from blips import USER_AGENT
 from blips._http import fetch_json
+from blips._live import nudge
 from blips._runtime import debug_log
 
 URL = "https://adsb.im/api/0/routeset"
@@ -43,7 +44,7 @@ class RouteLookup:
     """Session cache of callsign routes, filled by a background worker.
 
     get() never blocks: it returns the cached route (or None) immediately and
-    queues unseen callsigns for the worker.  A repaint nudge (SIGWINCH, same
+    queues unseen callsigns for the worker.  A repaint nudge (the same
     trick as Feed) fires when an answer lands so the footer updates mid-hover.
     """
 
@@ -126,9 +127,5 @@ class RouteLookup:
                 else:
                     self._failed[cs] = time.time()
             if definitive and route is not None and self._nudge:
-                try:
-                    import os, signal
-                    os.kill(os.getpid(), signal.SIGWINCH)
-                except Exception:
-                    pass
+                nudge()
             time.sleep(0.3)  # be a polite adsbdb citizen
