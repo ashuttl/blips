@@ -1,8 +1,8 @@
 """ADS-B feed client.
 
-Fetches live aircraft near a point from community aggregators — adsb.lol,
-airplanes.live, adsb.fi.  All serve the same readsb per-aircraft schema
-(URL shape and list key differ; smoothed over in SOURCES):
+Fetches live aircraft near a point from community aggregators — adsb.lol
+and adsb.fi.  Both serve the same readsb per-aircraft schema (URL shape
+and list key differ; smoothed over in SOURCES):
 
     GET /v2/point/{lat}/{lon}/{radius_nm}  →  {"ac": [...], ...}
 
@@ -11,9 +11,15 @@ volunteer receiver network, so coverage is regional, not ranked: one has
 the best ears over Mumbai while another is the only one that can see
 Lagos at all — and a coverage hole comes back as HTTP 200 with an empty
 list, indistinguishable from genuinely empty sky.  So instead of a fixed
-pecking order there's an election: ask everyone once, keep whoever sees
-the most traffic *here*, and poll only the winner until the view moves,
-the winner errors or goes empty, or the vote ages out.
+pecking order there's an election: ask everyone at once, keep whoever
+sees the most traffic *here*, and poll only the winner until the view
+moves, the winner errors or goes empty, or the vote ages out.
+(airplanes.live used to vote too; since autumn 2026 its API answers 403
+and asks projects to get in touch first.)
+
+Beyond the view, ``lookup`` finds aircraft anywhere in the world by
+callsign, registration, hex code or type — what search reaches for when
+the flight you typed isn't on screen.
 
 Field quirks handled here so the renderer never sees them:
   - alt_baro is the string "ground" for surface traffic (alt_geom may still
@@ -23,8 +29,8 @@ Field quirks handled here so the renderer never sees them:
   - vertical rate arrives as baro_rate or geom_rate depending on equipage.
 
 Every aggregator asks for at most 1 request/second; our poll cadence is far
-below that, and an election is one request to each of three different
-hosts.  Radius is capped at 250 nm, the aggregators' documented max.
+below that, and an election is one request to each of two different hosts.
+Radius is capped at 250 nm, the aggregators' documented max.
 """
 
 import time
@@ -38,14 +44,28 @@ from blips._runtime import debug_log
 SOURCES = (
     ("adsb.lol",
      "https://api.adsb.lol/v2/point/{lat:.4f}/{lon:.4f}/{r:.0f}", "ac"),
-    ("airplanes.live",
-     "https://api.airplanes.live/v2/point/{lat:.4f}/{lon:.4f}/{r:.0f}",
-     "ac"),
     ("adsb.fi",
      "https://opendata.adsb.fi/api/v2/lat/{lat:.4f}/lon/{lon:.4f}"
      "/dist/{r:.0f}", "aircraft"),
 )
 MAX_RADIUS_NM = 250
+
+# worldwide lookups: (kind → URL) per host, tried in order.  adsb.lol
+# answers all four; adsb.fi covers the three identity kinds.
+LOOKUPS = (
+    ("adsb.lol", "ac", {
+        "callsign": "https://api.adsb.lol/v2/callsign/{v}",
+        "reg": "https://api.adsb.lol/v2/reg/{v}",
+        "hex": "https://api.adsb.lol/v2/hex/{v}",
+        "type": "https://api.adsb.lol/v2/type/{v}",
+        "mil": "https://api.adsb.lol/v2/mil",
+    }),
+    ("adsb.fi", "aircraft", {
+        "callsign": "https://opendata.adsb.fi/api/v2/callsign/{v}",
+        "reg": "https://opendata.adsb.fi/api/v2/registration/{v}",
+        "hex": "https://opendata.adsb.fi/api/v2/hex/{v}",
+    }),
+)
 
 
 def _num(v):
@@ -70,11 +90,16 @@ def _normalize(raw, fetched_at):
     hexid = (raw.get("hex") or "").strip()
     # seen_pos is how stale this position already was at fetch time
     fix_time = fetched_at - min(_num(raw.get("seen_pos")) or 0.0, 60.0)
+    flags = raw.get("dbFlags")
     return {
         "hex": hexid,
         "callsign": callsign or reg or hexid.upper(),
+        "flight": callsign,          # the broadcast callsign alone, or ""
         "reg": reg,
         "actype": (raw.get("t") or "").strip(),
+        "desc": (raw.get("desc") or "").strip(),
+        "operator": (raw.get("ownOp") or "").strip(),
+        "category": (raw.get("category") or "").strip(),
         "lat": lat,
         "lon": lon,
         "alt": None if ground else alt,
@@ -82,8 +107,18 @@ def _normalize(raw, fetched_at):
         "gs": _num(raw.get("gs")),
         "track": _num(raw.get("track")),
         "vrate": _num(raw.get("baro_rate")) or _num(raw.get("geom_rate")),
+        # the altitude the crew has dialled into the autopilot
+        "sel_alt": (_num(raw.get("nav_altitude_mcp"))
+                    or _num(raw.get("nav_altitude_fms"))),
+        "mach": _num(raw.get("mach")),
+        "tas": _num(raw.get("tas")),
+        "wind": ((_num(raw.get("wd")), _num(raw.get("ws")))
+                 if _num(raw.get("ws")) is not None else None),
+        "oat": _num(raw.get("oat")),
         "squawk": raw.get("squawk") or "",
         "emergency": raw.get("emergency") not in (None, "", "none"),
+        "mil": isinstance(flags, int) and bool(flags & 1),
+        "mlat": "mlat" in (raw.get("type") or ""),
         "fix_time": fix_time,
     }
 
@@ -104,26 +139,47 @@ def _fetch_source(source, lat, lon, radius_nm, timeout):
 
 
 def _election(lat, lon, radius_nm, timeout, on_status, have=None):
-    """Ask every aggregator once → ({name: aircraft|None}, last_exc).
+    """Ask every aggregator once, side by side → ({name: aircraft|None},
+    last_exc).
 
     ``have`` carries this round's already-fetched results so nobody is
     asked twice: a name mapped to a list was polled moments ago, a name
-    mapped to None just errored and doesn't get an instant retry.
+    mapped to None just errored and doesn't get an instant retry.  The
+    asks run in parallel — they're different hosts — so a slow one costs
+    its own timeout, not everyone's in turn.
     """
+    import threading
     have = dict(have or {})
-    last_exc = None
-    for source in SOURCES:
+    ask = [s for s in SOURCES if s[0] not in have]
+    if on_status is not None and ask:
+        on_status(" + ".join(s[0] for s in ask))
+    errors = {}
+
+    def one(source):
         name = source[0]
-        if name in have:
-            continue
-        if on_status is not None:
-            on_status(name)
         try:
             have[name] = _fetch_source(source, lat, lon, radius_nm, timeout)
         except Exception as exc:
             debug_log(f"{name} fetch failed: {exc}")
             have[name] = None
-            last_exc = exc
+            errors[name] = exc
+
+    if len(ask) == 1:
+        one(ask[0])
+    else:
+        threads = [threading.Thread(target=one, args=(s,), daemon=True)
+                   for s in ask]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout + 2)
+        for s in ask:
+            if s[0] not in have:      # still hung past its timeout
+                have[s[0]] = None
+    last_exc = None
+    for s in SOURCES:                 # "last" in table order, as before
+        if s[0] in errors:
+            last_exc = errors[s[0]]
     return have, last_exc
 
 
@@ -210,3 +266,42 @@ class SourcePicker:
         self._name = best
         self._voted = time.time()
         return returns[best], best
+
+
+def lookup(kind, value, timeout=8):
+    """Aircraft anywhere in the world by ``kind`` — 'callsign', 'reg',
+    'hex', 'type', or 'mil' (value ignored) → (normalized list, source).
+
+    The hosts in LOOKUPS are tried in order; an empty answer from the
+    first is believed (both see the same network, and asking twice for a
+    miss is the impolite half of search-as-you-type).  Raises only when
+    every host that serves ``kind`` failed.
+    """
+    from urllib.parse import quote
+    value = (value or "").strip()
+    if kind != "mil" and not value:
+        return [], ""
+    last_exc = None
+    for name, key, urls in LOOKUPS:
+        tmpl = urls.get(kind)
+        if tmpl is None:
+            continue
+        url = tmpl.format(v=quote(value.lower() if kind == "hex"
+                                  else value.upper()))
+        try:
+            data = fetch_json(url, headers={"User-Agent": USER_AGENT},
+                              timeout=timeout)
+        except Exception as exc:
+            debug_log(f"{name} {kind} lookup failed: {exc}")
+            last_exc = exc
+            continue
+        fetched_at = time.time()
+        out = []
+        for raw in data.get(key) or []:
+            ac = _normalize(raw, fetched_at)
+            if ac is not None:
+                out.append(ac)
+        return out, name
+    if last_exc is not None:
+        raise last_exc
+    return [], ""

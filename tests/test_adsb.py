@@ -11,7 +11,10 @@ from blips._adsb import SourcePicker, fetch_point
 
 
 def _install(monkeypatch, results, calls):
-    """Fake the wire: results[name] is a list, or an Exception to raise."""
+    """Fake the wire: results[name] is a list, or an Exception to raise.
+
+    The table is a fake trio too, so the voting rules are tested with
+    three voters whatever the real SOURCES holds this season."""
 
     def fake(source, lat, lon, radius_nm, timeout):
         name = source[0]
@@ -21,6 +24,9 @@ def _install(monkeypatch, results, calls):
             raise out
         return list(out)
 
+    monkeypatch.setattr(adsb, "SOURCES", tuple(
+        (name, "", "ac") for name in ("adsb.lol", "airplanes.live",
+                                      "adsb.fi")))
     monkeypatch.setattr(adsb, "_fetch_source", fake)
 
 
@@ -32,7 +38,7 @@ def test_empty_first_source_is_not_the_final_word(monkeypatch):
     aircraft, source = fetch_point(6.577, 3.321, 250)
     assert source == "airplanes.live"
     assert len(aircraft) == 2
-    assert calls == ["adsb.lol", "airplanes.live", "adsb.fi"]
+    assert set(calls) == {"adsb.lol", "airplanes.live", "adsb.fi"}
 
 
 def test_all_empty_is_empty_sky_not_an_error(monkeypatch):
@@ -122,3 +128,49 @@ def test_stale_vote_ages_out(monkeypatch):
     del calls[:]
     picker.fetch(42.36, -71.01, 250)
     assert set(calls) == {"adsb.lol", "airplanes.live", "adsb.fi"}
+
+
+def test_election_asks_side_by_side(monkeypatch):
+    # a slow host costs its own wait, not everyone's in turn
+    import time as _time
+
+    def slow(source, lat, lon, radius_nm, timeout):
+        _time.sleep(0.3)
+        return ["a"] if source[0] == "adsb.fi" else []
+
+    monkeypatch.setattr(adsb, "SOURCES", tuple(
+        (name, "", "ac") for name in ("adsb.lol", "airplanes.live",
+                                      "adsb.fi")))
+    monkeypatch.setattr(adsb, "_fetch_source", slow)
+    started = _time.monotonic()
+    aircraft, source = fetch_point(6.577, 3.321, 250)
+    assert source == "adsb.fi"
+    assert _time.monotonic() - started < 0.8
+
+
+def test_normalize_keeps_what_the_card_shows():
+    ac = adsb._normalize({
+        "hex": "abc123", "flight": "DAL1673 ", "r": "N123DL", "t": "B739",
+        "lat": 40.6, "lon": -73.8, "alt_baro": 31000, "gs": 450,
+        "track": 200, "category": "A3", "nav_altitude_mcp": 35000,
+        "dbFlags": 1, "type": "mlat", "wd": 270, "ws": 85, "oat": -52,
+    }, 1000.0)
+    assert ac["flight"] == "DAL1673" and ac["category"] == "A3"
+    assert ac["sel_alt"] == 35000 and ac["mil"] and ac["mlat"]
+    assert ac["wind"] == (270, 85) and ac["oat"] == -52
+
+
+def test_lookup_falls_back_to_the_next_host(monkeypatch):
+    seen = []
+
+    def fake_fetch(url, headers=None, timeout=10):
+        seen.append(url)
+        if "adsb.lol" in url:
+            raise RuntimeError("down")
+        return {"aircraft": [{"hex": "a1", "flight": "SWA938", "lat": 1,
+                              "lon": 2, "alt_baro": 5000}]}
+
+    monkeypatch.setattr(adsb, "fetch_json", fake_fetch)
+    found, source = adsb.lookup("callsign", "swa938")
+    assert source == "adsb.fi" and found[0]["callsign"] == "SWA938"
+    assert seen[0].endswith("/callsign/SWA938")
