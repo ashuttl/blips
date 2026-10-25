@@ -164,6 +164,24 @@ def _read_escape(fd):
         # second ESC goes back to start the next read
         unread(b2)
         return 'escape'
+    if b2 == b']':
+        # an OSC reply to the live loop's colour probe, e.g.
+        # \033]11;rgb:1e1e/1e1e/2e2e\007 (or ST-terminated): read it whole
+        # and hand its body over — it is never a key
+        body = bytearray()
+        while True:
+            c = _read_byte_timeout(fd, 0.15)
+            if c is None:
+                return None
+            if c == b'\x07':
+                break
+            if c == b'\033':
+                _read_byte_timeout(fd, 0.05)  # the backslash of ST
+                break
+            body.extend(c)
+            if len(body) > 256:
+                return None
+        return 'osc:' + body.decode('ascii', errors='replace')
     if b2 == b'[':
         seq = bytearray()
         while True:

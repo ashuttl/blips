@@ -290,6 +290,15 @@ class _Terminal:
                 pass  # the tty may already be gone (SIGHUP)
 
 
+def _mtime(path):
+    if path is None:
+        return None
+    try:
+        return os.stat(path).st_mtime_ns
+    except OSError:
+        return None
+
+
 def nudge():
     """Ask a running live loop to repaint now, from any thread.  Does
     nothing when no loop is running, so background work can call it
@@ -407,6 +416,8 @@ class _LiveLoop:
         self.drag_start = None
 
         self.term = None
+        self.theme_watch = None        # (path, mtime) of Omarchy's marker
+        self.next_probe = 0.0          # when the colours are next asked
         self.pacing_on = os.environ.get("BLIPS_FRAME_SYNC", "1").strip().lower() \
             not in ("0", "false", "off", "no")
         self.answered = None   # None until asked, then whether it ever replied
@@ -539,6 +550,7 @@ class _LiveLoop:
                     self.mouse_pos = None  # a still pointer: drop the chip
                     return None
                 remaining = min(remaining, left)
+            self._theme_look()
             event = self.term.wait(min(remaining, 0.5))
             if event == 'wake':
                 return None
@@ -550,6 +562,36 @@ class _LiveLoop:
                     return None
                 if verdict == 'coalesce':
                     owed = True
+
+    def _theme_look(self):
+        """Ask the terminal for its colours when they may have changed:
+        every ten seconds, and briskly for a few seconds after Omarchy's
+        theme marker moves (the terminal reloads a beat after it's
+        written).  The answers come back as input (see _on_input)."""
+        from blips import _theme
+        if not _theme.theme_available or _theme.theme_legacy_mode:
+            return
+        now = _time.monotonic()
+        if self.theme_watch is None:
+            path = _theme.watch_path()
+            self.theme_watch = (path, _mtime(path))
+            self.next_probe = now + 10.0
+            self.burst = ()
+        path, seen = self.theme_watch
+        if path is not None:
+            m = _mtime(path)
+            if m != seen:
+                self.theme_watch = (path, m)
+                self.burst = (now + 0.3, now + 1.0, now + 2.5, now + 5.0)
+        due = [t for t in self.burst if t <= now]
+        if due or now >= self.next_probe:
+            self.burst = tuple(t for t in self.burst if t > now)
+            self.next_probe = now + 10.0
+            try:
+                sys.stdout.write(_theme.PROBE_QUERY)
+                sys.stdout.flush()
+            except Exception:
+                pass
 
     def _give_back(self):
         term = self.term
@@ -581,6 +623,9 @@ class _LiveLoop:
             self.answered = True
             self.owed = max(0, self.owed - 1)
             return None
+        if isinstance(action, str) and action.startswith('osc:'):
+            from blips import _theme
+            return 'repaint' if _theme.ingest_osc(action[4:]) else None
         if isinstance(action, tuple):
             if not self.mouse:
                 return None

@@ -39,6 +39,7 @@ from blips._feeds import (  # noqa: F401 — re-exported for the game
 )
 from blips._location import geocode_place, get_location
 from blips._runtime import blips_parser, resolve_live
+from blips import _theme as _theme_mod
 from blips._theme import darken, ensure_contrast, is_light_theme, surface_bg
 
 MUTED = (150, 155, 170)
@@ -49,7 +50,35 @@ RING = (62, 76, 108)
 ALERT = (235, 80, 70)
 # hover chip: the floating readout beside the pointer (same recipe as the
 # linecast radar's warning tooltip, so the two scopes feel like siblings)
-CHIP_BG = darken(surface_bg(0.10), 0.45 if not is_light_theme() else 0.10)
+
+def _chip_bg():
+    return darken(surface_bg(0.10), 0.45 if not is_light_theme() else 0.10)
+
+
+CHIP_BG = _chip_bg()
+
+
+def reink():
+    """The terminal's theme changed: rebuild the colours derived from its
+    background — the map's land and sea, the chip and the selection — in
+    every blips module that holds a copy, and drop what was drawn in the
+    old ones."""
+    from blips import _basemap, _color, _theme
+    new = {"BG_PRIMARY": _theme.theme_bg,
+           "SEA_FILL": _basemap.sea_fill(_theme.theme_bg)}
+    new["CHIP_BG"] = _chip_bg()
+    new["SELECT_BG"] = lerp(new["BG_PRIMARY"], MARKER, 0.28)
+    for name, mod in list(sys.modules.items()):
+        if not (name == "blips" or name.startswith("blips.")) or mod is None:
+            continue
+        for attr, value in new.items():
+            if isinstance(getattr(mod, attr, None), tuple):
+                setattr(mod, attr, value)
+    _color.BG_PRIMARY = new["BG_PRIMARY"]
+    _trail_cache.clear()
+    _trail_ramps.clear()
+    _last_frame.clear()
+
 
 # altitude (ft) → blip colour, low-and-warm to high-and-cool
 ALT_STOPS = (
@@ -1415,6 +1444,9 @@ def main():
 def _wx_theme(args):
     from blips._radar_sources import theme_id
     return theme_id(args.wx_theme)
+
+
+_theme_mod.on_change(reink)
 
 
 if __name__ == "__main__":

@@ -337,3 +337,51 @@ def ensure_theme_loaded():
 
 
 ensure_theme_loaded()
+
+
+# -- live re-inking ----------------------------------------------------------
+# A live view asks the terminal for its colours again now and then (and at
+# once when Omarchy's theme marker changes); the answers arrive as input and
+# come here.  Listeners rebuild whatever they derived from the old colours.
+PROBE_QUERY = "\033]10;?\007\033]11;?\007"
+_listeners = []
+
+
+def on_change(callback):
+    """Call ``callback()`` whenever a re-probe finds new colours."""
+    _listeners.append(callback)
+
+
+def watch_path():
+    """A file whose change means the theme just changed (Omarchy writes
+    its theme's name here), or None."""
+    path = os.path.expanduser("~/.local/state/omarchy/current/theme.name")
+    return path if os.path.exists(path) else None
+
+
+def ingest_osc(body):
+    """Take one OSC reply body ('11;rgb:1e1e/1e1e/2e2e'); True when it
+    changed the theme's foreground or background (listeners have run)."""
+    global theme_fg, theme_bg, theme_available
+    op, _, value = body.partition(";")
+    if op not in ("10", "11") or theme_legacy_mode:
+        return False
+    rgb = _parse_rgb_value(value)
+    if rgb is None:
+        return False
+    rgb = clamp_rgb(rgb)
+    if op == "10":
+        if rgb == theme_fg:
+            return False
+        theme_fg = rgb
+    else:
+        if rgb == theme_bg:
+            return False
+        theme_bg = rgb
+    theme_available = True
+    for callback in list(_listeners):
+        try:
+            callback()
+        except Exception:
+            pass
+    return True

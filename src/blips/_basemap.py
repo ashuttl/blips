@@ -35,10 +35,13 @@ CITY_LABEL = (155, 160, 175)
 # tracks, coastlines and labels can sit *over* it without knocking a hole in
 # a stipple to stay legible.  Derived from the terminal theme so it reads as
 # water on both dark and light backgrounds while staying dim.
-if is_light_theme(theme_bg):
-    SEA_FILL = lerp_rgb(theme_bg, (120, 155, 205), 0.35)
-else:
-    SEA_FILL = lerp_rgb(theme_bg, (70, 100, 150), 0.42)
+def sea_fill(bg):
+    if is_light_theme(bg):
+        return lerp_rgb(bg, (120, 155, 205), 0.35)
+    return lerp_rgb(bg, (70, 100, 150), 0.42)
+
+
+SEA_FILL = sea_fill(theme_bg)
 
 _DATA = None
 _LOAD_LOCK = threading.Lock()
