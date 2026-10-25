@@ -98,6 +98,23 @@ def test_the_short_final_stays_with_the_outgoing_controller():
     assert all(not v for v in picture.values())
 
 
+def test_another_fields_landing_queue_never_classifies_as_handins():
+    # Boston's runway 4 final points up the coast at Portland: closing,
+    # level-or-descending, tight inside the cone — and far too low to be
+    # coming here.  Route-unknown and under the floor stays with its own
+    # field; a resolved route here is believed at any altitude.
+    queue = [_entry("DAL900", 85.0, 200.0, alt=800.0, track=20.0,
+                    gs=140.0, vrate=-700.0),
+             _entry("JBU910", 88.0, 200.0, alt=2100.0, track=20.0,
+                    gs=160.0, vrate=-640.0)]
+    filed = _entry("EJA920", 60.0, 200.0, alt=6000.0, track=20.0,
+                   gs=220.0, vrate=0.0)
+    pool = _pool(queue + [filed], {"EJA920": (_ATL, _TPA)})
+    picture = pool.opening(SECTOR_NM, 26.0)
+    assert [e["cs"] for e in picture["handins"]] == ["EJA920"]
+    assert picture["arrivals"] == [] and picture["departures"] == []
+
+
 def test_ground_targets_and_high_cruisers_never_open_the_shift():
     grounded = _entry("AAL600", 2.0, 0.0, alt=None, track=180.0, gs=15.0)
     cruiser = _entry("UAL700", 90.0, 360.0, alt=35000.0, track=180.0,
@@ -216,6 +233,36 @@ def test_the_opening_admits_only_a_mutually_separated_set():
     real = [ac for ac in sim.aircraft if ac.get("real")]
     assert [ac["callsign"] for ac in real] == ["DAL100"]
     assert "DAL110" not in sim.pool.taken   # still castable later
+
+
+def test_the_admit_check_vets_the_spawn_altitude_not_the_sampled_one():
+    # sampled 1,400 ft apart — clear on paper — but both get lifted to
+    # the handin floor, so the second must be dropped, not spawned into
+    # an instant loss the player never owned
+    a = _entry("DAL100", 55.0, 360.0, alt=1000.0, track=180.0)
+    b = _entry("DAL110", 57.7, 360.0, alt=2400.0, track=180.0)
+    a["dist"], b["dist"] = 55.0, 57.7
+    sim = _opened({"handins": [a, b]})
+    real = [ac for ac in sim.aircraft if ac.get("real")]
+    assert [ac["callsign"] for ac in real] == ["DAL100"]
+    assert "DAL110" not in sim.pool.taken
+
+
+def test_two_strips_still_with_centre_never_bust_you():
+    sim = _opened({})
+    spot = advance(sim.airport["lat"], sim.airport["lon"], 360.0, 50.0)
+    close = advance(sim.airport["lat"], sim.airport["lon"], 360.0, 52.0)
+    pair = []
+    for cs, (lat, lon) in (("DAL900", spot), ("DAL910", close)):
+        ac = sim._base(cs, "B738", lat, lon, 12000.0, 180.0, 300.0)
+        ac.update(plan="arrival", pre_ho=True, dim=True)
+        sim.aircraft.append(ac)
+        pair.append(ac)
+    busts = sim.busts
+    sim._separation()
+    assert sim.busts == busts          # centre's separation, not yours
+    hexes = {pair[0]["hex"], pair[1]["hex"]}
+    assert not any({a, b} == hexes for a, b, _ in sim.conflicts)
 
 
 def test_reality_understudied_the_vendored_open_tops_up():

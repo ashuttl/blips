@@ -152,9 +152,15 @@ class TrafficPool:
                        else closing and alt <= elev + 26000.0
                        and vrate < 500.0)
             # beyond the ring a route-unknown flight has to be pointed
-            # nearly straight here: a 60° cone at 100 nm sweeps up real
-            # traffic bound for the airport down the road
-            tight = abs(turn_delta(track, to_field)) <= 35.0
+            # nearly straight here — a 60° cone at 100 nm sweeps up real
+            # traffic bound for the airport down the road — and be high
+            # enough to plausibly still be coming: another field's final
+            # can aim dead at this one (Boston's runway 4 points up the
+            # coast at Portland), and its landing queue is closing,
+            # level-or-descending, and low.  Nobody 45+ nm out under
+            # ~8,000 ft is yours.
+            tight = (abs(turn_delta(track, to_field)) <= 35.0
+                     and alt >= elev + 8000.0)
             outbound = (here(origin) if origin is not None
                         else leaving and vrate > 300.0
                         and alt <= elev + 18000.0)

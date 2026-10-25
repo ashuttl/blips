@@ -1204,7 +1204,7 @@ class Sim:
             for e in picture.get(bucket, ()):
                 if n >= cap:
                     break
-                if self._admit_real(e) and spawn(e):
+                if spawn(e):
                     n += 1
             counts[bucket] = n
         inbound = counts["arrivals"] + counts["handins"]
@@ -1216,16 +1216,18 @@ class Sim:
                      + " and ".join(parts) + " off the live feed", "help")
         return counts["arrivals"]
 
-    def _admit_real(self, e):
+    def _admit_real(self, e, alt):
         """No real spawn lands on top of another.  The sampled sky is
-        separated — real controllers saw to that — but the sim flies
-        straight-line stand-ins for traffic that was curving, so the
-        opening admits only a mutually clear set; a dropped flight is
-        still in the pool for the cast to use properly later."""
+        separated — real controllers saw to that — but the opening
+        reshapes altitudes (a cruiser trimmed to the cap, a low flight
+        lifted to the floor), so the set that has to stay mutually clear
+        is the state each flight will actually spawn with, not the state
+        it was sampled at.  A dropped flight is still in the pool for
+        the cast to use properly later."""
         for other in self.aircraft:
             if other["callsign"] == e["cs"]:
                 return False
-            if (abs(other["alt"] - e["alt"]) < SEP_FT
+            if (abs(other["alt"] - alt) < SEP_FT
                     and haversine_nm(other["lat"], other["lon"],
                                      e["lat"], e["lon"]) < SEP_NM * 1.3):
                 return False
@@ -1259,6 +1261,8 @@ class Sim:
             alt = 100.0 * round(max(elev + 2500.0,
                                     min(float(e["alt"]),
                                         elev + 17000.0)) / 100.0)
+        if not self._admit_real(e, alt):
+            return False
         to_field = bearing_to(lat, lon,
                               self.airport["lat"], self.airport["lon"])
         track = float(e["track"])
@@ -1307,6 +1311,8 @@ class Sim:
         lat, lon = e["lat"], e["lon"]
         elev = float(self.airport["elev"])
         alt = 100.0 * round(float(e["alt"]) / 100.0)
+        if not self._admit_real(e, alt):
+            return False
         far = self._far(e.get("far"))
         if far and far[1]:
             exit_fix = self._gate_toward(self.sector["exits"], far[1])
@@ -3316,6 +3322,9 @@ class Sim:
         self.conflicts = []
         for i, a in enumerate(yours):
             for b in yours[i + 1:]:
+                if a.get("pre_ho") and b.get("pre_ho"):
+                    continue     # two strips still with centre: centre's
+                                 # separation, not yours to lose
                 if (b["hex"] in a.get("visual", ())
                         or a["hex"] in b.get("visual", ())):
                     continue     # visual separation: the pilot has them
@@ -3369,6 +3378,8 @@ class Sim:
         # a turn that saves it.  Final is the wake monitor's business.
         for i, a in enumerate(yours):
             for b in yours[i + 1:]:
+                if a.get("pre_ho") and b.get("pre_ho"):
+                    continue     # centre's streams don't blink at you
                 if a["emergency"] and b["emergency"]:
                     continue     # already lost; solid red says so
                 if (b["hex"] in a.get("visual", ())

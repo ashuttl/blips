@@ -2,7 +2,7 @@
 
 # blips
 
-**Live aircraft and an approach-control game — drawn for the terminal.**
+**Live air traffic — drawn for the terminal.**
 
 [![PyPI](https://img.shields.io/pypi/v/blips)](https://pypi.org/project/blips/)
 [![Python](https://img.shields.io/pypi/pyversions/blips)](https://pypi.org/project/blips/)
@@ -15,12 +15,11 @@ mouse-friendly air-traffic scope. It is pure Python, has no dependencies for
 its core experience, adapts to your terminal theme, and needs no account or
 API key.
 
-Geography sets the stage: a dim block-colour sea with coastlines, borders and
-city labels picked out in braille. Live aircraft move over it as directional
-blips coloured by altitude, each with an ATC-style data block, a one-minute
-velocity leader and a fading trail. Between feed polls they glide on dead
-reckoning, so the sky moves the way the sky moves. Weather radar settles in
-underneath by default, showing the storms the aircraft are threading.
+The basemap is a dim block-colour sea with coastlines, borders and city
+labels drawn in braille. Aircraft appear as directional blips coloured by
+altitude, each with an ATC-style data block, a one-minute velocity leader and
+a fading trail, and move smoothly on dead reckoning between feed polls. A
+weather-radar underlay is on by default.
 
 ## Install
 
@@ -65,53 +64,24 @@ full data readout and route when one is known.
 | `space` | Pause the glide animation |
 | `q` | Quit |
 
-## Work the frequency
+## There's also a game
 
-There is an approach-control sim hiding inside the scope. The live feed steps
-aside and simulated flights become yours: vector and sequence them around a
-real airport, clear approaches, hand departures to centre, and keep everyone
-three miles and a thousand feet apart.
+An undocumented `--game` flag turns the scope into an approach-control sim:
+the live feed steps aside and you vector and sequence simulated flights
+around a real airport, built from real runways, navaids, terrain and weather
+— with the FAA's published SIDs and STARs at supported US airports.
 
 ```sh
 blips --game                     # the airport nearest you
 blips --game tpa                 # Tampa approach
-blips --game egll                # Heathrow director
-blips --game billings            # somewhere the terrain pushes back
 blips --game --calm              # a gentler opening shift
 ```
 
-Everything is typed into the command bar. Instructions chain, and pilots read
-the full clearance back:
-
-```text
-> rpa5655 l 230 c 40
-  Brickyard 5655, turn left heading two three zero, climb and maintain 4,000.
-```
-
-The sector is built around real runways, navaids, terrain and weather. At
-supported US airports its named SIDs and STARs come from the FAA's published
-procedures and can be drawn, inspected and flown. Traffic thickens as the
-shift goes on; separation losses, go-arounds, clean handoffs, prompt landings
-and caught bad readbacks all reach the shift book.
-
-Press `?` in a shift for a two-page command card, or read the full
-[game manual](docs/GAME.md) for phraseology, procedures, scoring, voices and
-everything the frequency eventually throws at you. The `--game` flag remains
-absent from `blips --help`; now you know where it is.
-
-### Pilot voices
-
-`voice` or <kbd>Ctrl</kbd>+<kbd>V</kbd> makes the frequency audible, with one
-voice kept for each flight. macOS uses the system `say` voices. On Linux,
-install the optional local Piper backend:
-
-```sh
-uv tool install 'blips[voice]'
-```
-
-The first transmission then downloads two multi-speaker models (about 150 MB)
-to `~/.cache/blips/voices`. Speech is synthesized locally on the CPU; turning
-voice off returns to the text-only frequency.
+Instructions are typed into the command bar and pilots read them back. Press
+`?` in a shift for a command card, and type `voice` to hear the frequency
+(on Linux, `uv tool install 'blips[voice]'` adds the local speech backend).
+The [game manual](docs/GAME.md) covers phraseology, procedures, scoring and
+voices in full.
 
 ## Data and privacy
 
@@ -157,8 +127,8 @@ telemetry service is involved.
 The braille geography, terminal-theme adaptation and live rendering loop began
 as the `radar` command in [linecast](https://github.com/ashuttl/linecast), a
 sibling collection of terminal weather, sunlight, tide, radar and map tools.
-The weather-radar underlay came home from the same project. blips takes that
-shared visual language into the moving sky, then lets you work it.
+The weather-radar underlay comes from the same project. blips applies that
+shared visual language to live aircraft.
 
 ## License
 
