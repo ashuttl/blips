@@ -375,7 +375,11 @@ class Basemap(DotLayer):
         prominence by size class then longest runway, so wide views show
         the hubs and close views fill in the fields.
         """
+        cached = getattr(self, "_airport_overlays", None)
+        if cached is not None and cached[0] == max_airports:
+            return cached[1]
         from blips._airports import airports_in_bbox
+        budget = max_airports
         if max_airports is None:
             max_airports = max(6, min(24,
                 (self.graph_w * self.height_cells) // 400))
@@ -402,6 +406,7 @@ class Basemap(DotLayer):
                     break
                 overlays[(c, row)] = (ch, CITY_LABEL)
                 c += 1
+        self._airport_overlays = (budget, overlays)
         return overlays
 
     # -- city labels ----------------------------------------------------------

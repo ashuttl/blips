@@ -19,6 +19,7 @@ Layer priority per terminal cell, top to bottom:
 Usage: blips [--location LAT,LNG | PLACE] [--zoom DEG] [--print]
 """
 
+import functools
 import math
 import os
 import signal
@@ -454,15 +455,83 @@ def _fade_bg(basemap, dx, dy):
     return BG_PRIMARY
 
 
+_TRAIL_STEPS = 24      # fade levels a trail is drawn in
+_trail_ramps = {}      # (background, colour) → that pair's fade levels
+
+
+def _trail_ramp(base, color):
+    """The trail's fade levels from ``color`` toward ``base``: the weights
+    a dot of any age can take, blended once per pair instead of per dot."""
+    key = (base, color)
+    ramp = _trail_ramps.get(key)
+    if ramp is None:
+        if len(_trail_ramps) > 4096:
+            _trail_ramps.clear()
+        lo, hi = 0.15, 0.55
+        ramp = _trail_ramps[key] = [
+            lerp(base, color, lo + (hi - lo) * i / (_TRAIL_STEPS - 1))
+            for i in range(_TRAIL_STEPS)]
+    return ramp
+
+
 def _draw_trail(fx, basemap, trail, color, now):
+    """A fading dotted history: newest fixes at 0.55 toward the blip's
+    colour, dissolving to 0.15 over TRAIL_MAX_AGE (and staying there
+    for the oldest, so a long trail never vanishes mid-stroke)."""
+    minlon, minlat, maxlon, maxlat = fx.bbox
+    lon_span, lat_span = maxlon - minlon, maxlat - minlat
+    dw, dh = fx.dw, fx.dh
+    sea, gw, hc = basemap.sea, basemap.graph_w, basemap.height_cells
+    sea_ramp = land_ramp = None
+    top = _TRAIL_STEPS - 1
     for tlat, tlon, tt in trail:
         age = now - tt
         if age > TRAIL_MAX_AGE:
             continue
+        dx = int((tlon - minlon) / lon_span * dw)
+        dy = int((maxlat - tlat) / lat_span * dh)
+        if not (0 <= dx < dw and 0 <= dy < dh):
+            continue
         weight = max(0.15, 0.55 * (1.0 - age / TRAIL_MAX_AGE))
-        x, y = _project(tlon, tlat, fx.bbox, fx.dw, fx.dh)
-        dx, dy = int(x), int(y)
-        fx._set_dot(dx, dy, lerp(_fade_bg(basemap, dx, dy), color, weight))
+        step = int((weight - 0.15) / 0.40 * top + 0.5)
+        col, row = dx >> 1, dy >> 2
+        if row < hc and col < gw and sea[row][col]:
+            if sea_ramp is None:
+                sea_ramp = _trail_ramp(SEA_FILL, color)
+            fx._set_dot(dx, dy, sea_ramp[step])
+        else:
+            if land_ramp is None:
+                land_ramp = _trail_ramp(BG_PRIMARY, color)
+            fx._set_dot(dx, dy, land_ramp[step])
+
+
+_trail_cache = {}   # the last trail layer, keyed by what it was drawn from
+
+
+def _trail_layer(basemap, placed, trails, updated, now):
+    """Every visible trail on a fresh DotLayer, ready for leaders on top.
+
+    Trails change only when a poll lands (``updated``) or a fade step
+    passes, so the layer is drawn once and copied per frame — a busy sky
+    is tens of thousands of trail dots, too many to redraw at the glide
+    rate.  Returns a copy the caller may draw over.
+    """
+    key = (basemap.bbox, basemap.graph_w, basemap.height_cells, updated,
+           int(now // (TRAIL_MAX_AGE / _TRAIL_STEPS)),
+           frozenset(p[1]["hex"] for p in placed))
+    layer = _trail_cache.get(key)
+    if layer is None:
+        layer = DotLayer(basemap.bbox, basemap.graph_w, basemap.height_cells)
+        for p in placed:
+            ac = p[1]
+            _draw_trail(layer, basemap, trails.get(ac["hex"], ()),
+                        blip_color(ac), now)
+        _trail_cache.clear()
+        _trail_cache[key] = layer
+    fx = DotLayer(basemap.bbox, basemap.graph_w, basemap.height_cells)
+    fx.dots = [row[:] for row in layer.dots]
+    fx.color = [row[:] for row in layer.color]
+    return fx
 
 
 def _draw_leader(fx, basemap, ac, lat, lon, color):
@@ -537,63 +606,45 @@ def compose(basemap, fx, overlays, graph_w, height_cells, echo=None):
 
     The sea, land and (when present) weather echo all resolve to a per-cell
     background colour; braille strokes and text glyphs are drawn on top of it.
-    Returns ``(grid, bg_grid)``: the per-cell grid (one self-contained ANSI
-    snippet per cell) so a live drag can shift the frame whole, and a parallel
-    grid of each cell's background RGB so the log overlay can knock its glyphs
-    onto the terrain and fade the upper lines into it. ``_render_lines`` turns
-    the grid into lines.
+    Returns the grid as rows of ``(char, fg_rgb, bg_rgb, bold)`` cells — data,
+    not escape codes, so a live drag can shift the frame whole, a reticle or
+    the game's floating text can be stamped over a cell's own background, and
+    ``_render_lines`` can emit a colour only where it changes.  A trailing
+    column of a double-width glyph is ``("", None, bg, False)``.
     """
-    base_bg = bg(*BG_PRIMARY)
-    sea_bg = bg(*SEA_FILL)
     sea = basemap.sea
     grid = []
-    bg_grid = []
+    base_dots, base_color = basemap.dots, basemap.color
+    fx_dots, fx_color = fx.dots, fx.color
     for cy in range(height_cells):
         srow = sea[cy]
         erow = echo[cy] if echo is not None else None
+        fdots, fcols = fx_dots[cy], fx_color[cy]
+        bdots, bcols = base_dots[cy], base_color[cy]
         row = []
-        bgrow = []
         for cx in range(graph_w):
-            e = erow[cx] if erow is not None else None
-            if e is not None:
-                base_rgb = SEA_FILL if srow[cx] else BG_PRIMARY
-                bg_rgb = lerp(base_rgb, (e[0], e[1], e[2]), e[3])
-                cell_bg = bg(*bg_rgb)
-            elif srow[cx]:
-                bg_rgb, cell_bg = SEA_FILL, sea_bg
-            else:
-                bg_rgb, cell_bg = BG_PRIMARY, base_bg
-            bgrow.append(bg_rgb)
+            bg_rgb = SEA_FILL if srow[cx] else BG_PRIMARY
+            if erow is not None:
+                e = erow[cx]
+                if e is not None:
+                    bg_rgb = lerp(bg_rgb, (e[0], e[1], e[2]), e[3])
             ov = overlays.get((cx, cy))
             if ov is not None:
-                ch, color = ov
-                if ch == "":
-                    row.append("")  # trailing column of a double-width glyph
-                    continue
-                row.append(f"{cell_bg}{fg(*color)}{ch}")
+                row.append((ov[0], ov[1], bg_rgb, False))
                 continue
-            mask = fx.dots[cy][cx]
-            layer = fx if mask else basemap
-            if not mask:
-                mask = basemap.dots[cy][cx]
+            mask = fdots[cx]
             if mask:
-                color = layer.color[cy][cx] or DIM
-                row.append(f"{cell_bg}{fg(*color)}{chr(0x2800 + mask)}")
+                row.append((chr(0x2800 + mask), fcols[cx] or DIM, bg_rgb,
+                            False))
+                continue
+            mask = bdots[cx]
+            if mask:
+                row.append((chr(0x2800 + mask), bcols[cx] or DIM, bg_rgb,
+                            False))
             else:
-                row.append(f"{cell_bg} ")
+                row.append((" ", None, bg_rgb, False))
         grid.append(row)
-        bg_grid.append(bgrow)
-    return grid, bg_grid
-
-
-def _bg_prefix(cell):
-    """The leading background-colour SGR of a composed cell (up to its 'm').
-
-    Composed cells begin with ``\\033[48;2;r;g;bm``, so a reticle glyph can be
-    stamped onto a cell while keeping whatever background it was sitting on.
-    """
-    i = cell.find("m")
-    return cell[:i + 1] if i != -1 else ""
+    return grid
 
 
 def _footer_alpha(i, n):
@@ -674,7 +725,48 @@ def _footer_overlay(lines, graph_w, height_cells):
     return overlay
 
 
-def _render_lines(grid, reticle=None, text=None, bg_grid=None):
+_BOLD_OFF = "\033[22m"
+
+
+@functools.lru_cache(maxsize=8192)
+def _bg_esc(rgb):
+    return bg(*rgb)
+
+
+@functools.lru_cache(maxsize=8192)
+def _fg_esc(rgb):
+    return fg(*rgb)
+
+
+def _emit_row(cells):
+    """One row of ``(char, fg, bg, bold)`` cells as ANSI, naming a colour
+    only where it changes — most of a scope is one sea or one land
+    background, so a row is mostly bare glyphs.  Compared as escape codes,
+    so two colours a 256-colour terminal draws alike don't repeat."""
+    parts = []
+    cur_bg = cur_fg = None
+    cur_bold = False
+    for ch, col, bgc, bold in cells:
+        if not ch:
+            continue  # trailing column of a double-width glyph
+        if ch != " " and bold != cur_bold:
+            parts.append(BOLD if bold else _BOLD_OFF)
+            cur_bold = bold
+        e = _bg_esc(bgc)
+        if e != cur_bg:
+            parts.append(e)
+            cur_bg = e
+        if ch != " " and col is not None:
+            e = _fg_esc(col)
+            if e != cur_fg:
+                parts.append(e)
+                cur_fg = e
+        parts.append(ch)
+    parts.append(RESET)
+    return "".join(parts)
+
+
+def _render_lines(grid, reticle=None, text=None):
     """Flatten a per-cell grid into ANSI lines, stamping overlays on top.
 
     ``reticle`` is {(cx, cy): (char, color)} for the range rings and crosshair.
@@ -682,34 +774,28 @@ def _render_lines(grid, reticle=None, text=None, bg_grid=None):
     stays fixed at the view centre while the map (the grid) shifts beneath it
     during a live drag — panning slews the scope head, it doesn't drag it off.
 
-    ``text`` (the game's floating top bar and log, with the matching
-    ``bg_grid`` from ``compose``) draws each cell over its own map background —
-    knocking the braille out from under the glyphs while the gaps keep the
-    terrain — fading toward that background by its alpha, and it outranks the
-    reticle so a ring dot never eats a letter.
+    ``text`` (the game's floating top bar and log) is
+    {(cx, cy): (char, rgb, bold, alpha)}: each glyph is drawn over its cell's
+    own map background — knocking the braille out from under the glyphs
+    while the gaps keep the terrain — fading toward that background by its
+    alpha, and it outranks the reticle so a ring dot never eats a letter.
     """
     lines = []
     for cy, row in enumerate(grid):
-        parts = []
-        for cx, cell in enumerate(row):
-            fo = text.get((cx, cy)) if text else None
-            if fo is not None:
-                ch, rgb, bold, alpha = fo
-                if ch == "":
-                    continue  # trailing column of a double-width glyph
-                base = bg_grid[cy][cx]
-                col = rgb if alpha >= 1.0 else lerp(base, rgb, alpha)
-                weight = BOLD if bold else ""
-                parts.append(f"{bg(*base)}{weight}{fg(*col)}{ch}{RESET}")
-                continue
-            rc = reticle.get((cx, cy)) if reticle else None
-            if rc is not None:
-                ch, color = rc
-                parts.append(f"{_bg_prefix(cell)}{fg(*color)}{ch}")
-            else:
-                parts.append(cell)
-        parts.append(RESET)
-        lines.append("".join(parts))
+        if reticle or text:
+            row = list(row)
+            for cx, cell in enumerate(row):
+                fo = text.get((cx, cy)) if text else None
+                if fo is not None:
+                    ch, rgb, bold, alpha = fo
+                    base = cell[2]
+                    col = rgb if alpha >= 1.0 else lerp(base, rgb, alpha)
+                    row[cx] = (ch, col, base, bold)
+                    continue
+                rc = reticle.get((cx, cy)) if reticle else None
+                if rc is not None:
+                    row[cx] = (rc[0], rc[1], cell[2], False)
+        lines.append(_emit_row(row))
     return lines
 
 
@@ -867,7 +953,7 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
     if (drag_offset is not None and _last_frame.get("gw") == graph_w
             and _last_frame.get("hc") == height_cells):
         dcol, drow = drag_offset
-        blank = f"{bg(*BG_PRIMARY)} "
+        blank = (" ", None, BG_PRIMARY, False)
         shifted = _shift_grid(_last_frame["grid"], dcol, drow, blank)
         reticle_prev = _last_frame["reticle"]
         if _last_frame.get("geo_reticle"):
@@ -876,8 +962,7 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
                             for (cx, cy), v in reticle_prev.items()}
         # the top bar and log stay put while the map slides beneath them
         lines = _render_lines(shifted, reticle_prev,
-                              text=_last_frame.get("text_overlay"),
-                              bg_grid=_last_frame.get("bg_grid"))
+                              text=_last_frame.get("text_overlay"))
         head, foot = _last_frame.get("header"), _last_frame.get("footer")
         parts = ([head] if head is not None else []) + list(lines)
         if foot is not None:
@@ -944,11 +1029,18 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
 
     blip_cells = {(p[4], p[5]) for p in placed
                   if 0 <= p[4] < graph_w and 0 <= p[5] < height_cells}
+    if show_trails:
+        if lines_geo:
+            # the game: its strokes are already on fx, and its traffic is
+            # re-simulated every tick, so there is nothing to keep
+            for p in placed:
+                _draw_trail(fx, basemap, trails.get(p[1]["hex"], ()),
+                            blip_color(p[1]), now)
+        else:
+            fx = _trail_layer(basemap, placed, trails, updated, now)
     air = {}
     for _d2, ac, alat, alon, col, row in placed:
         color = blip_color(ac)
-        if show_trails:
-            _draw_trail(fx, basemap, trails.get(ac["hex"], ()), color, now)
         _draw_leader(fx, basemap, ac, alat, alon, color)
         if ac["ground"]:
             continue  # ground targets: dim blip only, no data block
@@ -1128,7 +1220,7 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
                     focused_pin = key
                     break
 
-    grid, bg_grid = compose(basemap, fx, overlays, graph_w, height_cells, echo)
+    grid = compose(basemap, fx, overlays, graph_w, height_cells, echo)
 
     airborne = sum(1 for ac in aircraft if not ac["ground"])
     ground = len(aircraft) - airborne
@@ -1208,14 +1300,14 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
     if game_footer is None:
         foot += " " * max(0, cols - visible_len(foot))
 
-    map_lines = _render_lines(grid, reticle, text=text_overlay, bg_grid=bg_grid)
+    map_lines = _render_lines(grid, reticle, text=text_overlay)
 
     # cache this clean frame so a live drag can shift the map whole and
     # re-stamp the (fixed) reticle over it (see the drag fast-path up top);
     # blip screen positions ride along so a click can name its aircraft
     _last_frame.clear()
     _last_frame.update(grid=grid, reticle=reticle, header=header, footer=foot,
-                       text_overlay=text_overlay, bg_grid=bg_grid,
+                       text_overlay=text_overlay,
                        gw=graph_w, hc=height_cells,
                        geo_reticle=rings_at is not None,
                        hits=[(p[4], p[5], p[1]["callsign"]) for p in placed])
