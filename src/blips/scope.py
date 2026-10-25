@@ -1084,10 +1084,23 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
 
     overlays = dict(basemap.airport_overlays())
     airport_hits = basemap.airport_hits()
+    # an airport label yields whole to traffic: one a data block or blip
+    # runs into (or butts against) steps aside rather than reading as
+    # "•FDAL915" with its code half overwritten
+    kept = []
+    for hcol_, hrow_, width, icao in airport_hits:
+        span = [(c, hrow_) for c in range(hcol_ - 1, hcol_ + width + 2)]
+        if any(cell in air for cell in span):
+            # the code steps aside; the dot stays, a landmark under traffic
+            for c in range(hcol_ + 1, hcol_ + width + 1):
+                overlays.pop((c, hrow_), None)
+        else:
+            kept.append((hcol_, hrow_, width, icao))
+    airport_hits = kept
     if airport_focus:
+        # (a focus drawn fresh appends its own hit to airport_hits)
         overlays.update(_airport_focus(basemap, airport_focus, overlays,
                                        airport_hits))
-        airport_hits = basemap.airport_hits() + airport_hits
     # game pins (sector fixes, procedure names): glyph + as much of the label
     # as fits, under the traffic — a data block always outranks a fix name.
     # A pin may carry ``meta``: a colour for the label text (so an arrival

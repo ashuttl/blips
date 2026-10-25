@@ -787,7 +787,11 @@ class ScopeApp(LiveApp):
                             f"{abs(vr):,.0f} fpm", mut))
             sel = ac.get("sel_alt")
             if sel and abs(sel - alt) > 250:
-                row.append((f" · selected {sel:,.0f}", mut))
+                # ADS-B carries the dialled altitude in 16 ft steps: read
+                # it back to the hundred, as the autopilot shows it
+                sel = round(sel / 100) * 100
+                sel_s = f"FL{sel / 100:03.0f}" if sel >= 18000 else f"{sel:,.0f}"
+                row.append((f" · selected {sel_s}", mut))
             lines.append(row)
         motion = []
         if ac.get("gs"):
