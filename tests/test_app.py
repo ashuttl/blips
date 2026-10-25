@@ -138,3 +138,22 @@ def test_wheel_zooms_about_the_pointer(app):
     _render(app)
     assert app.on_wheel(1, 20, 10)
     assert app.camera.target[2] < 2.0
+
+
+def test_an_emergency_squawk_is_announced_once(app):
+    app.feed.aircraft[1]["squawk"] = "7700"
+    app.feed.updated += 1
+    frame = _plain(_render(app))
+    assert "JBU109 squawking 7700" in frame
+    app.toast = None
+    app.feed.updated += 1
+    assert "squawking" not in _plain(_render(app))
+
+
+def test_footer_hint_shortens_to_fit(app, monkeypatch):
+    small = os.terminal_size((80, 24))
+    monkeypatch.setattr(scope, "get_terminal_size", lambda *a: small)
+    monkeypatch.setattr(app_mod, "get_terminal_size", lambda *a: small)
+    monkeypatch.setattr(scope.sys.stdout, "isatty", lambda: True)
+    footer = _plain(_render(app)).split("\x00")[0].split("\n")[-1]
+    assert "/ search" in footer

@@ -1257,12 +1257,16 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
                 src_note += " · wx …"
         left = f"{fg(*DIM)}{src_note}{RESET}"
         ring_note = f"rings {_ring_spacing_nm(zoom)} nm · " if show_rings else ""
-        hint_text = footer_hint if footer_hint is not None else (
+        hints = footer_hint if footer_hint is not None else (
             "+/- zoom · drag pan · t trails · r rings · g ground · "
             "w weather · q quit")
-        hint = (f"{fg(*DIM)}{ring_note}{hint_text}{RESET}"
-                if sys.stdout.isatty() else "")
-        for foot in (f"{left}  {hint}", f"{left}", ""):
+        if isinstance(hints, str):
+            hints = (hints,)
+        tries = []
+        if sys.stdout.isatty():
+            tries += [f"{left}  {fg(*DIM)}{ring_note}{h}{RESET}" for h in hints]
+            tries += [f"{left}  {fg(*DIM)}{h}{RESET}" for h in hints]
+        for foot in tries + [f"{left}", ""]:
             if visible_len(foot) <= cols:
                 break
     if game_footer is None:

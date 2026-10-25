@@ -107,6 +107,7 @@ class ScopeApp(LiveApp):
         self._search_rect = None
         self._result_rows = {}    # screen row → result index
         self._procs = None        # (key, overlay) for the airport on the card
+        self._alerted = set()     # hexes whose emergency has been announced
         self._lock = threading.Lock()
 
     # -- running ---------------------------------------------------------------
@@ -193,11 +194,28 @@ class ScopeApp(LiveApp):
             self.seen = {h: a for h, a in self.seen.items()
                          if now - a["fix_time"] < SEEN_KEEP_S}
         self.routes.want(a for a in aircraft if not a["ground"])
+        self._announce(aircraft)
         if self.selected:
             hit = next((a for a in aircraft if a["hex"] == self.selected), None)
             if hit is not None:
                 self.sel_ac = hit
                 self.sel_seen = now
+
+    SQUAWKS = {"7500": "hijack", "7600": "radio failure", "7700": "emergency"}
+
+    def _announce(self, aircraft):
+        """A toast the first time a flight in the feed declares: squawk
+        7500, 7600 or 7700, or the emergency field set."""
+        for ac in aircraft:
+            if ac["ground"] or ac["hex"] in self._alerted:
+                continue
+            sq = ac.get("squawk")
+            if sq in self.SQUAWKS or ac.get("emergency"):
+                self._alerted.add(ac["hex"])
+                what = self.SQUAWKS.get(sq, "emergency")
+                code = f"squawking {sq}" if sq in self.SQUAWKS else "declaring"
+                self.flash(f"⚠ {ac['callsign']} {code} — {what} · / and type "
+                           f"{ac['callsign']} to find it", 10.0)
 
     def _known_routes(self):
         return self.routes.known()
@@ -536,7 +554,8 @@ class ScopeApp(LiveApp):
             airport_focus=self.airport["icao"] if self.airport else None,
             header_extra=self._header_extra(),
             footer_hint=("/ search · click select · f follow · scroll zoom · "
-                         "l labels · ? help · q quit"),
+                         "l labels · ? help · q quit",
+                         "/ search · ? help · q quit"),
             blocked=rects)
         body, _, chip = frame.partition("\x00")
         return overlay(body, chip + floating,
