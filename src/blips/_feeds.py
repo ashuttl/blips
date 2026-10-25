@@ -35,6 +35,7 @@ TRAIL_MAX_AGE = 480.0
 TRAIL_MAX_FIXES = 120
 TILE_GAP_S = 1.1      # between the requests of a wide sweep: ≤1 req/s
 MAX_TILES = 16        # a sweep's ceiling; the edges of a continent wait
+SWEEP_FROM_NM = 300   # one request up to here, tiles beyond
 WX_PAD = 0.25         # radar fetched this far past each edge of the view
 
 
@@ -123,11 +124,13 @@ class Feed:
             self._fetching = True
             self._fetch_started = time.time()
         try:
-            if radius > MAX_RADIUS_NM and self._bbox is not None:
+            if radius > SWEEP_FROM_NM and self._bbox is not None:
                 aircraft, source = self._sweep(lat, lon, _trying)
             else:
-                aircraft, source = self._picker.fetch(lat, lon, radius,
-                                                      on_status=_trying)
+                # a view whose corners are a little past the aggregators'
+                # reach asks once and lets the far corners go quiet
+                aircraft, source = self._picker.fetch(
+                    lat, lon, min(radius, MAX_RADIUS_NM), on_status=_trying)
                 with self._lock:
                     self.sweep = None
             aircraft = self._with_pins(aircraft)
