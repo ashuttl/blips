@@ -17,6 +17,7 @@ import gzip
 import json
 import math
 import os
+import threading
 import unicodedata
 
 from blips._theme import is_light_theme, lerp_rgb, theme_bg
@@ -40,6 +41,7 @@ else:
     SEA_FILL = lerp_rgb(theme_bg, (70, 100, 150), 0.42)
 
 _DATA = None
+_LOAD_LOCK = threading.Lock()
 
 
 def _cell_width(ch):
@@ -57,14 +59,63 @@ def _localized(entry, lang):
     return entry[3]
 
 
+def _bounds(points):
+    """(minlon, minlat, maxlon, maxlat) of a coordinate list."""
+    lons = [p[0] for p in points]
+    lats = [p[1] for p in points]
+    return (min(lons), min(lats), max(lons), max(lats))
+
+
+def _index(data):
+    """Bounds for every feature, worked out once so a view's cull is a
+    comparison per feature instead of a walk over all of its points."""
+    groups = lambda key: data.get(key, ())  # noqa: E731
+    return {
+        "land": [_bounds([p for ring in rings for p in ring])
+                 for rings in groups("land")],
+        "lakes": [_bounds([p for ring in rings for p in ring])
+                  for rings in groups("lakes")],
+        "land_rings": [_bounds(ring) for rings in groups("land")
+                       for ring in rings],
+        "lake_rings": [_bounds(ring) for rings in groups("lakes")
+                       for ring in rings],
+        "borders": [_bounds(line) for line in groups("borders")],
+    }
+
+
+def _data_index(data):
+    """The bounds index of a basemap dict, built on first ask (a dict
+    handed in whole, as the tests do, arrives without one)."""
+    index = data.get("_index")
+    if index is None:
+        index = data["_index"] = _index(data)
+    return index
+
+
 def _load_data():
+    """The vendored Natural Earth layers, plus their bounds index.
+
+    Parsing costs about half a second, so the scope warms it on a
+    background thread at startup (``warm``); the lock makes a first
+    frame that gets here sooner wait for that parse, not start another.
+    """
     global _DATA
-    if _DATA is None:
-        path = os.path.join(os.path.dirname(__file__), "data",
-                            "basemap.json.gz")
-        with gzip.open(path, "rt", encoding="utf-8") as fh:
-            _DATA = json.load(fh)
+    if _DATA is not None:
+        return _DATA
+    with _LOAD_LOCK:
+        if _DATA is None:
+            path = os.path.join(os.path.dirname(__file__), "data",
+                                "basemap.json.gz")
+            with gzip.open(path, "rt", encoding="utf-8") as fh:
+                data = json.load(fh)
+            _data_index(data)
+            _DATA = data
     return _DATA
+
+
+def warm():
+    """Parse the basemap on a daemon thread, ahead of the first frame."""
+    threading.Thread(target=_load_data, daemon=True).start()
 
 
 def nearest_city(lat, lon, lang="en"):
@@ -173,34 +224,48 @@ class DotLayer:
 
     def _in_view(self, points):
         """True if a feature's lon/lat bbox overlaps the view (cheap cull)."""
+        return self._overlaps(_bounds(points)) if points else False
+
+    def _overlaps(self, bounds):
+        """True if a (minlon, minlat, maxlon, maxlat) box meets the view."""
         minlon, minlat, maxlon, maxlat = self.bbox
-        lo_lon = lo_lat = float("inf")
-        hi_lon = hi_lat = float("-inf")
-        for lon, lat in points:
-            if lon < lo_lon:
-                lo_lon = lon
-            if lon > hi_lon:
-                hi_lon = lon
-            if lat < lo_lat:
-                lo_lat = lat
-            if lat > hi_lat:
-                hi_lat = lat
+        lo_lon, lo_lat, hi_lon, hi_lat = bounds
         return not (hi_lon < minlon or lo_lon > maxlon
                     or hi_lat < minlat or lo_lat > maxlat)
 
-    def _draw_lines(self, lines, color, width=1):
+    def _draw_lines(self, lines, color, width=1, bounds=None):
+        """Stroke polylines in braille.  ``bounds``, when given, holds each
+        line's precomputed box so the cull skips the walk over its points.
+
+        A segment with both ends past the same edge of the window draws
+        nothing (Bresenham never leaves its endpoints' box), so it is
+        skipped before the stepping; at a close zoom that is nearly every
+        segment of a continent's coastline.
+        """
         offsets = ((0, 0),) if width <= 1 else ((0, 0), (1, 0), (0, 1))
-        for coords in lines:
-            if not self._in_view(coords):
+        minlon, minlat, maxlon, maxlat = self.bbox
+        lon_span, lat_span = maxlon - minlon, maxlat - minlat
+        dw, dh = self.dw, self.dh
+        lo_x = lo_y = -2.0
+        hi_x, hi_y = self.dw + 1.0, self.dh + 1.0
+        for i, coords in enumerate(lines):
+            if bounds is not None:
+                if not self._overlaps(bounds[i]):
+                    continue
+            elif not self._in_view(coords):
                 continue
-            prev = None
+            px = py = None
             for lon, lat in coords:
-                p = _project(lon, lat, self.bbox, self.dw, self.dh)
-                if prev is not None:
+                x = (lon - minlon) / lon_span * dw   # _project, inlined
+                y = (maxlat - lat) / lat_span * dh
+                if px is not None and not (
+                        (px < lo_x and x < lo_x) or (px > hi_x and x > hi_x)
+                        or (py < lo_y and y < lo_y)
+                        or (py > hi_y and y > hi_y)):
                     for ox, oy in offsets:
-                        self._dot_line(prev[0] + ox, prev[1] + oy,
-                                       p[0] + ox, p[1] + oy, color)
-                prev = p
+                        self._dot_line(px + ox, py + oy, x + ox, y + oy,
+                                       color)
+                px, py = x, y
 
 
 class Basemap(DotLayer):
@@ -210,37 +275,55 @@ class Basemap(DotLayer):
         super().__init__(bbox, graph_w, height_cells)
         self._build()
 
-    def _fill_polys(self, land, poly_groups, value):
+    def _fill_polys(self, land, poly_groups, value, bounds=None):
         """Scanline-fill each polygon (a list of rings) into ``land`` at dot
         resolution, writing ``value`` inside.  Even-odd across a group's rings
         means interior rings (island holes) keep the opposite value, so filling
-        land with 1 and then carving lakes with 0 both respect their holes."""
-        for rings in poly_groups:
-            if not self._in_view([p for ring in rings for p in ring]):
+        land with 1 and then carving lakes with 0 both respect their holes.
+
+        Each edge is visited once and drops its crossing into the rows it
+        spans, rather than every row asking every edge: a continent has tens
+        of thousands of edges, and a row meets a handful of them.  The test
+        for a crossing is the same half-open one at the row's centre, so the
+        fill is dot-for-dot what a row-by-row scan would make.
+        """
+        minlon, minlat, maxlon, maxlat = self.bbox
+        lon_span, lat_span = maxlon - minlon, maxlat - minlat
+        dw, dh = self.dw, self.dh
+        ink = bytes([value])
+        for gi, rings in enumerate(poly_groups):
+            if bounds is not None:
+                if not self._overlaps(bounds[gi]):
+                    continue
+            elif not self._in_view([p for ring in rings for p in ring]):
                 continue
-            # project rings to dot space
-            prings = [[_project(lon, lat, self.bbox, self.dw, self.dh)
-                       for lon, lat in ring] for ring in rings]
-            ys = [p[1] for ring in prings for p in ring]
-            y0 = max(0, int(min(ys)))
-            y1 = min(self.dh - 1, int(max(ys)) + 1)
-            for y in range(y0, y1 + 1):
-                yc = y + 0.5
-                xs = []
-                for ring in prings:
-                    n = len(ring)
-                    for i in range(n - 1):
-                        ax, ay = ring[i]
-                        bx, by = ring[i + 1]
-                        if (ay <= yc < by) or (by <= yc < ay):
-                            xs.append(ax + (yc - ay) / (by - ay) * (bx - ax))
+            crossings = {}
+            for ring in rings:
+                ax = ay = None
+                for lon, lat in ring:
+                    bx = (lon - minlon) / lon_span * dw   # _project, inlined
+                    by = (maxlat - lat) / lat_span * dh
+                    if ay is not None and ay != by:
+                        lo, hi = (ay, by) if ay < by else (by, ay)
+                        for y in range(max(0, int(lo) - 1),
+                                       min(dh - 1, int(hi) + 1) + 1):
+                            yc = y + 0.5
+                            if (ay <= yc < by) or (by <= yc < ay):
+                                x = ax + (yc - ay) / (by - ay) * (bx - ax)
+                                hit = crossings.get(y)
+                                if hit is None:
+                                    crossings[y] = [x]
+                                else:
+                                    hit.append(x)
+                    ax, ay = bx, by
+            for y, xs in crossings.items():
                 xs.sort()
                 row = land[y]
                 for i in range(0, len(xs) - 1, 2):
                     xa = max(0, int(xs[i] + 0.5))
-                    xb = min(self.dw, int(xs[i + 1] + 0.5))
-                    for x in range(xa, xb):
-                        row[x] = value
+                    xb = min(dw, int(xs[i + 1] + 0.5))
+                    if xb > xa:
+                        row[xa:xb] = ink * (xb - xa)
 
     def _sea_mask(self):
         """Boolean land mask at dot resolution via scanline polygon fill.
@@ -250,8 +333,9 @@ class Basemap(DotLayer):
         other inland water body) would otherwise fill solid as land."""
         land = [bytearray(self.dw) for _ in range(self.dh)]
         data = _load_data()
-        self._fill_polys(land, data["land"], 1)
-        self._fill_polys(land, data.get("lakes", ()), 0)
+        index = _data_index(data)
+        self._fill_polys(land, data["land"], 1, index["land"])
+        self._fill_polys(land, data.get("lakes", ()), 0, index["lakes"])
         return land
 
     def _build(self):
@@ -261,17 +345,13 @@ class Basemap(DotLayer):
         # coastlines drawn on top (the block edge is blocky, but the coastline
         # braille below re-adds the crisp sub-cell boundary).
         land = self._sea_mask()
-        self.sea = [[False] * self.graph_w for _ in range(self.height_cells)]
+        self.sea = []
         for cy in range(self.height_cells):
-            srow = self.sea[cy]
-            for cx in range(self.graph_w):
-                base = cx * 2
-                water = 0
-                for oy in range(4):
-                    lrow = land[cy * 4 + oy]
-                    water += (not lrow[base]) + (not lrow[base + 1])
-                if water >= 4:  # majority of the cell's dots are water
-                    srow[cx] = True
+            # land dots per dot column across the cell's four dot rows, then
+            # per cell: sea when at most half its eight dots are land
+            cols = [a + b + c + d for a, b, c, d in zip(*land[cy * 4:cy * 4 + 4])]
+            self.sea.append([cols[2 * cx] + cols[2 * cx + 1] <= 4
+                             for cx in range(self.graph_w)])
         # 2) coastlines, then borders on top (priority order). Coast strokes
         # are the land polygons' own outlines, so the emphasized coastline and
         # the land/sea fill boundary can never disagree.
@@ -281,8 +361,10 @@ class Basemap(DotLayer):
         # boundary is re-added over the coarse cell water fill, exactly as for
         # the ocean coast.
         coast += [ring for rings in data.get("lakes", ()) for ring in rings]
-        self._draw_lines(coast, COAST)
-        self._draw_lines(data["borders"], BORDER)
+        index = _data_index(data)
+        self._draw_lines(coast, COAST,
+                         bounds=index["land_rings"] + index["lake_rings"])
+        self._draw_lines(data["borders"], BORDER, bounds=index["borders"])
 
     # -- airport labels --------------------------------------------------------
     def airport_overlays(self, max_airports=None):
