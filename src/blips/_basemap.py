@@ -385,6 +385,7 @@ class Basemap(DotLayer):
                 (self.graph_w * self.height_cells) // 400))
         overlays = {}
         placed = []
+        hits = []
         for ap in airports_in_bbox(self.bbox):
             if len(placed) >= max_airports:
                 break
@@ -406,8 +407,17 @@ class Basemap(DotLayer):
                     break
                 overlays[(c, row)] = (ch, CITY_LABEL)
                 c += 1
+            hits.append((col, row, c - col - 1, ap["icao"]))
         self._airport_overlays = (budget, overlays)
+        self._airport_hits = hits
         return overlays
+
+    def airport_hits(self):
+        """[(col, row, label width, icao)] for the labelled airports — the
+        dot at (col, row), its code to the right — so a click can name one."""
+        if getattr(self, "_airport_hits", None) is None:
+            self.airport_overlays()
+        return list(self._airport_hits)
 
     # -- city labels ----------------------------------------------------------
     def city_overlays(self, max_cities=None, lang="en"):

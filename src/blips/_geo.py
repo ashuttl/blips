@@ -61,3 +61,27 @@ def cross_along_track(lat, lon, thr_lat, thr_lon, course_deg):
     brg = bearing_to(lat, lon, thr_lat, thr_lon)
     off = math.radians(brg - course_deg)
     return -dist * math.sin(off), dist * math.cos(off)
+
+
+def great_circle(lat1, lon1, lat2, lon2, step_nm=15.0, max_points=240):
+    """Points along the great circle from 1 to 2, every ``step_nm`` or so —
+    the curve a long-haul route really flies, for drawing it."""
+    d = haversine_nm(lat1, lon1, lat2, lon2)
+    n = max(2, min(max_points, int(d / step_nm) + 2))
+    p1, l1 = math.radians(lat1), math.radians(lon1)
+    p2, l2 = math.radians(lat2), math.radians(lon2)
+    delta = d / 3440.065
+    if delta < 1e-9:
+        return [(lat1, lon1), (lat2, lon2)]
+    sd = math.sin(delta)
+    out = []
+    for i in range(n):
+        f = i / (n - 1)
+        a = math.sin((1 - f) * delta) / sd
+        b = math.sin(f * delta) / sd
+        x = a * math.cos(p1) * math.cos(l1) + b * math.cos(p2) * math.cos(l2)
+        y = a * math.cos(p1) * math.sin(l1) + b * math.cos(p2) * math.sin(l2)
+        z = a * math.sin(p1) + b * math.sin(p2)
+        out.append((math.degrees(math.atan2(z, math.hypot(x, y))),
+                    math.degrees(math.atan2(y, x))))
+    return out

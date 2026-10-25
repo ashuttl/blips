@@ -23,21 +23,21 @@ import functools
 import math
 import os
 import sys
-import threading
 import time
 
-from blips._adsb import SourcePicker
 from blips._commands import airline_name
-from blips._routes import RouteLookup
 from blips._basemap import (
     Basemap, DotLayer, SEA_FILL, marine_region, nearest_city, _project,
 )
 from blips._color import BG_PRIMARY, BOLD, RESET, bg, fg, interp_stops, lerp
 from blips._framebuffer import get_terminal_size, visible_len
 from blips._geo import advance, bearing_to, haversine_nm
-from blips._live import live_loop, nudge
+from blips._camera import bbox_for  # noqa: F401 — the game imports it here
+from blips._feeds import (  # noqa: F401 — re-exported for the game
+    REFRESH_S, TRAIL_MAX_AGE, TRAIL_MAX_FIXES, WEATHER_REFRESH_S, Feed,
+    WeatherFeed, _view_key,
+)
 from blips._location import geocode_place, get_location
-from blips._radar_sources import get_source
 from blips._runtime import blips_parser, resolve_live
 from blips._theme import darken, ensure_contrast, is_light_theme, surface_bg
 
@@ -60,29 +60,13 @@ ALT_STOPS = (
     (45000, (190, 120, 240)),
 )
 
-REFRESH_S = 5.0       # feed poll cadence (aggregators ask ≤1 req/s; we're 5x under)
-WEATHER_REFRESH_S = 120.0  # radar composites update ~every 5 min; poll gently
 WX_DIM = 0.6          # weather is an ambient underlay; keep traffic readable on top
 MAX_EXTRAP_S = 20.0   # cap dead reckoning so a stale fix doesn't fly away
-TRAIL_MAX_AGE = 480.0
-TRAIL_MAX_FIXES = 120
 ARROWS = "↑↗→↘↓↙←↖"
 COMPASS = ("N", "NE", "E", "SE", "S", "SW", "W", "NW")
 SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"  # header pulse while the first fetch is in flight
 
 _basemap_cache = {}
-
-
-def bbox_for(lat, lon, zoom, graph_w, height_cells):
-    """Geographic window so map sub-cells render ~square on screen.
-
-    `zoom` is the degrees of latitude shown top-to-bottom.
-    """
-    spy_h = height_cells * 2
-    half_lat = zoom / 2
-    lon_span = zoom * (graph_w / spy_h) / max(0.2, math.cos(math.radians(lat)))
-    return (lon - lon_span / 2, lat - half_lat, lon + lon_span / 2,
-            lat + half_lat)
 
 
 def view_radius_nm(bbox, lat, lon):
@@ -181,199 +165,6 @@ def data_block(ac):
     return f"{block} {tag}" if tag else block
 
 
-class Feed:
-    """Background poller: keeps fresh aircraft + position trails per view."""
-
-    def __init__(self, nudge=False):
-        self.aircraft = []
-        self.trails = {}     # hex → [(lat, lon, fix_time), ...]
-        self.updated = None  # wall time of last successful poll
-        self.source = ""
-        self.error = None
-        self._fetching = False      # a poll is in flight right now
-        self._fetch_started = None  # wall time the in-flight poll began
-        self._trying = ""           # aggregator currently being waited on
-        self._view = None    # (lat, lon, radius_nm)
-        self._picker = SourcePicker()  # sticky best-aggregator-for-here
-        self._wake = threading.Event()
-        self._lock = threading.Lock()
-        self._nudge = nudge  # wake the live loop after each poll
-
-    def set_view(self, lat, lon, radius_nm):
-        view = (round(lat, 4), round(lon, 4), round(radius_nm))
-        if view != self._view:
-            self._view = view
-            self._wake.set()  # poll the new window immediately
-
-    def start(self):
-        threading.Thread(target=self._run, daemon=True).start()
-
-    def poll_once(self):
-        lat, lon, radius = self._view
-
-        def _trying(name):
-            with self._lock:
-                self._trying = name
-
-        with self._lock:
-            self._fetching = True
-            self._fetch_started = time.time()
-        try:
-            aircraft, source = self._picker.fetch(lat, lon, radius,
-                                                  on_status=_trying)
-        finally:
-            with self._lock:
-                self._fetching = False
-                self._trying = ""
-        with self._lock:
-            self.aircraft = aircraft
-            self.source = source
-            self.updated = time.time()
-            self.error = None
-            self._update_trails(aircraft)
-
-    def snapshot(self):
-        with self._lock:
-            return (list(self.aircraft), dict(self.trails), self.updated,
-                    self.source, self.error)
-
-    def fetch_status(self):
-        """(fetching, started, trying): is a poll in flight, since when,
-        and which aggregator it's waiting on."""
-        with self._lock:
-            return self._fetching, self._fetch_started, self._trying
-
-    def _update_trails(self, aircraft):
-        now = time.time()
-        seen = set()
-        for ac in aircraft:
-            if ac["ground"]:
-                continue  # taxiing scribbles aren't worth the ink
-            seen.add(ac["hex"])
-            trail = self.trails.setdefault(ac["hex"], [])
-            if not trail or (ac["fix_time"] > trail[-1][2] + 1.0):
-                trail.append((ac["lat"], ac["lon"], ac["fix_time"]))
-                del trail[:-TRAIL_MAX_FIXES]
-        for hexid in list(self.trails):
-            trail = self.trails[hexid]
-            while trail and now - trail[0][2] > TRAIL_MAX_AGE:
-                trail.pop(0)
-            if not trail or (hexid not in seen
-                             and now - trail[-1][2] > 120.0):
-                del self.trails[hexid]
-
-    def _run(self):
-        while True:
-            try:
-                self.poll_once()
-            except Exception as exc:
-                with self._lock:
-                    self.error = str(exc)
-            if self._nudge:
-                nudge()  # repaint now that data landed
-            self._wake.wait(REFRESH_S)
-            self._wake.clear()
-
-
-def _view_key(bbox, gw, hc):
-    return (tuple(round(v, 3) for v in bbox), gw, hc)
-
-
-class WeatherFeed:
-    """Background poller for the latest weather-radar frame over the view.
-
-    Mirrors ``Feed``: a daemon thread fetches the newest radar composite for
-    the currently-rendered window and the renderer picks it up on the next
-    repaint.  It only touches the network while weather is toggled on, and a
-    frame is only rendered when it was fetched for the exact view on screen
-    (radar is a raster tied to a bbox, so a stale frame from a different pan/
-    zoom would be misaligned — better to show nothing until the new one lands).
-    """
-
-    def __init__(self, lat, lon, theme=None, nudge=False):
-        self._home = (lat, lon)
-        self._theme = theme
-        self._source = None
-        self.rgba = None
-        self.pw = self.ph = 0
-        self.frame_view = None   # _view_key the current frame was fetched for
-        self.label = ""
-        self.attribution = ""
-        self.updated = None
-        self.error = None
-        self._view = None        # (bbox, gw, hc) requested by the renderer
-        self._view_key = None
-        self._enabled = False
-        self._wake = threading.Event()
-        self._lock = threading.Lock()
-        self._nudge = nudge
-
-    def set_enabled(self, on):
-        with self._lock:
-            if on == self._enabled:
-                return
-            self._enabled = on
-            if not on:  # drop the frame so a re-enable can't flash stale data
-                self.rgba = None
-                self.frame_view = None
-        self._wake.set()
-
-    def set_view(self, bbox, gw, hc):
-        key = _view_key(bbox, gw, hc)
-        with self._lock:
-            if key == self._view_key:
-                return
-            self._view_key = key
-            self._view = (bbox, gw, hc)
-            wake = self._enabled
-        if wake:
-            self._wake.set()
-
-    def start(self):
-        threading.Thread(target=self._run, daemon=True).start()
-
-    def poll_once(self):
-        with self._lock:
-            if not self._enabled or self._view is None:
-                return
-            bbox, gw, hc = self._view
-            key = self._view_key
-        if self._source is None:
-            self._source = get_source(self._home[0], self._home[1], self._theme)
-        result = self._source.latest_rgba(bbox, gw, hc)
-        with self._lock:
-            if result is None:
-                self.rgba = None
-                self.frame_view = None
-            else:
-                self.pw, self.ph, self.rgba = result
-                self.frame_view = key
-            self.label = self._source.label
-            self.attribution = self._source.attribution
-            self.updated = time.time()
-            self.error = None
-
-    def snapshot(self):
-        with self._lock:
-            return (self.rgba, self.pw, self.ph, self.frame_view,
-                    self.label, self.attribution, self.updated, self.error)
-
-    def _run(self):
-        while True:
-            if self._enabled:
-                try:
-                    self.poll_once()
-                except Exception as exc:
-                    with self._lock:
-                        self.error = str(exc)
-                if self._nudge:
-                    nudge()
-                self._wake.wait(WEATHER_REFRESH_S)
-            else:
-                self._wake.wait()  # idle until toggled on
-            self._wake.clear()
-
-
 _place_cache = {}
 
 
@@ -446,6 +237,73 @@ def _fade_bg(basemap, dx, dy):
     return BG_PRIMARY
 
 
+SELECT_BG = lerp(BG_PRIMARY, MARKER, 0.28)   # under the selected blip
+
+
+def _draw_geo_path(fx, basemap, points, color, dotted=False):
+    """A (lat, lon) polyline in braille — the selected flight's route.
+
+    Longitudes are unwrapped against the view's centre, so a route that
+    crosses the antimeridian draws as one stroke.  ``dotted`` draws every
+    third dot: the part of a route still to fly, against the solid part
+    already flown.  The ink fades toward what it's drawn over, as trails
+    do, so a route reads as a guide rather than as traffic.
+    """
+    minlon, minlat, maxlon, maxlat = fx.bbox
+    mid = (minlon + maxlon) / 2
+    lon_span, lat_span = maxlon - minlon, maxlat - minlat
+    prev = None
+    count = 0
+    for lat, lon in points:
+        lon = mid + (lon - mid + 180.0) % 360.0 - 180.0
+        x = (lon - minlon) / lon_span * fx.dw
+        y = (maxlat - lat) / lat_span * fx.dh
+        if prev is not None:
+            px, py = prev
+            if not ((px < -2 and x < -2) or (px > fx.dw + 2 and x > fx.dw + 2)
+                    or (py < -2 and y < -2)
+                    or (py > fx.dh + 2 and y > fx.dh + 2)):
+                steps = int(max(abs(x - px), abs(y - py))) + 1
+                for i in range(steps):
+                    count += 1
+                    if dotted and count % 3:
+                        continue
+                    dx = int(px + (x - px) * i / steps)
+                    dy = int(py + (y - py) * i / steps)
+                    if 0 <= dx < fx.dw and 0 <= dy < fx.dh:
+                        fx._set_dot(dx, dy, lerp(_fade_bg(basemap, dx, dy),
+                                                 color, 0.7))
+        prev = (x, y)
+
+
+def _airport_focus(basemap, icao, overlays, hits):
+    """Overlay cells that light up the airport on the card: its label in
+    the marker colour, drawn even where the label budget left it out."""
+    from blips._airports import find_airport
+    ap = find_airport(icao)
+    if ap is None:
+        return {}
+    out = {}
+    for col, row, width, code in hits:
+        if code == icao:
+            for c in range(col, col + width + 1):
+                cell = overlays.get((c, row))
+                if cell is not None:
+                    out[(c, row)] = (cell[0], MARKER, None, True)
+            return out
+    x, y = _project(ap["lon"], ap["lat"], basemap.bbox, basemap.graph_w,
+                    basemap.height_cells)
+    col, row = int(x), int(y)
+    if not (0 <= col < basemap.graph_w and 0 <= row < basemap.height_cells):
+        return out
+    label = "◉" + (ap.get("iata") or ap["icao"])
+    for i, ch in enumerate(label):
+        if col + i < basemap.graph_w:
+            out[(col + i, row)] = (ch, MARKER, None, True)
+    hits.append((col, row, len(label) - 1, icao))
+    return out
+
+
 _TRAIL_STEPS = 24      # fade levels a trail is drawn in
 _trail_ramps = {}      # (background, colour) → that pair's fade levels
 
@@ -465,10 +323,16 @@ def _trail_ramp(base, color):
     return ramp
 
 
-def _draw_trail(fx, basemap, trail, color, now):
+def _draw_trail(fx, basemap, trail, color, now, bright=False):
     """A fading dotted history: newest fixes at 0.55 toward the blip's
     colour, dissolving to 0.15 over TRAIL_MAX_AGE (and staying there
-    for the oldest, so a long trail never vanishes mid-stroke)."""
+    for the oldest, so a long trail never vanishes mid-stroke).
+    ``bright`` draws the selected flight's trail in its own colour, solid
+    and joined, so the path it has flown stands out of the crowd."""
+    if bright:
+        pts = [(tlat, tlon) for tlat, tlon, _t in trail]
+        _draw_geo_path(fx, basemap, pts, color, dotted=False)
+        return
     minlon, minlat, maxlon, maxlat = fx.bbox
     lon_span, lat_span = maxlon - minlon, maxlat - minlat
     dw, dh = fx.dw, fx.dh
@@ -557,39 +421,66 @@ def _cpa_nm(a, alat, alon, b, blat, blon):
     return math.hypot(rx + vx * t, ry + vy * t)
 
 
-def _build_echo(rgba, pw, ph, graph_w, height_cells):
-    """Reduce a sub-pixel radar frame to a per-cell (r, g, b, weight) grid.
+_echo_cache = {}
 
-    Each cell spans two sub-pixel rows; their echo colours are alpha-blended
-    and the coverage is scaled by WX_DIM so the weather reads as a dim underlay
-    the traffic sits on top of.  Cells with no echo stay None.
+
+def _echo_for(frame, bbox, graph_w, height_cells):
+    """Resample a radar frame into the window on screen: a per-cell
+    (r, g, b, weight) grid, None where there's no echo.
+
+    The frame covers its own (padded) bbox at its own resolution, both
+    plain lat/lon, so each cell's two sub-pixel rows look up the frame
+    pixel under their centres — a pan or a zoom step paints the weather
+    it already has instead of a blank until the next fetch.  The two
+    samples' colours are alpha-blended and the coverage scaled by WX_DIM,
+    so the weather reads as a dim underlay the traffic sits on top of.
+    Returns fresh rows each call (the game tints its terrain into them).
     """
-    echo = [[None] * graph_w for _ in range(height_cells)]
-    cols = min(pw, graph_w)
-    for cy in range(height_cells):
-        y0 = cy * 2
-        if y0 >= ph:
-            break
-        r0 = y0 * pw
-        has_bot = (y0 + 1) < ph
-        r1 = (y0 + 1) * pw if has_bot else r0
-        erow = echo[cy]
-        for cx in range(cols):
-            i0 = (r0 + cx) * 4
-            a0 = rgba[i0 + 3]
-            if has_bot:
-                i1 = (r1 + cx) * 4
-                a1 = rgba[i1 + 3]
-            else:
-                i1, a1 = i0, 0
-            tw = a0 + a1
-            if not tw:
-                continue
-            r = (rgba[i0] * a0 + rgba[i1] * a1) // tw
-            g = (rgba[i0 + 1] * a0 + rgba[i1 + 1] * a1) // tw
-            b = (rgba[i0 + 2] * a0 + rgba[i1 + 2] * a1) // tw
-            erow[cx] = (r, g, b, (max(a0, a1) / 255.0) * WX_DIM)
-    return echo
+    rgba, pw, ph, fbbox = frame
+    key = (id(rgba), fbbox, bbox, graph_w, height_cells)
+    hit = _echo_cache.get(key)
+    if hit is None:
+        fminlon, fminlat, fmaxlon, fmaxlat = fbbox
+        minlon, minlat, maxlon, maxlat = bbox
+        fw, fh = fmaxlon - fminlon, fmaxlat - fminlat
+        cols = []
+        for cx in range(graph_w):
+            lon = minlon + (cx + 0.5) / graph_w * (maxlon - minlon)
+            px = int((lon - fminlon) / fw * pw)
+            cols.append(px if 0 <= px < pw else -1)
+        hit = []
+        for cy in range(height_cells):
+            ys = []
+            for sub in (0.25, 0.75):
+                lat = maxlat - (cy + sub) / height_cells * (maxlat - minlat)
+                py = int((fmaxlat - lat) / fh * ph)
+                ys.append(py * pw if 0 <= py < ph else -1)
+            r0, r1 = ys
+            erow = [None] * graph_w
+            for cx, px in enumerate(cols):
+                if px < 0:
+                    continue
+                if r0 >= 0:
+                    i0 = (r0 + px) * 4
+                    a0 = rgba[i0 + 3]
+                else:
+                    i0, a0 = 0, 0
+                if r1 >= 0:
+                    i1 = (r1 + px) * 4
+                    a1 = rgba[i1 + 3]
+                else:
+                    i1, a1 = i0, 0
+                tw = a0 + a1
+                if not tw:
+                    continue
+                r = (rgba[i0] * a0 + rgba[i1] * a1) // tw
+                g = (rgba[i0 + 1] * a0 + rgba[i1 + 1] * a1) // tw
+                b = (rgba[i0 + 2] * a0 + rgba[i1 + 2] * a1) // tw
+                erow[cx] = (r, g, b, (max(a0, a1) / 255.0) * WX_DIM)
+            hit.append(erow)
+        _echo_cache.clear()
+        _echo_cache[key] = hit
+    return [row[:] for row in hit]
 
 
 def compose(basemap, fx, overlays, graph_w, height_cells, echo=None):
@@ -621,7 +512,10 @@ def compose(basemap, fx, overlays, graph_w, height_cells, echo=None):
                     bg_rgb = lerp(bg_rgb, (e[0], e[1], e[2]), e[3])
             ov = overlays.get((cx, cy))
             if ov is not None:
-                row.append((ov[0], ov[1], bg_rgb, False))
+                if len(ov) > 2:   # (ch, fg, bg or None, bold)
+                    row.append((ov[0], ov[1], ov[2] or bg_rgb, ov[3]))
+                else:
+                    row.append((ov[0], ov[1], bg_rgb, False))
                 continue
             mask = fdots[cx]
             if mask:
@@ -905,7 +799,10 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
                  weather=None, show_weather=False, drag_offset=None,
                  routes=None, pins=None, lines_geo=None, game_footer=None,
                  header_note=None, rings_at=None, ground=None,
-                 hover_card=None, pin_card=None, **_):
+                 hover_card=None, pin_card=None, selected=None,
+                 route_geo=None, aircraft_filter=None, label_mode=None,
+                 airport_focus=None, header_extra=None, footer_hint=None,
+                 blocked=None, **_):
     """Render one frame of the scope.
 
     Hovering a blip floats a chip of flight detail beside the pointer
@@ -928,6 +825,17 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
     ``ground`` is a callable(bbox, graph_w, height_cells) → echo grid (or
     None): a second underlay tint below the weather — terrain — filling
     only the cells the weather leaves empty.
+
+    The live scope's hooks: ``selected`` is the hex of the flight on the
+    card (always labelled, highlighted, its trail drawn bright);
+    ``route_geo`` is a list of ``(points, colour, dotted)`` paths in
+    (lat, lon) — the selected flight's route; ``aircraft_filter(ac)``
+    hides what it rejects (the selected flight excepted); ``label_mode``
+    is "full", "callsign" or "off"; ``airport_focus`` is the ICAO code of
+    the airport on the card; ``header_extra`` is a list of (text, rgb)
+    appended to the header; ``footer_hint`` replaces the key hint;
+    ``blocked`` is a list of 1-based (col0, row0, col1, row1) screen
+    rectangles (panels) where the pointer focuses nothing.
     """
     cols, rows = get_terminal_size()
     graph_w = max(20, cols)
@@ -966,7 +874,12 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
     basemap = _get_basemap(bbox, graph_w, height_cells)
     aircraft, trails, updated, source, error = feed.snapshot()
     if not show_ground:
-        aircraft = [ac for ac in aircraft if not ac["ground"]]
+        aircraft = [ac for ac in aircraft
+                    if not ac["ground"] or ac["hex"] == selected]
+    total = len(aircraft)
+    if aircraft_filter is not None:
+        aircraft = [ac for ac in aircraft
+                    if ac["hex"] == selected or aircraft_filter(ac)]
 
     # weather underlay: keep the poller aimed at the live view, but only paint
     # a frame that was fetched for exactly this window (else it'd be misaligned)
@@ -974,11 +887,11 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
     wx_label = wx_error = None
     if show_weather and weather is not None:
         weather.set_view(bbox, graph_w, height_cells)
-        rgba, pw, ph, frame_view, wx_label, _attr, _wxup, wx_error = \
-            weather.snapshot()
-        if rgba is not None and frame_view == _view_key(bbox, graph_w,
-                                                        height_cells):
-            echo = _build_echo(rgba, pw, ph, graph_w, height_cells)
+        snap = weather.snapshot()
+        wx_label, wx_error = snap[4], snap[7]
+        frame = weather.frame()
+        if frame is not None:
+            echo = _echo_for(frame, bbox, graph_w, height_cells)
 
     # terrain (or any ground tint) sits under the weather: it only fills
     # cells the precipitation leaves empty, so storms always read on top
@@ -1007,16 +920,23 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
 
     # aircraft positions, centre-out so central traffic gets labels first
     minlon, minlat, maxlon, maxlat = bbox
+    mid = (minlon + maxlon) / 2
     placed = []
     for ac in aircraft:
         alat, alon = extrapolate(ac, now)
+        if not minlon <= alon <= maxlon:
+            # a view across the antimeridian runs past ±180: use the copy
+            # of the longitude that falls on screen
+            alon = mid + (alon - mid + 180.0) % 360.0 - 180.0
         if not (minlon <= alon <= maxlon and minlat <= alat <= maxlat):
             continue
         col = int((alon - minlon) / (maxlon - minlon) * graph_w)
         row = int((maxlat - alat) / (maxlat - minlat) * height_cells)
         d2 = (col - graph_w / 2) ** 2 + ((row - height_cells / 2) * 2) ** 2
         placed.append((d2, ac, alat, alon, col, row))
-    placed.sort(key=lambda p: p[0])
+    # centre-out, so central traffic gets labels first — the selected
+    # flight before all of it
+    placed.sort(key=lambda p: (p[1]["hex"] != selected, p[0]))
 
     blip_cells = {(p[4], p[5]) for p in placed
                   if 0 <= p[4] < graph_w and 0 <= p[5] < height_cells}
@@ -1029,19 +949,29 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
                             blip_color(p[1]), now)
         else:
             fx = _trail_layer(basemap, placed, trails, updated, now)
+    if route_geo:
+        for points, rcolor, dotted in route_geo:
+            _draw_geo_path(fx, basemap, points, rcolor, dotted)
+    sel = next((p for p in placed if p[1]["hex"] == selected), None)
+    if sel is not None:
+        _draw_trail(fx, basemap, trails.get(selected, ()), blip_color(sel[1]),
+                    now, bright=True)
+    mode = label_mode or ("full" if show_labels else "off")
     air = {}
     for _d2, ac, alat, alon, col, row in placed:
         color = blip_color(ac)
         _draw_leader(fx, basemap, ac, alat, alon, color)
-        if ac["ground"]:
+        is_sel = ac["hex"] == selected
+        if ac["ground"] and not is_sel:
             continue  # ground targets: dim blip only, no data block
-        if not show_labels:
+        if mode == "off" and not is_sel:
             continue  # labels off: bare glyphs, the scope stripped to blips
         # declutter: a data block draws only where it fits whole — try the
         # right of the blip, then flip left, then the rows above and below
         # (the way a STARS leader swings through the quadrants), so a knot
         # of traffic sheds labels outward instead of just going mute
-        label = data_block(ac)
+        label = (data_block(ac) if (mode == "full" or is_sel)
+                 else ac["callsign"])
         for c0, r0 in ((col + 1, row), (col - len(label), row),
                        (col + 1, row - 1), (col - len(label), row - 1),
                        (col + 1, row + 1), (col - len(label), row + 1)):
@@ -1050,9 +980,12 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
                    and (c, r) not in air and (c, r) not in blip_cells
                    for c, r in cells):
                 for i, (c, r) in enumerate(cells):
-                    air[(c, r)] = (label[i],
-                                   color if i < len(ac["callsign"])
-                                   else MUTED)
+                    head = i < len(ac["callsign"])
+                    if is_sel:
+                        air[(c, r)] = (label[i], color if head else MUTED,
+                                       None, head)
+                    else:
+                        air[(c, r)] = (label[i], color if head else MUTED)
                 break
 
     # conflict pairs: a line tying the two blips the box is alarming about,
@@ -1095,9 +1028,18 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
     # blips last: never covered, even by another aircraft's data block
     for _d2, ac, _alat, _alon, col, row in placed:
         if 0 <= col < graph_w and 0 <= row < height_cells:
-            air[(col, row)] = (blip_glyph(ac), blip_color(ac))
+            if ac["hex"] == selected:
+                air[(col, row)] = (blip_glyph(ac), blip_color(ac), SELECT_BG,
+                                   True)
+            else:
+                air[(col, row)] = (blip_glyph(ac), blip_color(ac))
 
     overlays = dict(basemap.airport_overlays())
+    airport_hits = basemap.airport_hits()
+    if airport_focus:
+        overlays.update(_airport_focus(basemap, airport_focus, overlays,
+                                       airport_hits))
+        airport_hits = basemap.airport_hits() + airport_hits
     # game pins (sector fixes, procedure names): glyph + as much of the label
     # as fits, under the traffic — a data block always outranks a fix name.
     # A pin may carry ``meta``: a colour for the label text (so an arrival
@@ -1196,6 +1138,10 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
 
     # pointer focus: nearest blip within a few cells of the mouse
     focused = focused_pin = None
+    if mouse_pos is not None and any(
+            c0 <= mouse_pos[0] <= c1 and r0 <= mouse_pos[1] <= r1
+            for c0, r0, c1, r1 in blocked or ()):
+        mouse_pos = None      # over a panel: the panel has the pointer
     if mouse_pos is not None:
         mcol, mrow = mouse_pos[0] - 1, mouse_pos[1] - 2  # screen → cell
         if placed:
@@ -1216,8 +1162,13 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
     airborne = sum(1 for ac in aircraft if not ac["ground"])
     ground = len(aircraft) - airborne
     counts = f"✈ {airborne}" if updated else "✈ …"
-    if updated and ground and show_ground:
+    if updated and aircraft_filter is not None:
+        counts = f"✈ {len(aircraft)} of {total}"
+    elif updated and ground and show_ground:
         counts += f" · {ground} gnd"
+    sweep = getattr(feed, "sweep", None)
+    if sweep:
+        counts += f" · sweeping {sweep[0]}/{sweep[1]}"
     fetching, fetch_started, trying = (
         feed.fetch_status() if hasattr(feed, "fetch_status")
         else (False, None, ""))
@@ -1255,9 +1206,13 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
     else:
         text_overlay = None
 
+        extra = "".join(f"  {fg(*rgb)}{text}{RESET}"
+                        for text, rgb in header_extra or ())
+
         def _header(place_str):
             return (f"{fg(*MARKER)}{BOLD}⬤ blips{RESET}  {fg(*MUTED)}"
-                    f"{place_str}{RESET}  {fg(*DIM)}{counts} · {status}{RESET}")
+                    f"{place_str}{RESET}  {fg(*DIM)}{counts} · {status}{RESET}"
+                    f"{extra}")
 
         header = _header(place)
         over = visible_len(header) - cols
@@ -1281,9 +1236,11 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
             else:
                 src_note += " · wx …"
         left = f"{fg(*DIM)}{src_note}{RESET}"
-        ring_note = f"rings {_ring_spacing_nm(zoom)} nm" if show_rings else ""
-        hint = (f"{fg(*DIM)}{ring_note} · +/- zoom · drag pan · t trails "
-                f"· r rings · g ground · w weather · q quit{RESET}"
+        ring_note = f"rings {_ring_spacing_nm(zoom)} nm · " if show_rings else ""
+        hint_text = footer_hint if footer_hint is not None else (
+            "+/- zoom · drag pan · t trails · r rings · g ground · "
+            "w weather · q quit")
+        hint = (f"{fg(*DIM)}{ring_note}{hint_text}{RESET}"
                 if sys.stdout.isatty() else "")
         for foot in (f"{left}  {hint}", f"{left}", ""):
             if visible_len(foot) <= cols:
@@ -1301,7 +1258,10 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
                        text_overlay=text_overlay,
                        gw=graph_w, hc=height_cells,
                        geo_reticle=rings_at is not None,
-                       hits=[(p[4], p[5], p[1]["callsign"]) for p in placed])
+                       hits=[(p[4], p[5], p[1]["callsign"], p[1]["hex"])
+                             for p in placed],
+                       airports=airport_hits, bbox=bbox,
+                       header_rows=0 if game_footer is not None else 1)
 
     parts = ([header] if header is not None else []) + list(map_lines)
     if foot is not None:
@@ -1325,12 +1285,10 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
     return out
 
 
-def hit_test(screen_col, screen_row):
-    """Callsign of the blip near a screen cell, or None (game click-to-hail).
-
-    Uses the last clean frame's blip positions; same tolerance as hover
-    focus (a couple of rows, a few columns — cells are tall).
-    """
+def _hit(screen_col, screen_row):
+    """The nearest blip record (col, row, callsign, hex) to a screen cell,
+    or None — same tolerance as hover focus (a couple of rows, a few
+    columns: cells are tall)."""
     hits = _last_frame.get("hits")
     if not hits:
         return None
@@ -1338,8 +1296,38 @@ def hit_test(screen_col, screen_row):
     best = min(hits, key=lambda h: (h[0] - mcol) ** 2
                + ((h[1] - mrow) * 2) ** 2)
     if abs(best[0] - mcol) <= 4 and abs(best[1] - mrow) <= 2:
-        return best[2]
+        return best
     return None
+
+
+def hit_test(screen_col, screen_row):
+    """Callsign of the blip near a screen cell, or None (game click-to-hail)."""
+    best = _hit(screen_col, screen_row)
+    return best[2] if best else None
+
+
+def hit_aircraft(screen_col, screen_row):
+    """Hex of the blip near a screen cell, or None."""
+    best = _hit(screen_col, screen_row)
+    return best[3] if best else None
+
+
+def hit_airport(screen_col, screen_row):
+    """ICAO code of the airport label under a screen cell, or None."""
+    mcol = screen_col - 1
+    mrow = screen_row - 1 - _last_frame.get("header_rows", 1)
+    for col, row, width, icao in _last_frame.get("airports") or ():
+        if row == mrow and col - 1 <= mcol <= col + width:
+            return icao
+    return None
+
+
+def last_view():
+    """(bbox, graph_w, height_cells, header_rows) of the last full frame."""
+    f = _last_frame
+    if "bbox" not in f:
+        return None
+    return f["bbox"], f["gw"], f["hc"], f.get("header_rows", 1)
 
 
 def main():
@@ -1372,110 +1360,37 @@ def main():
             sys.exit(1)
 
     live = resolve_live(args)
-    zoom = [max(0.4, min(24.0, args.zoom))]
-    center = [lat, lon]
-    feed = Feed(nudge=live)
-    routes = RouteLookup(nudge=live)
-    feed.set_view(lat, lon, view_radius_nm(
-        bbox_for(lat, lon, zoom[0], 80, 40), lat, lon))
-
-    from blips._radar_sources import theme_id
-    wx_theme = theme_id(args.wx_theme)
-    weather = WeatherFeed(lat, lon, theme=wx_theme, nudge=live)
-
-    if not live:
-        try:
-            feed.poll_once()
-        except Exception as exc:
-            feed.error = str(exc)
-        if args.weather:
-            cols, rows = get_terminal_size()
-            gw, hc = max(20, cols), max(8, rows - 2)
-            weather.set_enabled(True)
-            weather.set_view(bbox_for(lat, lon, zoom[0], gw, hc), gw, hc)
-            try:
-                weather.poll_once()
-            except Exception as exc:
-                weather.error = str(exc)
-        print(render_scope(center, zoom[0], feed, playing=False,
-                           weather=weather, show_weather=bool(args.weather)))
+    if live:
+        from blips._app import main as app_main
+        app_main(args, lat, lon)
         return
 
-    toggles = {"t": [True], "r": [True], "g": [True], "w": [bool(args.weather)]}
-
-    def _sync_feed():
+    zoom = max(0.08, min(60.0, args.zoom))
+    feed = Feed()
+    cols, rows = get_terminal_size()
+    view = bbox_for(lat, lon, zoom, max(20, cols), max(8, rows - 2))
+    feed.set_view(lat, lon, view_radius_nm(view, lat, lon), view)
+    weather = WeatherFeed(lat, lon, theme=_wx_theme(args))
+    try:
+        feed.poll_once()
+    except Exception as exc:
+        feed.error = str(exc)
+    if args.weather:
         cols, rows = get_terminal_size()
         gw, hc = max(20, cols), max(8, rows - 2)
-        bbox = bbox_for(center[0], center[1], zoom[0], gw, hc)
-        feed.set_view(center[0], center[1],
-                      view_radius_nm(bbox, center[0], center[1]))
-
-    def _sync_weather():
-        cols, rows = get_terminal_size()
-        gw, hc = max(20, cols), max(8, rows - 2)
-        weather.set_view(bbox_for(center[0], center[1], zoom[0], gw, hc),
-                         gw, hc)
-
-    def on_action(key):
-        if key == "+":
-            zoom[0] = max(0.4, zoom[0] / 1.5)
-        elif key == "-":
-            zoom[0] = min(24.0, zoom[0] * 1.5)
-        elif key in toggles:
-            toggles[key][0] = not toggles[key][0]
-            if key == "w":
-                weather.set_enabled(toggles["w"][0])
-                _sync_weather()
-            return True
-        else:
-            return False
-        _sync_feed()
-        return True
-
-    drag_preview = [None]  # (dcol, drow) while a drag is mid-flight, else None
-
-    def on_drag(dcol, drow, done):
-        if not done:
-            # live feedback: shift the last frame so the map tracks the cursor
-            # immediately; the real re-render happens once the button releases
-            drag_preview[0] = (dcol, drow) if (dcol or drow) else None
-            return bool(dcol or drow)
-        drag_preview[0] = None
-        if not (dcol or drow):
-            return False
-        # dragging pulls the map, so the view centre moves the opposite way
-        cols, rows = get_terminal_size()
-        gw, hc = max(20, cols), max(8, rows - 2)
-        lon_span = (zoom[0] * (gw / (hc * 2))
-                    / max(0.2, math.cos(math.radians(center[0]))))
-        center[0] = max(-80.0, min(80.0, center[0] + drow * zoom[0] / hc))
-        center[1] += -dcol * lon_span / gw
-        if center[1] > 180.0:
-            center[1] -= 360.0
-        elif center[1] < -180.0:
-            center[1] += 360.0
-        _sync_feed()
-        return True
-
-    feed.start()
-    weather.start()
-    if toggles["w"][0]:
         weather.set_enabled(True)
-        _sync_weather()
-    live_loop(
-        lambda playing=True, mouse_pos=None, **_: render_scope(
-            center, zoom[0], feed, playing=playing,
-            mouse_pos=mouse_pos, show_trails=toggles["t"][0],
-            show_rings=toggles["r"][0], show_ground=toggles["g"][0],
-            weather=weather, show_weather=toggles["w"][0],
-            drag_offset=drag_preview[0], routes=routes),
-        interval=REFRESH_S,
-        mouse=True,
-        auto_play=True,
-        play_interval=0.5,  # dead-reckoning glide rate between polls
-        on_action=on_action,
-        on_drag=on_drag,
-    )
+        weather.set_view(bbox_for(lat, lon, zoom, gw, hc), gw, hc)
+        try:
+            weather.poll_once()
+        except Exception as exc:
+            weather.error = str(exc)
+    print(render_scope([lat, lon], zoom, feed, playing=False,
+                       weather=weather, show_weather=bool(args.weather)))
+
+
+def _wx_theme(args):
+    from blips._radar_sources import theme_id
+    return theme_id(args.wx_theme)
 
 
 if __name__ == "__main__":

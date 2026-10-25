@@ -365,12 +365,20 @@ class Search:
             world_keys.append(("reg", Q.replace(" ", "")))
         if is_hex:
             world_keys.append(("hex", compact.lower()))
+        answered = 0
         for key in ([] if found_here else world_keys):
             found = self._ask_world(*key)
+            if found is not None:
+                answered += 1
             for ac in sorted(found or (), key=dist):
                 if ac["hex"] in here:
                     continue
                 add_flight(ac, "world")
+        if (world_keys and not found_here and answered == len(world_keys)
+                and not any(r.kind == "flight" for r in out)):
+            out.append(Result("note", f"{q.upper()} isn't flying where the "
+                              "feeds can see", "not airborne, or no "
+                              "receiver in range"))
 
         # 6. filters: airline, type, keywords
         kw = keyword_filter(q)

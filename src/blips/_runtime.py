@@ -29,6 +29,9 @@ def blips_parser():
                    help="scope centre as 'lat,lng' or a place name")
     p.add_argument("--zoom", type=float, default=3.0,
                    help="degrees of latitude shown top-to-bottom (default 3)")
+    p.add_argument("--find", default=None, metavar="QUERY",
+                   help="open with a search: a flight (DL1673, UA 123, "
+                        "N123AB), a route (BOS-SFO), an airport or a place")
     p.add_argument("--weather", action=argparse.BooleanOptionalAction,
                    default=True,
                    help="weather-radar underlay, on by default "
