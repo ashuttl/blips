@@ -63,6 +63,7 @@ ALT_STOPS = (
 WX_DIM = 0.6          # weather is an ambient underlay; keep traffic readable on top
 MAX_EXTRAP_S = 20.0   # cap dead reckoning so a stale fix doesn't fly away
 ARROWS = "↑↗→↘↓↙←↖"
+HEAVY_ARROWS = "⇑⇗⇒⇘⇓⇙⇐⇖"
 COMPASS = ("N", "NE", "E", "SE", "S", "SW", "W", "NW")
 SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"  # header pulse while the first fetch is in flight
 
@@ -116,13 +117,20 @@ def blip_color(ac):
 
 
 def blip_glyph(ac):
+    """The blip: an arrow along the track, doubled for a heavy (ADS-B
+    emitter category A5) so the widebodies stand out of a crowd, and a
+    rotor star for a helicopter (A7), whose track says little."""
     if ac.get("glyph"):
         return ac["glyph"]
     if ac["ground"]:
         return "·"
+    category = ac.get("category")
+    if category == "A7":
+        return "✱"
     if ac["track"] is None:
         return "•"
-    return ARROWS[round(ac["track"] / 45.0) % 8]
+    arrows = HEAVY_ARROWS if category == "A5" else ARROWS
+    return arrows[round(ac["track"] / 45.0) % 8]
 
 
 def trend_arrow(ac):
@@ -957,6 +965,11 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
         _draw_trail(fx, basemap, trails.get(selected, ()), blip_color(sel[1]),
                     now, bright=True)
     mode = label_mode or ("full" if show_labels else "off")
+    # auto: as many full data blocks as the screen has room to read —
+    # about one per ninety cells — handed out centre-out, so a busy
+    # metro keeps a legible middle and thins to bare blips at the edges
+    budget = (graph_w * height_cells) // 90 if mode == "auto" else None
+    labelled = 0
     air = {}
     for _d2, ac, alat, alon, col, row in placed:
         color = blip_color(ac)
@@ -966,19 +979,25 @@ def render_scope(center, zoom, feed, playing=True, mouse_pos=None,
             continue  # ground targets: dim blip only, no data block
         if mode == "off" and not is_sel:
             continue  # labels off: bare glyphs, the scope stripped to blips
+        if budget is not None and labelled >= budget and not is_sel:
+            continue
         # declutter: a data block draws only where it fits whole — try the
         # right of the blip, then flip left, then the rows above and below
         # (the way a STARS leader swings through the quadrants), so a knot
         # of traffic sheds labels outward instead of just going mute
-        label = (data_block(ac) if (mode == "full" or is_sel)
-                 else ac["callsign"])
+        label = (ac["callsign"] if mode == "callsign" and not is_sel
+                 else data_block(ac))
         for c0, r0 in ((col + 1, row), (col - len(label), row),
                        (col + 1, row - 1), (col - len(label), row - 1),
                        (col + 1, row + 1), (col - len(label), row + 1)):
             cells = [(c0 + i, r0) for i in range(len(label))]
+            # a block keeps a column of air either side of it, so two
+            # neighbours never run together into one long word
             if all(0 <= c < graph_w and 0 <= r < height_cells
                    and (c, r) not in air and (c, r) not in blip_cells
-                   for c, r in cells):
+                   for c, r in cells) and \
+                    (c0 - 1, r0) not in air and (c0 + len(label), r0) not in air:
+                labelled += 1
                 for i, (c, r) in enumerate(cells):
                     head = i < len(ac["callsign"])
                     if is_sel:

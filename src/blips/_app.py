@@ -52,7 +52,7 @@ SEEN_KEEP_S = 1800.0     # how long a flight seen earlier stays searchable
 LOST_S = 60.0            # a selected flight unseen this long: "signal lost"
 ZOOM_STEP = 1.5          # + and -
 WHEEL_STEP = 1.25        # a wheel notch
-LABEL_MODES = ("full", "callsign", "off")
+LABEL_MODES = ("auto", "full", "callsign", "off")
 
 
 def _geometry():
@@ -90,7 +90,7 @@ class ScopeApp(LiveApp):
         self.airport = None       # airport dict on the card
         self.filters = []
         self.toggles = {"t": True, "r": True, "g": True, "w": weather_on}
-        self.label_mode = "full"
+        self.label_mode = "auto"
         self.help = False
         self.toast = None         # (text, until)
         self.seen = {}            # hex → record, for search
@@ -391,7 +391,8 @@ class ScopeApp(LiveApp):
         if k == "l":
             i = LABEL_MODES.index(self.label_mode)
             self.label_mode = LABEL_MODES[(i + 1) % len(LABEL_MODES)]
-            self.flash({"full": "labels: callsign and altitude",
+            self.flash({"auto": "labels: as many as stay readable",
+                        "full": "labels: every flight",
                         "callsign": "labels: callsign only",
                         "off": "labels off"}[self.label_mode])
             return True
@@ -789,7 +790,7 @@ class ScopeApp(LiveApp):
             ("scroll", "zoom about the pointer · + - zoom · arrows pan"),
             ("drag", "pan"),
             ("x", "clear filters"),
-            ("l", "labels: full · callsign · off"),
+            ("l", "labels: auto · all · callsign only · off"),
             ("t r g w", "trails · range rings · ground traffic · weather"),
             ("space", "pause the glide"),
             ("esc", "close the card, then clear filters"),
